@@ -5,7 +5,7 @@ struct ReviewView: View {
     @EnvironmentObject private var state: AppState
     @State private var revealed = false
 
-    private var current: PersonalCard? { state.dueCards.first }
+    private var current: PersonalCard? { state.reviewCards.first }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -39,11 +39,21 @@ struct ReviewView: View {
                 }
                 .padding(32)
             } else {
-                PlaceholderView(
-                    symbol: "checkmark.circle",
-                    title: "All caught up",
-                    detail: state.stats.totalCards == 0 ? "Add a word from Dictionary or Speak to start learning." : "No cards are due right now."
-                )
+                VStack(spacing: 0) {
+                    PlaceholderView(
+                        symbol: "checkmark.circle",
+                        title: state.isReviewingAll ? "Review complete" : "All caught up",
+                        detail: emptyReviewDetail
+                    )
+                    if state.stats.totalCards > 0 {
+                        Button(state.isReviewingAll ? "Review All Again" : "Review All Cards") {
+                            state.startReviewAll()
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.large)
+                        .padding(.bottom, 40)
+                    }
+                }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
@@ -52,20 +62,44 @@ struct ReviewView: View {
             Task { await state.refreshStudyData() }
         }
         .onChange(of: current?.id) { _, _ in revealed = false }
+        .onChange(of: state.selectedListID) { _, _ in revealed = false }
+        .onChange(of: state.isReviewingAll) { _, _ in revealed = false }
     }
 
     private var statsBar: some View {
-        HStack(spacing: 28) {
+        HStack(spacing: 20) {
+            Picker("List", selection: Binding(
+                get: { state.selectedListID },
+                set: { state.selectWordList($0) }
+            )) {
+                ForEach(state.wordLists) { list in Text(list.name).tag(list.id) }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .frame(maxWidth: 180)
+
             stat(state.stats.dueCards, "Due")
             stat(state.stats.reviewsToday, "Today")
             stat(state.stats.streakDays, "Day streak")
             Spacer()
+            Button(state.isReviewingAll ? "Due Only" : "Review All") {
+                if state.isReviewingAll { state.showDueReviews() }
+                else { state.startReviewAll() }
+            }
+            .disabled(state.stats.totalCards == 0)
             Text("Space reveal · 1–4 rate")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
         .padding(.horizontal, 22)
         .padding(.vertical, 12)
+    }
+
+    private var emptyReviewDetail: String {
+        if state.stats.totalCards == 0 {
+            return "Add a word or phrase from Dictionary or Speak to start learning."
+        }
+        return state.isReviewingAll ? "You reviewed every active card in this list." : "No cards are due right now. You can still review the whole list."
     }
 
     private func stat(_ number: Int, _ label: String) -> some View {

@@ -57,10 +57,22 @@ struct EntryRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             GermanWordView(entry: entry)
-            Text(entry.english)
+            ForEach(entry.meanings.prefix(3)) { meaning in
+                HStack(spacing: 6) {
+                    Text(meaning.english)
+                        .lineLimit(1)
+                    if entry.gender == .unknown, meaning.gender != .unknown {
+                        GenderBadge(gender: meaning.gender)
+                    }
+                }
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
-                .lineLimit(2)
+            }
+            if entry.meanings.count > 3 {
+                Text("+ \(entry.meanings.count - 3) more")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            }
         }
         .padding(.vertical, 4)
         .accessibilityElement(children: .combine)
@@ -69,6 +81,7 @@ struct EntryRow: View {
 
 struct EntryDetailView: View {
     let entry: DictionaryEntry
+    var addLabel = "Add to My words"
     var addAction: (() -> Void)?
 
     private var info: WordInfo { GermanMorphology.info(for: entry) }
@@ -78,20 +91,12 @@ struct EntryDetailView: View {
             VStack(alignment: .leading, spacing: 22) {
                 VStack(alignment: .leading, spacing: 8) {
                     GermanWordView(entry: entry, font: .largeTitle.weight(.bold))
-                    Text(entry.english)
-                        .font(.title2)
-                        .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
+                    meanings
                     HStack {
                         Text(entry.kind.label)
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(.secondary)
                         GenderBadge(gender: entry.gender)
-                        if let usage = entry.usage {
-                            Text(usage)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
                     }
                 }
 
@@ -115,7 +120,7 @@ struct EntryDetailView: View {
 
                 if let addAction {
                     Button(action: addAction) {
-                        Label("Add to My words", systemImage: "plus.circle.fill")
+                        Label(addLabel, systemImage: "plus.circle.fill")
                     }
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.return, modifiers: [.command])
@@ -128,6 +133,31 @@ struct EntryDetailView: View {
             .frame(maxWidth: 700, alignment: .leading)
             .padding(28)
         }
+    }
+
+    private var meanings: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            ForEach(Array(entry.meanings.enumerated()), id: \.element.id) { index, meaning in
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    if entry.meanings.count > 1 {
+                        Text("\(index + 1).")
+                            .foregroundStyle(.tertiary)
+                    }
+                    Text(meaning.english)
+                        .textSelection(.enabled)
+                    if entry.gender == .unknown, meaning.gender != .unknown {
+                        GenderBadge(gender: meaning.gender)
+                    }
+                    if let usage = meaning.usage {
+                        Text(usage)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+        .font(.title2)
+        .foregroundStyle(.secondary)
     }
 
     private var infoTable: some View {

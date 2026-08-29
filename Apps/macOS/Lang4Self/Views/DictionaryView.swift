@@ -31,7 +31,7 @@ struct DictionaryView: View {
                 Divider()
 
                 if state.searchQuery.isEmpty {
-                    PlaceholderView(symbol: "text.magnifyingglass", title: "Search locally", detail: "Type a German or English word. Press ⌘F from anywhere.")
+                    PlaceholderView(symbol: "text.magnifyingglass", title: "Search locally", detail: "Type a German or English word or phrase. Press ⌘F from anywhere.")
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else if state.searchResults.isEmpty {
                     PlaceholderView(symbol: "questionmark.folder", title: "No match", detail: "Try another spelling or import the complete dict.cc file in Settings.")
@@ -41,7 +41,7 @@ struct DictionaryView: View {
                         EntryRow(entry: entry)
                             .tag(entry)
                             .contextMenu {
-                                Button("Add to My words") { state.addToPersonalDictionary(entry) }
+                                Button(addLabel) { state.addToPersonalDictionary(entry) }
                             }
                     }
                     .listStyle(.inset)
@@ -50,7 +50,7 @@ struct DictionaryView: View {
             .frame(minWidth: 285, idealWidth: 340)
 
             if let entry = state.selectedEntry {
-                EntryDetailView(entry: entry) {
+                EntryDetailView(entry: entry, addLabel: addLabel) {
                     state.addToPersonalDictionary(entry)
                 }
             } else {
@@ -67,6 +67,10 @@ struct DictionaryView: View {
         .onAppear {
             if state.searchQuery.isEmpty { searchFocused = true }
         }
+    }
+
+    private var addLabel: String {
+        "Add to \(state.selectedWordList?.name ?? "My words")"
     }
 }
 

@@ -8,6 +8,7 @@ final class SpeechRecognizer: NSObject, ObservableObject {
         case idle
         case requestingPermission
         case listening
+        case processing
         case guess
         case unavailable(String)
     }
@@ -20,19 +21,25 @@ final class SpeechRecognizer: NSObject, ObservableObject {
     private let audioEngine = AVAudioEngine()
     private var request: SFSpeechAudioBufferRecognitionRequest?
     private var task: SFSpeechRecognitionTask?
-    private var silenceWorkItem: DispatchWorkItem?
     private var hasInputTap = false
+    private var recognitionFinished = false
+    private var startGeneration = UUID()
     private var recognitionGeneration = UUID()
 
     var isListening: Bool { phase == .listening }
 
     func start() {
+        guard phase != .requestingPermission, phase != .listening else { return }
+        let generation = UUID()
+        startGeneration = generation
         Task {
             phase = .requestingPermission
             guard await permissionsGranted() else {
+                guard startGeneration == generation else { return }
                 phase = .unavailable("Microphone and Speech Recognition access are required. Enable both in System Settings → Privacy & Security.")
                 return
             }
+            guard startGeneration == generation else { return }
             beginRecognition()
         }
     }
@@ -42,8 +49,12 @@ final class SpeechRecognizer: NSObject, ObservableObject {
         start()
     }
 
-    func acceptCurrentGuess() {
-        guard !transcription.isEmpty else { return }
+    func stop() {
+        if phase == .requestingPermission {
+            startGeneration = UUID()
+            phase = .idle
+            return
+        }
         finishListening()
     }
 
@@ -72,6 +83,7 @@ final class SpeechRecognizer: NSObject, ObservableObject {
         cancelAudioOnly()
         transcription = ""
         confidence = 0
+        recognitionFinished = false
 
         guard let recognizer, recognizer.isAvailable, recognizer.supportsOnDeviceRecognition else {
             phase = .unavailable("German on-device dictation is not available yet. Install German Dictation in System Settings → Keyboard → Dictation Languages.")
@@ -103,11 +115,19 @@ final class SpeechRecognizer: NSObject, ObservableObject {
                 if let result {
                     self.transcription = result.bestTranscription.formattedString
                     self.confidence = result.bestTranscription.segments.last?.confidence ?? 0
-                    self.scheduleSilenceFinish()
-                    if result.isFinal { self.finishListening() }
-                } else if let error, self.transcription.isEmpty {
-                    self.cancelAudioOnly()
-                    self.phase = .unavailable(error.localizedDescription)
+                    if result.isFinal {
+                        self.recognitionFinished = true
+                        if self.phase == .processing { self.completeRecognition() }
+                    }
+                }
+                if let error {
+                    self.recognitionFinished = true
+                    if self.phase == .processing {
+                        self.completeRecognition(error: error)
+                    } else if self.transcription.isEmpty {
+                        self.cancelAudioOnly()
+                        self.phase = .unavailable(error.localizedDescription)
+                    }
                 }
             }
         }
@@ -122,35 +142,39 @@ final class SpeechRecognizer: NSObject, ObservableObject {
         }
     }
 
-    private func scheduleSilenceFinish() {
-        silenceWorkItem?.cancel()
-        let work = DispatchWorkItem { [weak self] in
-            Task { @MainActor in self?.finishListening() }
-        }
-        silenceWorkItem = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.1, execute: work)
-    }
-
     private func finishListening() {
         guard phase == .listening else { return }
-        silenceWorkItem?.cancel()
         audioEngine.stop()
         if hasInputTap {
             audioEngine.inputNode.removeTap(onBus: 0)
             hasInputTap = false
         }
         request?.endAudio()
-        phase = transcription.isEmpty ? .idle : .guess
+        if recognitionFinished {
+            completeRecognition()
+        } else {
+            phase = .processing
+        }
+    }
+
+    private func completeRecognition(error: Error? = nil) {
+        request = nil
+        task = nil
+        if transcription.isEmpty, let error {
+            phase = .unavailable(error.localizedDescription)
+        } else {
+            phase = transcription.isEmpty ? .idle : .guess
+        }
     }
 
     private func cancel() {
+        startGeneration = UUID()
         cancelAudioOnly()
         phase = .idle
     }
 
     private func cancelAudioOnly() {
-        silenceWorkItem?.cancel()
-        silenceWorkItem = nil
+        recognitionFinished = false
         recognitionGeneration = UUID()
         if audioEngine.isRunning { audioEngine.stop() }
         if hasInputTap {

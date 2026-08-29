@@ -1,9 +1,13 @@
+import AppKit
 import SwiftUI
 import Lang4SelfCore
 
 struct SpeakView: View {
     @EnvironmentObject private var state: AppState
     @StateObject private var speech = SpeechRecognizer()
+    @State private var spaceMonitor: Any?
+    @State private var isSpaceHeld = false
+    @State private var isControlHeld = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -50,7 +54,7 @@ struct SpeakView: View {
             } else {
                 PlaceholderView(
                     symbol: "waveform.and.magnifyingglass",
-                    title: "Say one German word",
+                    title: "Say a German word or phrase",
                     detail: "Recognition and lookup stay on this Mac. Nothing is uploaded."
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -60,32 +64,30 @@ struct SpeakView: View {
         .onChange(of: speech.transcription) { _, value in
             if !value.isEmpty { state.search(value, immediate: true) }
         }
+        .onChange(of: speech.phase) { _, phase in
+            if phase == .listening, !isHoldingToRecord { speech.stop() }
+        }
+        .onAppear(perform: installSpaceMonitor)
+        .onDisappear {
+            removeSpaceMonitor()
+            speech.reset()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in
+            releaseRecordingHolds()
+        }
     }
 
     @ViewBuilder
     private var controls: some View {
-        switch speech.phase {
-        case .idle, .unavailable:
-            Button {
-                speech.start()
-            } label: {
-                Label("Record", systemImage: "space")
+        HStack {
+            holdToRecordControl
+
+            if speech.phase == .requestingPermission || speech.phase == .processing {
+                ProgressView().controlSize(.small)
             }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-            .keyboardShortcut(.space, modifiers: [])
-        case .requestingPermission:
-            ProgressView().controlSize(.small)
-        case .listening:
-            Button("Finish recording") { speech.acceptCurrentGuess() }
-                .buttonStyle(.bordered)
-                .keyboardShortcut(.space, modifiers: [])
-        case .guess:
-            HStack {
-                Button("Re-record  Space") { speech.rerecord() }
-                    .buttonStyle(.bordered)
-                    .keyboardShortcut(.space, modifiers: [])
-                Button("Add word  Return") { confirm() }
+
+            if speech.phase == .guess {
+                Button(addButtonTitle) { confirm() }
                     .buttonStyle(.borderedProminent)
                     .disabled(state.selectedEntry == nil)
                     .keyboardShortcut(.return, modifiers: [])
@@ -93,11 +95,30 @@ struct SpeakView: View {
         }
     }
 
+    private var holdToRecordControl: some View {
+        Label(holdControlTitle, systemImage: "space")
+            .fontWeight(.semibold)
+            .foregroundStyle(isHoldingToRecord ? Color.white : Color.accentColor)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 9)
+            .background(isHoldingToRecord ? Color.red : Color.accentColor.opacity(0.12), in: Capsule())
+            .contentShape(Capsule())
+            .onLongPressGesture(
+                minimumDuration: .infinity,
+                maximumDistance: 100,
+                pressing: setControlHeld,
+                perform: {}
+            )
+            .accessibilityLabel("Hold to record")
+            .accessibilityHint("Release to stop recording")
+    }
+
     private var statusTitle: String {
         switch speech.phase {
-        case .idle: "Press Space to speak"
+        case .idle: "Hold Space to speak"
         case .requestingPermission: "Checking local speech access…"
-        case .listening: speech.transcription.isEmpty ? "Listening…" : "Is this right?"
+        case .listening: "Listening…"
+        case .processing: "Recognizing…"
         case .guess: "Confirm the best match"
         case .unavailable: "Speech setup needed"
         }
@@ -105,12 +126,86 @@ struct SpeakView: View {
 
     private var statusDetail: String {
         if case .unavailable(let message) = speech.phase { return message }
-        return "Space starts recording · Return confirms · Space again re-records"
+        return "Hold Space while speaking · Release to look up · Return confirms"
+    }
+
+    private var holdControlTitle: String {
+        switch speech.phase {
+        case .requestingPermission: "Keep holding Space…"
+        case .listening: "Release Space to finish"
+        case .processing: "Processing speech…"
+        case .idle, .guess, .unavailable: "Hold Space to record"
+        }
+    }
+
+    private var addButtonTitle: String {
+        state.selectedEntry?.kind == .phrase ? "Add phrase  Return" : "Add word  Return"
+    }
+
+    private var isHoldingToRecord: Bool {
+        isSpaceHeld || isControlHeld
+    }
+
+    private func installSpaceMonitor() {
+        guard spaceMonitor == nil else { return }
+        spaceMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) { event in
+            guard event.keyCode == 49,
+                  event.modifierFlags.intersection([.command, .control, .option]).isEmpty
+            else { return event }
+
+            if event.type == .keyDown {
+                if !event.isARepeat { setSpaceHeld(true) }
+            } else {
+                setSpaceHeld(false)
+            }
+            return nil
+        }
+    }
+
+    private func removeSpaceMonitor() {
+        if let spaceMonitor { NSEvent.removeMonitor(spaceMonitor) }
+        spaceMonitor = nil
+        releaseRecordingHolds()
+    }
+
+    private func releaseRecordingHolds() {
+        let wasHolding = isHoldingToRecord
+        isSpaceHeld = false
+        isControlHeld = false
+        if wasHolding { speech.stop() }
+    }
+
+    private func setSpaceHeld(_ held: Bool) {
+        guard isSpaceHeld != held else { return }
+        let wasHolding = isHoldingToRecord
+        isSpaceHeld = held
+        recordingHoldChanged(wasHolding: wasHolding)
+    }
+
+    private func setControlHeld(_ held: Bool) {
+        guard isControlHeld != held else { return }
+        let wasHolding = isHoldingToRecord
+        isControlHeld = held
+        recordingHoldChanged(wasHolding: wasHolding)
+    }
+
+    private func recordingHoldChanged(wasHolding: Bool) {
+        if !wasHolding, isHoldingToRecord {
+            switch speech.phase {
+            case .idle, .unavailable:
+                speech.start()
+            case .processing, .guess:
+                speech.rerecord()
+            case .requestingPermission, .listening:
+                break
+            }
+        } else if wasHolding, !isHoldingToRecord {
+            speech.stop()
+        }
     }
 
     private func confirm() {
         guard !speech.transcription.isEmpty, state.selectedEntry != nil else { return }
-        speech.acceptCurrentGuess()
         state.confirmSpokenEntry()
         speech.reset()
     }

@@ -38,6 +38,29 @@ public enum Gender: String, Codable, CaseIterable, Sendable {
     }
 }
 
+public struct DictionaryMeaning: Identifiable, Hashable, Codable, Sendable {
+    public var id: String {
+        "\(gender.rawValue):\(english.lowercased()):\(usage ?? "")"
+    }
+
+    public let english: String
+    public let rawEnglish: String
+    public let gender: Gender
+    public let usage: String?
+
+    public init(
+        english: String,
+        rawEnglish: String? = nil,
+        gender: Gender = .unknown,
+        usage: String? = nil
+    ) {
+        self.english = english
+        self.rawEnglish = rawEnglish ?? english
+        self.gender = gender
+        self.usage = usage
+    }
+}
+
 public struct DictionaryEntry: Identifiable, Hashable, Codable, Sendable {
     public let id: Int64
     public let german: String
@@ -48,6 +71,7 @@ public struct DictionaryEntry: Identifiable, Hashable, Codable, Sendable {
     public let gender: Gender
     public let usage: String?
     public let source: String
+    public let meanings: [DictionaryMeaning]
 
     public init(
         id: Int64 = 0,
@@ -58,17 +82,25 @@ public struct DictionaryEntry: Identifiable, Hashable, Codable, Sendable {
         kind: WordKind = .other,
         gender: Gender = .unknown,
         usage: String? = nil,
-        source: String = "dict.cc"
+        source: String = "dict.cc",
+        meanings: [DictionaryMeaning]? = nil
     ) {
+        let resolvedMeanings = meanings ?? [DictionaryMeaning(
+            english: english,
+            rawEnglish: rawEnglish,
+            gender: gender,
+            usage: usage
+        )]
         self.id = id
         self.german = german
-        self.english = english
+        self.english = resolvedMeanings.map(\.english).joined(separator: "; ")
         self.rawGerman = rawGerman ?? german
-        self.rawEnglish = rawEnglish ?? english
+        self.rawEnglish = resolvedMeanings.map(\.rawEnglish).joined(separator: "; ")
         self.kind = kind
         self.gender = gender
         self.usage = usage
         self.source = source
+        self.meanings = resolvedMeanings
     }
 }
 

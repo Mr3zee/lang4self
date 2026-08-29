@@ -25,9 +25,9 @@
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
     <key>NSMicrophoneUsageDescription</key>
-    <string>Lang4Self records a German word so it can transcribe and look it up locally.</string>
+    <string>Lang4Self records a German word or phrase so it can transcribe and look it up locally.</string>
     <key>NSSpeechRecognitionUsageDescription</key>
-    <string>Lang4Self uses the on-device German speech model to recognize words you say.</string>
+    <string>Lang4Self uses the on-device German speech model to recognize words and phrases you say.</string>
     <key>NSHumanReadableCopyright</key>
     <string>Licensed under GPL-2.0-or-later. dict.cc data is downloaded separately under dict.cc terms.</string>
 </dict>

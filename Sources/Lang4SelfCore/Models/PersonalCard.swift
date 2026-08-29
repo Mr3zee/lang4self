@@ -16,6 +16,22 @@ public enum ReviewRating: Int, CaseIterable, Codable, Sendable {
     }
 }
 
+public struct WordList: Identifiable, Hashable, Codable, Sendable {
+    public static let defaultID: Int64 = 1
+
+    public let id: Int64
+    public var name: String
+    public let createdAt: Date
+
+    public init(id: Int64, name: String, createdAt: Date = .now) {
+        self.id = id
+        self.name = name
+        self.createdAt = createdAt
+    }
+
+    public var isDefault: Bool { id == Self.defaultID }
+}
+
 public struct PersonalCard: Identifiable, Hashable, Codable, Sendable {
     public let id: Int64
     public let dictionaryEntryID: Int64?

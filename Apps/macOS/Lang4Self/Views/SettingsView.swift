@@ -58,10 +58,11 @@ struct SettingsView: View {
                     Grid(alignment: .leading, horizontalSpacing: 36, verticalSpacing: 9) {
                         shortcut("⌘1 … ⌘5", "Open each section")
                         shortcut("⌘F", "Search dictionary")
-                        shortcut("Space", "Record / reveal")
-                        shortcut("Return", "Confirm spoken word")
+                        shortcut("Hold Space", "Record speech; release to stop")
+                        shortcut("Return", "Confirm spoken entry")
                         shortcut("1 … 4", "Rate a review")
                         shortcut("↑ / ↓", "Move through lists")
+                        shortcut("Delete", "Remove the selected card from its list")
                     }
                 }
 
@@ -87,7 +88,7 @@ struct SettingsView: View {
             case .success(let urls):
                 if let url = urls.first { state.importDictionary(from: url) }
             case .failure(let error):
-                state.banner = error.localizedDescription
+                state.showBanner(error.localizedDescription)
             }
         }
     }

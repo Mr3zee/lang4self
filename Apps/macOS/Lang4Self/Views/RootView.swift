@@ -40,24 +40,26 @@ struct RootView: View {
             content
                 .frame(minWidth: 650, minHeight: 500)
         }
-        .overlay(alignment: .topTrailing) {
-            if let banner = state.banner {
-                HStack(spacing: 10) {
-                    Image(systemName: "info.circle.fill")
-                    Text(banner).lineLimit(2)
-                    Button {
-                        state.dismissBanner()
-                    } label: {
-                        Image(systemName: "xmark")
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                if let banner = state.banner {
+                    HStack(spacing: 10) {
+                        Image(systemName: "info.circle.fill")
+                        Text(banner).lineLimit(1)
+                        Button {
+                            state.dismissBanner()
+                        } label: {
+                            Image(systemName: "xmark")
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+                    .shadow(radius: 12, y: 4)
+                    .frame(maxWidth: 420)
+                    .transition(.move(edge: .top).combined(with: .opacity))
                 }
-                .padding(12)
-                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
-                .shadow(radius: 12, y: 4)
-                .padding()
-                .frame(maxWidth: 420)
-                .transition(.move(edge: .top).combined(with: .opacity))
             }
         }
         .animation(.snappy, value: state.banner)

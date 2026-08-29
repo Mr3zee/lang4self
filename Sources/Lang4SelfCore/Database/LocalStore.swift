@@ -22,12 +22,18 @@ public enum LocalStoreError: LocalizedError {
     case open(String)
     case sqlite(String)
     case invalidDictionaryFile
+    case invalidListName
+    case duplicateListName
+    case cannotDeleteDefaultList
 
     public var errorDescription: String? {
         switch self {
         case .open(let message): "Could not open the local database: \(message)"
         case .sqlite(let message): "Local database error: \(message)"
         case .invalidDictionaryFile: "This does not look like a tab-delimited dict.cc translation file."
+        case .invalidListName: "List names cannot be empty."
+        case .duplicateListName: "A list with that name already exists."
+        case .cannotDeleteDefaultList: "The My words list cannot be deleted."
         }
     }
 }
@@ -125,7 +131,7 @@ public actor LocalStore {
 
     public func searchDictionary(_ query: String, limit: Int = 80) throws -> [DictionaryEntry] {
         let normalized = DictCCParser.normalized(query)
-        guard !normalized.isEmpty else { return [] }
+        guard !normalized.isEmpty, limit > 0 else { return [] }
         let tokens = normalized
             .split(whereSeparator: { $0.isWhitespace })
             .map { "\"\($0.replacingOccurrences(of: "\"", with: "\"\""))\"*" }
@@ -150,8 +156,15 @@ public actor LocalStore {
         bind(tokens, to: 1, in: statement)
         bind(normalized, to: 2, in: statement)
         bind(normalized, to: 3, in: statement)
-        sqlite3_bind_int(statement, 4, Int32(limit))
-        return try readEntries(statement)
+        let requestedLimit = Int32(clamping: limit)
+        let candidateLimit = requestedLimit > Int32.max / 8 ? Int32.max : requestedLimit * 8
+        sqlite3_bind_int(statement, 4, candidateLimit)
+        let matches = try readEntries(statement)
+        var seen = Set<DictionaryGroupKey>()
+        let representatives = matches.filter { entry in
+            seen.insert(DictionaryGroupKey(entry)).inserted
+        }.prefix(limit)
+        return try representatives.map { try dictionaryGroup(representedBy: $0) }
     }
 
     @discardableResult
@@ -214,42 +227,60 @@ public actor LocalStore {
     }
 
     @discardableResult
-    public func addCard(from entry: DictionaryEntry) throws -> PersonalCard {
-        if entry.id != 0, let existing = try card(forDictionaryEntryID: entry.id) { return existing }
-        let now = Date().timeIntervalSince1970
-        let sql = """
-            INSERT INTO personal_cards
-              (dictionary_entry_id, german, english, raw_german, kind, gender, created_at, due_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """
-        let statement = try prepare(sql)
-        defer { sqlite3_finalize(statement) }
-        if entry.id == 0 { sqlite3_bind_null(statement, 1) }
-        else { sqlite3_bind_int64(statement, 1, entry.id) }
-        bind(entry.german, to: 2, in: statement)
-        bind(entry.english, to: 3, in: statement)
-        bind(entry.rawGerman, to: 4, in: statement)
-        bind(entry.kind.rawValue, to: 5, in: statement)
-        bind(entry.gender.rawValue, to: 6, in: statement)
-        sqlite3_bind_double(statement, 7, now)
-        sqlite3_bind_double(statement, 8, now)
-        try stepDone(statement)
-        let id = sqlite3_last_insert_rowid(database)
-        guard let card = try card(id: id) else { throw LocalStoreError.sqlite("Could not read the newly created card") }
-        return card
+    public func addCard(from entry: DictionaryEntry, listID: Int64 = WordList.defaultID) throws -> PersonalCard {
+        try Self.execute(database, "BEGIN IMMEDIATE")
+        do {
+            let card: PersonalCard
+            if entry.id != 0, let existing = try self.card(forDictionaryEntryID: entry.id) {
+                card = existing
+            } else {
+                let now = Date().timeIntervalSince1970
+                let sql = """
+                    INSERT INTO personal_cards
+                      (dictionary_entry_id, german, english, raw_german, kind, gender, created_at, due_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """
+                let statement = try prepare(sql)
+                defer { sqlite3_finalize(statement) }
+                if entry.id == 0 { sqlite3_bind_null(statement, 1) }
+                else { sqlite3_bind_int64(statement, 1, entry.id) }
+                bind(entry.german, to: 2, in: statement)
+                bind(entry.english, to: 3, in: statement)
+                bind(entry.rawGerman, to: 4, in: statement)
+                bind(entry.kind.rawValue, to: 5, in: statement)
+                bind(entry.gender.rawValue, to: 6, in: statement)
+                sqlite3_bind_double(statement, 7, now)
+                sqlite3_bind_double(statement, 8, now)
+                try stepDone(statement)
+                let id = sqlite3_last_insert_rowid(database)
+                guard let inserted = try self.card(id: id) else {
+                    throw LocalStoreError.sqlite("Could not read the newly created card")
+                }
+                card = inserted
+            }
+            try addCard(card.id, toList: listID)
+            try Self.execute(database, "COMMIT")
+            return card
+        } catch {
+            try? Self.execute(database, "ROLLBACK")
+            throw error
+        }
     }
 
-    public func cards(search: String = "", limit: Int = 500) throws -> [PersonalCard] {
+    public func cards(search: String = "", listID: Int64 = WordList.defaultID, limit: Int = 500) throws -> [PersonalCard] {
         let hasQuery = !search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         let sql = """
-            SELECT \(cardColumns) FROM personal_cards
-            \(hasQuery ? "WHERE german LIKE ? ESCAPE '\\' OR english LIKE ? ESCAPE '\\' OR tags LIKE ? ESCAPE '\\'" : "")
-            ORDER BY is_starred DESC, german COLLATE NOCASE
+            SELECT \(qualifiedCardColumns) FROM personal_cards AS c
+            JOIN card_lists AS cl ON cl.card_id = c.id
+            WHERE cl.list_id = ?
+            \(hasQuery ? "AND (c.german LIKE ? ESCAPE '\\' OR c.english LIKE ? ESCAPE '\\' OR c.tags LIKE ? ESCAPE '\\')" : "")
+            ORDER BY c.is_starred DESC, c.german COLLATE NOCASE
             LIMIT ?
             """
         let statement = try prepare(sql)
         defer { sqlite3_finalize(statement) }
-        var index: Int32 = 1
+        sqlite3_bind_int64(statement, 1, listID)
+        var index: Int32 = 2
         if hasQuery {
             let pattern = "%" + escapedLike(search) + "%"
             for _ in 0..<3 { bind(pattern, to: index, in: statement); index += 1 }
@@ -258,18 +289,126 @@ public actor LocalStore {
         return try readCards(statement)
     }
 
-    public func dueCards(limit: Int = 100, now: Date = .now) throws -> [PersonalCard] {
+    public func dueCards(listID: Int64 = WordList.defaultID, limit: Int = 100, now: Date = .now) throws -> [PersonalCard] {
         let sql = """
-            SELECT \(cardColumns) FROM personal_cards
-            WHERE is_suspended = 0 AND due_at <= ?
-            ORDER BY due_at, repetitions
+            SELECT \(qualifiedCardColumns) FROM personal_cards AS c
+            JOIN card_lists AS cl ON cl.card_id = c.id
+            WHERE cl.list_id = ? AND c.is_suspended = 0 AND c.due_at <= ?
+            ORDER BY c.due_at, c.repetitions
             LIMIT ?
             """
         let statement = try prepare(sql)
         defer { sqlite3_finalize(statement) }
-        sqlite3_bind_double(statement, 1, now.timeIntervalSince1970)
-        sqlite3_bind_int(statement, 2, Int32(limit))
+        sqlite3_bind_int64(statement, 1, listID)
+        sqlite3_bind_double(statement, 2, now.timeIntervalSince1970)
+        sqlite3_bind_int(statement, 3, Int32(limit))
         return try readCards(statement)
+    }
+
+    public func reviewCards(listID: Int64 = WordList.defaultID) throws -> [PersonalCard] {
+        let sql = """
+            SELECT \(qualifiedCardColumns) FROM personal_cards AS c
+            JOIN card_lists AS cl ON cl.card_id = c.id
+            WHERE cl.list_id = ? AND c.is_suspended = 0
+            ORDER BY c.due_at, c.repetitions
+            """
+        let statement = try prepare(sql)
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_int64(statement, 1, listID)
+        return try readCards(statement)
+    }
+
+    public func wordLists() throws -> [WordList] {
+        let statement = try prepare("SELECT id, name, created_at FROM word_lists ORDER BY id = ? DESC, name COLLATE NOCASE")
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_int64(statement, 1, WordList.defaultID)
+        var result: [WordList] = []
+        while true {
+            let step = sqlite3_step(statement)
+            if step == SQLITE_DONE { return result }
+            guard step == SQLITE_ROW else { throw sqliteError() }
+            result.append(.init(
+                id: sqlite3_column_int64(statement, 0),
+                name: text(statement, 1),
+                createdAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 2))
+            ))
+        }
+    }
+
+    @discardableResult
+    public func createWordList(name: String) throws -> WordList {
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { throw LocalStoreError.invalidListName }
+        let statement = try prepare("INSERT INTO word_lists (name, created_at) VALUES (?, ?)")
+        defer { sqlite3_finalize(statement) }
+        bind(name, to: 1, in: statement)
+        sqlite3_bind_double(statement, 2, Date().timeIntervalSince1970)
+        guard sqlite3_step(statement) == SQLITE_DONE else {
+            if sqlite3_errcode(database) == SQLITE_CONSTRAINT { throw LocalStoreError.duplicateListName }
+            throw sqliteError()
+        }
+        return .init(id: sqlite3_last_insert_rowid(database), name: name)
+    }
+
+    public func renameWordList(id: Int64, name: String) throws {
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { throw LocalStoreError.invalidListName }
+        let statement = try prepare("UPDATE word_lists SET name = ? WHERE id = ?")
+        defer { sqlite3_finalize(statement) }
+        bind(name, to: 1, in: statement)
+        sqlite3_bind_int64(statement, 2, id)
+        guard sqlite3_step(statement) == SQLITE_DONE else {
+            if sqlite3_errcode(database) == SQLITE_CONSTRAINT { throw LocalStoreError.duplicateListName }
+            throw sqliteError()
+        }
+    }
+
+    public func deleteWordList(id: Int64) throws {
+        guard id != WordList.defaultID else { throw LocalStoreError.cannotDeleteDefaultList }
+        try Self.execute(database, "BEGIN IMMEDIATE")
+        do {
+            let statement = try prepare("DELETE FROM word_lists WHERE id = ?")
+            sqlite3_bind_int64(statement, 1, id)
+            let step = sqlite3_step(statement)
+            sqlite3_finalize(statement)
+            guard step == SQLITE_DONE else { throw sqliteError() }
+            try Self.execute(database, "DELETE FROM personal_cards WHERE NOT EXISTS (SELECT 1 FROM card_lists WHERE card_lists.card_id = personal_cards.id)")
+            try Self.execute(database, "COMMIT")
+        } catch {
+            try? Self.execute(database, "ROLLBACK")
+            throw error
+        }
+    }
+
+    public func addCard(_ cardID: Int64, toList listID: Int64) throws {
+        let statement = try prepare("INSERT OR IGNORE INTO card_lists (card_id, list_id, added_at) VALUES (?, ?, ?)")
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_int64(statement, 1, cardID)
+        sqlite3_bind_int64(statement, 2, listID)
+        sqlite3_bind_double(statement, 3, Date().timeIntervalSince1970)
+        try stepDone(statement)
+    }
+
+    public func removeCard(_ cardID: Int64, fromList listID: Int64) throws {
+        try Self.execute(database, "BEGIN IMMEDIATE")
+        do {
+            let statement = try prepare("DELETE FROM card_lists WHERE card_id = ? AND list_id = ?")
+            sqlite3_bind_int64(statement, 1, cardID)
+            sqlite3_bind_int64(statement, 2, listID)
+            let step = sqlite3_step(statement)
+            sqlite3_finalize(statement)
+            guard step == SQLITE_DONE else { throw sqliteError() }
+
+            let orphan = try prepare("SELECT NOT EXISTS (SELECT 1 FROM card_lists WHERE card_id = ?)")
+            sqlite3_bind_int64(orphan, 1, cardID)
+            let shouldDelete = try readScalarInt(orphan) != 0
+            sqlite3_finalize(orphan)
+            if shouldDelete { try deleteCard(id: cardID) }
+            try Self.execute(database, "COMMIT")
+        } catch {
+            try? Self.execute(database, "ROLLBACK")
+            throw error
+        }
     }
 
     public func review(card: PersonalCard, rating: ReviewRating, now: Date = .now) throws -> PersonalCard {
@@ -322,19 +461,25 @@ public actor LocalStore {
         try stepDone(statement)
     }
 
-    public func stats(now: Date = .now, calendar: Calendar = .current) throws -> StudyStats {
-        let total = try scalarInt("SELECT COUNT(*) FROM personal_cards")
-        let dueStatement = try prepare("SELECT COUNT(*) FROM personal_cards WHERE is_suspended = 0 AND due_at <= ?")
+    public func stats(listID: Int64 = WordList.defaultID, now: Date = .now, calendar: Calendar = .current) throws -> StudyStats {
+        let totalStatement = try prepare("SELECT COUNT(*) FROM card_lists WHERE list_id = ?")
+        defer { sqlite3_finalize(totalStatement) }
+        sqlite3_bind_int64(totalStatement, 1, listID)
+        let total = try readScalarInt(totalStatement)
+        let dueStatement = try prepare("SELECT COUNT(*) FROM personal_cards AS c JOIN card_lists AS cl ON cl.card_id = c.id WHERE cl.list_id = ? AND c.is_suspended = 0 AND c.due_at <= ?")
         defer { sqlite3_finalize(dueStatement) }
-        sqlite3_bind_double(dueStatement, 1, now.timeIntervalSince1970)
+        sqlite3_bind_int64(dueStatement, 1, listID)
+        sqlite3_bind_double(dueStatement, 2, now.timeIntervalSince1970)
         let due = try readScalarInt(dueStatement)
         let start = calendar.startOfDay(for: now).timeIntervalSince1970
-        let reviewsStatement = try prepare("SELECT COUNT(*) FROM review_log WHERE reviewed_at >= ?")
+        let reviewsStatement = try prepare("SELECT COUNT(*) FROM review_log AS r JOIN card_lists AS cl ON cl.card_id = r.card_id WHERE cl.list_id = ? AND r.reviewed_at >= ?")
         defer { sqlite3_finalize(reviewsStatement) }
-        sqlite3_bind_double(reviewsStatement, 1, start)
+        sqlite3_bind_int64(reviewsStatement, 1, listID)
+        sqlite3_bind_double(reviewsStatement, 2, start)
         let reviews = try readScalarInt(reviewsStatement)
-        let dayStatement = try prepare("SELECT DISTINCT CAST(reviewed_at / 86400 AS INTEGER) FROM review_log ORDER BY 1 DESC")
+        let dayStatement = try prepare("SELECT DISTINCT CAST(r.reviewed_at / 86400 AS INTEGER) FROM review_log AS r JOIN card_lists AS cl ON cl.card_id = r.card_id WHERE cl.list_id = ? ORDER BY 1 DESC")
         defer { sqlite3_finalize(dayStatement) }
+        sqlite3_bind_int64(dayStatement, 1, listID)
         var reviewDays = Set<Int>()
         while sqlite3_step(dayStatement) == SQLITE_ROW { reviewDays.insert(Int(sqlite3_column_int64(dayStatement, 0))) }
         var streak = 0
@@ -364,6 +509,7 @@ public actor LocalStore {
               UNIQUE(raw_german, raw_english)
             );
             CREATE INDEX IF NOT EXISTS dictionary_source ON dictionary_entries(source);
+            CREATE INDEX IF NOT EXISTS dictionary_word_kind ON dictionary_entries(normalized_german, kind);
             CREATE VIRTUAL TABLE IF NOT EXISTS dictionary_fts USING fts5(
               german, english, content='dictionary_entries', content_rowid='id',
               tokenize='unicode61 remove_diacritics 2'
@@ -389,6 +535,18 @@ public actor LocalStore {
               is_suspended INTEGER NOT NULL DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS cards_due ON personal_cards(is_suspended, due_at);
+            CREATE TABLE IF NOT EXISTS word_lists (
+              id INTEGER PRIMARY KEY,
+              name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+              created_at REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS card_lists (
+              card_id INTEGER NOT NULL REFERENCES personal_cards(id) ON DELETE CASCADE,
+              list_id INTEGER NOT NULL REFERENCES word_lists(id) ON DELETE CASCADE,
+              added_at REAL NOT NULL,
+              PRIMARY KEY (card_id, list_id)
+            );
+            CREATE INDEX IF NOT EXISTS card_lists_by_list ON card_lists(list_id, card_id);
             CREATE TABLE IF NOT EXISTS review_log (
               id INTEGER PRIMARY KEY,
               card_id INTEGER NOT NULL REFERENCES personal_cards(id) ON DELETE CASCADE,
@@ -397,6 +555,9 @@ public actor LocalStore {
               interval_days REAL NOT NULL
             );
             """)
+        let defaultName = "My words".replacingOccurrences(of: "'", with: "''")
+        try execute(database, "INSERT OR IGNORE INTO word_lists (id, name, created_at) VALUES (\(WordList.defaultID), '\(defaultName)', strftime('%s', 'now'))")
+        try execute(database, "INSERT OR IGNORE INTO card_lists (card_id, list_id, added_at) SELECT id, \(WordList.defaultID), created_at FROM personal_cards WHERE NOT EXISTS (SELECT 1 FROM card_lists)")
         try createDictionaryTriggers(database)
     }
 
@@ -448,6 +609,10 @@ public actor LocalStore {
         "id, dictionary_entry_id, german, english, raw_german, kind, gender, notes, tags, created_at, due_at, last_reviewed_at, interval_days, ease_factor, repetitions, lapses, is_starred, is_suspended"
     }
 
+    private var qualifiedCardColumns: String {
+        "c.id, c.dictionary_entry_id, c.german, c.english, c.raw_german, c.kind, c.gender, c.notes, c.tags, c.created_at, c.due_at, c.last_reviewed_at, c.interval_days, c.ease_factor, c.repetitions, c.lapses, c.is_starred, c.is_suspended"
+    }
+
     private func readEntries(_ statement: OpaquePointer?) throws -> [DictionaryEntry] {
         var result: [DictionaryEntry] = []
         while true {
@@ -466,6 +631,54 @@ public actor LocalStore {
                 source: text(statement, 8)
             ))
         }
+    }
+
+    private func dictionaryGroup(representedBy representative: DictionaryEntry) throws -> DictionaryEntry {
+        let sql = """
+            SELECT id, german, english, raw_german, raw_english,
+                   kind, gender, usage, source
+            FROM dictionary_entries
+            WHERE normalized_german = ? AND kind = ?
+            ORDER BY id
+            """
+        let statement = try prepare(sql)
+        defer { sqlite3_finalize(statement) }
+        bind(DictCCParser.normalized(representative.german), to: 1, in: statement)
+        bind(representative.kind.rawValue, to: 2, in: statement)
+        let groupTerm = dictionaryGroupingTerm(representative.german)
+        let entries = try readEntries(statement).filter {
+            dictionaryGroupingTerm($0.german) == groupTerm
+        }
+        guard let canonical = entries.first else { return representative }
+
+        var seenMeanings = Set<String>()
+        let meanings = entries.compactMap { entry -> DictionaryMeaning? in
+            let meaning = DictionaryMeaning(
+                english: entry.english,
+                rawEnglish: entry.rawEnglish,
+                gender: entry.gender,
+                usage: entry.usage
+            )
+            return seenMeanings.insert(meaning.id).inserted ? meaning : nil
+        }
+        let genders = Set(entries.map(\.gender))
+        let usages = Set(entries.map(\.usage))
+        let sources = entries.map(\.source).reduce(into: [String]()) { result, source in
+            if !result.contains(source) { result.append(source) }
+        }
+
+        return DictionaryEntry(
+            id: canonical.id,
+            german: canonical.german,
+            english: canonical.english,
+            rawGerman: canonical.rawGerman,
+            rawEnglish: canonical.rawEnglish,
+            kind: canonical.kind,
+            gender: genders.count == 1 ? canonical.gender : .unknown,
+            usage: usages.count == 1 ? canonical.usage : nil,
+            source: sources.joined(separator: ", "),
+            meanings: meanings
+        )
     }
 
     private func readCards(_ statement: OpaquePointer?) throws -> [PersonalCard] {
@@ -588,4 +801,21 @@ public actor LocalStore {
             END;
             """)
     }
+}
+
+private struct DictionaryGroupKey: Hashable {
+    let german: String
+    let kind: WordKind
+
+    init(_ entry: DictionaryEntry) {
+        german = dictionaryGroupingTerm(entry.german)
+        kind = entry.kind
+    }
+}
+
+private func dictionaryGroupingTerm(_ value: String) -> String {
+    value
+        .precomposedStringWithCanonicalMapping
+        .lowercased(with: Locale(identifier: "de_DE"))
+        .trimmingCharacters(in: .whitespacesAndNewlines)
 }

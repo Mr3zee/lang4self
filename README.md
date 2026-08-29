@@ -17,10 +17,11 @@ The app includes a tiny original starter list. The complete dict.cc file stays o
 |---|---|
 | ⌘1 … ⌘5 | Dictionary, Speak, Review, My words, Settings |
 | ⌘F | Focus dictionary search |
-| Space | Start/finish/re-record speech; reveal a review |
-| Return | Confirm a spoken match |
+| Hold Space | Record speech; release to stop (Space reveals a review) |
+| Return | Confirm a spoken word or phrase |
 | 1 … 4 | Again, Hard, Good, Easy |
 | ↑ / ↓ | Navigate results and cards |
+| Delete | Remove the selected card from its list |
 
 ## Local architecture
 
@@ -28,7 +29,7 @@ The app includes a tiny original starter list. The complete dict.cc file stays o
 - Apple Speech with `requiresOnDeviceRecognition = true`
 - SQLite + FTS5 for fast lookup across 1M+ entries
 - Streaming tab-delimited import, so the whole source file is never loaded into memory
-- Durable personal cards and review log
+- Durable named word lists, personal cards, and review log
 - SM-2-style intervals with Again / Hard / Good / Easy
 - Rule-based German morphology plus explicit common irregular forms
 - Shared `Lang4SelfCore`, ready for later iOS and server targets
