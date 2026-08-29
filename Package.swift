@@ -1,0 +1,53 @@
+// swift-tools-version: 5.10
+
+import PackageDescription
+
+let package = Package(
+    name: "Lang4Self",
+    defaultLocalization: "en",
+    platforms: [
+        .macOS(.v14),
+        .iOS(.v17)
+    ],
+    products: [
+        .library(name: "Lang4SelfCore", targets: ["Lang4SelfCore"]),
+        .executable(name: "Lang4Self", targets: ["Lang4Self"]),
+        .executable(name: "Lang4SelfDictionaryImporter", targets: ["Lang4SelfDictionaryImporter"]),
+        .executable(name: "lang4self", targets: ["Lang4SelfCLI"])
+    ],
+    targets: [
+        .target(
+            name: "Lang4SelfCore",
+            path: "Sources/Lang4SelfCore",
+            linkerSettings: [.linkedLibrary("sqlite3")]
+        ),
+        .executableTarget(
+            name: "Lang4Self",
+            dependencies: ["Lang4SelfCore"],
+            path: "Apps/macOS/Lang4Self",
+            exclude: ["Resources/Info.plist", "Resources/AppIcon-1024.png"],
+            resources: [.process("Resources/Assets.xcassets")],
+            linkerSettings: [
+                .linkedFramework("AppKit"),
+                .linkedFramework("AVFoundation"),
+                .linkedFramework("Speech")
+            ]
+        ),
+        .executableTarget(
+            name: "Lang4SelfDictionaryImporter",
+            dependencies: ["Lang4SelfCore"],
+            path: "Tools/DictionaryImporter"
+        ),
+        .executableTarget(
+            name: "Lang4SelfCLI",
+            dependencies: ["Lang4SelfCore"],
+            path: "Tools/CLI"
+        ),
+        .testTarget(
+            name: "Lang4SelfCoreTests",
+            dependencies: ["Lang4SelfCore"],
+            path: "Tests/Lang4SelfCoreTests"
+        )
+    ],
+    swiftLanguageVersions: [.v5]
+)
