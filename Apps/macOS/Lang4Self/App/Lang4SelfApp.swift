@@ -1,7 +1,9 @@
+import AppKit
 import SwiftUI
 
 @main
 struct Lang4SelfApp: App {
+    @NSApplicationDelegateAdaptor(Lang4SelfAppDelegate.self) private var appDelegate
     @StateObject private var state: AppState
 
     init() {
@@ -23,6 +25,12 @@ struct Lang4SelfApp: App {
         .commands {
             Lang4SelfCommands(state: state)
         }
+    }
+}
+
+private final class Lang4SelfAppDelegate: NSObject, NSApplicationDelegate {
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        true
     }
 }
 
