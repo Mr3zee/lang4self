@@ -4,7 +4,6 @@ import Lang4SelfCore
 struct ReviewView: View {
     @EnvironmentObject private var state: AppState
     @State private var revealed = false
-    @FocusState private var keyboardActive: Bool
 
     private var current: PersonalCard? { state.dueCards.first }
 
@@ -49,18 +48,10 @@ struct ReviewView: View {
             }
         }
         .navigationTitle("Review")
-        .focusable()
-        .focused($keyboardActive)
         .onAppear {
-            keyboardActive = true
             Task { await state.refreshStudyData() }
         }
         .onChange(of: current?.id) { _, _ in revealed = false }
-        .onKeyPress(keys: ["1", "2", "3", "4"]) { press in
-            guard revealed, let card = current, let value = Int(String(press.characters)), let rating = ReviewRating(rawValue: value) else { return .ignored }
-            rate(card, rating)
-            return .handled
-        }
     }
 
     private var statsBar: some View {
@@ -98,6 +89,7 @@ struct ReviewView: View {
                 }
                 .buttonStyle(.bordered)
                 .tint(rating == .again ? .red : rating == .easy ? .green : .accentColor)
+                .keyboardShortcut(KeyEquivalent(Character(String(rating.rawValue))), modifiers: [])
             }
         }
         .padding(.bottom, 12)

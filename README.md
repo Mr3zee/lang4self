@@ -45,6 +45,12 @@ Build the actual app bundle from Terminal with:
 ./scripts/build-macos.sh
 ```
 
+Stop, rebuild, and relaunch the development app with:
+
+```sh
+./scripts/reload-macos.sh
+```
+
 Install the release app on the Desktop and the CLI in `~/.local/bin`:
 
 ```sh

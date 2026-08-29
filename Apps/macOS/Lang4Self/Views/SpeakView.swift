@@ -4,7 +4,6 @@ import Lang4SelfCore
 struct SpeakView: View {
     @EnvironmentObject private var state: AppState
     @StateObject private var speech = SpeechRecognizer()
-    @FocusState private var keyboardActive: Bool
 
     var body: some View {
         VStack(spacing: 0) {
@@ -58,15 +57,8 @@ struct SpeakView: View {
             }
         }
         .navigationTitle("Speak")
-        .focusable()
-        .focused($keyboardActive)
-        .onAppear { keyboardActive = true }
         .onChange(of: speech.transcription) { _, value in
             if !value.isEmpty { state.search(value, immediate: true) }
-        }
-        .onKeyPress(.return) {
-            confirm()
-            return .handled
         }
     }
 
@@ -96,6 +88,7 @@ struct SpeakView: View {
                 Button("Add word  Return") { confirm() }
                     .buttonStyle(.borderedProminent)
                     .disabled(state.selectedEntry == nil)
+                    .keyboardShortcut(.return, modifiers: [])
             }
         }
     }
