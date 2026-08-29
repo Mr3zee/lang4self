@@ -38,26 +38,71 @@ public enum Gender: String, Codable, CaseIterable, Sendable {
     }
 }
 
+public enum TranslationLanguage: String, Codable, CaseIterable, Sendable {
+    case english = "en"
+    case russian = "ru"
+
+    public var label: String {
+        switch self {
+        case .english: "English"
+        case .russian: "Russian"
+        }
+    }
+
+    public var shortLabel: String { rawValue.uppercased() }
+}
+
 public struct DictionaryMeaning: Identifiable, Hashable, Codable, Sendable {
     public var id: String {
-        "\(gender.rawValue):\(english.lowercased()):\(usage ?? "")"
+        "\(language.rawValue):\(gender.rawValue):\(english.lowercased()):\(usage ?? ""):\(explanation ?? "")"
     }
 
     public let english: String
     public let rawEnglish: String
+    public let language: TranslationLanguage
     public let gender: Gender
     public let usage: String?
+    public let explanation: String?
+
+    public var translation: String { english }
+    public var rawTranslation: String { rawEnglish }
+    public var distinctExplanation: String? {
+        guard let explanation else { return nil }
+        let trimmed = explanation.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              Self.comparableText(trimmed) != Self.comparableText(translation) else { return nil }
+        return trimmed
+    }
 
     public init(
         english: String,
         rawEnglish: String? = nil,
+        language: TranslationLanguage = .english,
         gender: Gender = .unknown,
-        usage: String? = nil
+        usage: String? = nil,
+        explanation: String? = nil
     ) {
         self.english = english
         self.rawEnglish = rawEnglish ?? english
+        self.language = language
         self.gender = gender
         self.usage = usage
+        self.explanation = explanation
+    }
+
+    private static func comparableText(_ value: String) -> String {
+        comparableDictionaryText(value)
+    }
+}
+
+public struct DictionaryExplanation: Identifiable, Hashable, Codable, Sendable {
+    public var id: String { "\(source):\(text)" }
+    public let text: String
+    public let source: String
+
+    public init(text: String, source: String) {
+        self.text = text
+        self.source = source
     }
 }
 
@@ -72,6 +117,21 @@ public struct DictionaryEntry: Identifiable, Hashable, Codable, Sendable {
     public let usage: String?
     public let source: String
     public let meanings: [DictionaryMeaning]
+    public let explanations: [DictionaryExplanation]
+
+    public var translations: String { english }
+    public var distinctExplanations: [DictionaryExplanation] {
+        let meaningText = Set(meanings.flatMap { meaning in
+            [meaning.translation, meaning.distinctExplanation].compactMap { $0 }.map(comparableDictionaryText)
+        })
+        var seen = Set<String>()
+        return explanations.filter { explanation in
+            let comparable = comparableDictionaryText(explanation.text)
+            return !comparable.isEmpty
+                && !meaningText.contains(comparable)
+                && seen.insert(comparable).inserted
+        }
+    }
 
     public init(
         id: Int64 = 0,
@@ -83,13 +143,18 @@ public struct DictionaryEntry: Identifiable, Hashable, Codable, Sendable {
         gender: Gender = .unknown,
         usage: String? = nil,
         source: String = "dict.cc",
-        meanings: [DictionaryMeaning]? = nil
+        explanation: String? = nil,
+        translationLanguage: TranslationLanguage = .english,
+        meanings: [DictionaryMeaning]? = nil,
+        explanations: [DictionaryExplanation] = []
     ) {
         let resolvedMeanings = meanings ?? [DictionaryMeaning(
             english: english,
             rawEnglish: rawEnglish,
+            language: translationLanguage,
             gender: gender,
-            usage: usage
+            usage: usage,
+            explanation: explanation
         )]
         self.id = id
         self.german = german
@@ -101,7 +166,18 @@ public struct DictionaryEntry: Identifiable, Hashable, Codable, Sendable {
         self.usage = usage
         self.source = source
         self.meanings = resolvedMeanings
+        self.explanations = explanations
     }
+}
+
+private func comparableDictionaryText(_ value: String) -> String {
+    let ignoredEdges = CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters)
+    return value
+        .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: Locale(identifier: "en_US_POSIX"))
+        .trimmingCharacters(in: ignoredEdges)
+        .split(whereSeparator: { $0.isWhitespace })
+        .joined(separator: " ")
+        .lowercased()
 }
 
 public struct WordInfo: Hashable, Codable, Sendable {

@@ -7,6 +7,7 @@ enum AppRoute: String, CaseIterable, Identifiable {
     case speak
     case review
     case library
+    case sentences
     case settings
 
     var id: String { rawValue }
@@ -17,6 +18,7 @@ enum AppRoute: String, CaseIterable, Identifiable {
         case .speak: "Speak"
         case .review: "Review"
         case .library: "My words"
+        case .sentences: "Sentences"
         case .settings: "Settings"
         }
     }
@@ -27,6 +29,7 @@ enum AppRoute: String, CaseIterable, Identifiable {
         case .speak: "waveform"
         case .review: "rectangle.on.rectangle.angled"
         case .library: "books.vertical"
+        case .sentences: "text.quote"
         case .settings: "gearshape"
         }
     }
@@ -47,20 +50,38 @@ final class AppState: ObservableObject {
     @Published private(set) var stats = StudyStats()
     @Published private(set) var dictionaryCount = 0
     @Published private(set) var hasCompleteDictionary = false
+    @Published private(set) var installedTranslationLanguages: Set<TranslationLanguage> = []
+    @Published private(set) var explanationCount = 0
     @Published private(set) var importProgress: ImportProgress?
     @Published private(set) var isImporting = false
+    @Published private(set) var explanationImportProgress: ExplanationImportProgress?
+    @Published private(set) var isImportingExplanations = false
     @Published private(set) var banner: String?
     @Published var libraryQuery = ""
+    @Published private(set) var savedSentences: [SavedSentence] = []
+    @Published private(set) var generatedSentences: [SentenceDraft] = []
+    @Published private(set) var selectedGeneratedSentenceIDs: Set<SentenceDraft.ID> = []
+    @Published private(set) var generatedSourceList: WordList?
+    @Published private(set) var lmStudioProgress: LMStudioProgress = .idle
+    @Published private(set) var isGeneratingSentences = false
+    @Published private(set) var installedLMStudioModels: [LMStudioModel] = []
+    @Published private(set) var isRefreshingLMStudioModels = false
+    @Published private(set) var lmStudioSettings = LMStudioSettings.load()
 
     let store: LocalStore
     private var searchTask: Task<Void, Never>?
     private var libraryTask: Task<Void, Never>?
+    private var sentenceGenerationTask: Task<Void, Never>?
     private var bannerDismissTask: Task<Void, Never>?
+    private let lmStudio = LMStudioService.shared
 
     var selectedWordList: WordList? { wordLists.first { $0.id == selectedListID } }
 
     init(store: LocalStore? = nil) throws {
         self.store = try store ?? LocalStore()
+        lmStudio.progressDidChange = { [weak self] progress in
+            self?.lmStudioProgress = progress
+        }
         Task { await bootstrap() }
     }
 
@@ -69,17 +90,23 @@ final class AppState: ObservableObject {
             try await store.seedStarterDictionaryIfNeeded()
             async let count = store.dictionaryCount()
             async let complete = store.hasCompleteDictionary()
+            async let languages = store.installedTranslationLanguages()
+            async let explanations = store.explanationCount()
             async let loadedLists = store.wordLists()
             async let loadedCards = store.cards(listID: selectedListID)
             async let loadedDue = store.dueCards(listID: selectedListID)
             async let loadedStats = store.stats(listID: selectedListID)
+            async let loadedSentences = store.savedSentences()
             dictionaryCount = try await count
             hasCompleteDictionary = try await complete
+            installedTranslationLanguages = try await languages
+            explanationCount = try await explanations
             wordLists = try await loadedLists
             cards = try await loadedCards
             dueCards = try await loadedDue
             reviewCards = dueCards
             stats = try await loadedStats
+            savedSentences = try await loadedSentences
         } catch {
             show(error)
         }
@@ -288,6 +315,7 @@ final class AppState: ObservableObject {
                 }
                 dictionaryCount = try await store.dictionaryCount()
                 hasCompleteDictionary = try await store.hasCompleteDictionary()
+                installedTranslationLanguages = try await store.installedTranslationLanguages()
                 isImporting = false
                 importProgress = nil
                 showBanner("Imported \(imported.formatted()) dictionary entries")
@@ -296,6 +324,147 @@ final class AppState: ObservableObject {
                 importProgress = nil
                 show(error)
             }
+        }
+    }
+
+    func importExplanations(from url: URL) {
+        guard !isImportingExplanations else { return }
+        isImportingExplanations = true
+        explanationImportProgress = .init(imported: 0, total: 1)
+        Task {
+            let access = url.startAccessingSecurityScopedResource()
+            defer { if access { url.stopAccessingSecurityScopedResource() } }
+            do {
+                let imported = try await store.importExplanations(from: url) { progress in
+                    Task { @MainActor [weak self] in self?.explanationImportProgress = progress }
+                }
+                explanationCount = try await store.explanationCount()
+                isImportingExplanations = false
+                explanationImportProgress = nil
+                if !searchQuery.isEmpty { search(searchQuery, immediate: true) }
+                showBanner("Imported \(imported.formatted()) explanations")
+            } catch {
+                isImportingExplanations = false
+                explanationImportProgress = nil
+                show(error)
+            }
+        }
+    }
+
+    func generateSentences(count: Int) {
+        guard !isGeneratingSentences, let sourceList = selectedWordList else { return }
+        sentenceGenerationTask?.cancel()
+        isGeneratingSentences = true
+        sentenceGenerationTask = Task {
+            do {
+                let vocabulary = try await store.cards(listID: sourceList.id, limit: 600)
+                guard !vocabulary.isEmpty else { throw SentenceFeatureError.emptyWordList }
+                let drafts = try await lmStudio.generate(
+                    vocabulary: vocabulary,
+                    count: count,
+                    settings: lmStudioSettings
+                )
+                try Task.checkCancellation()
+                generatedSentences = drafts
+                selectedGeneratedSentenceIDs = Set(drafts.map(\.id))
+                generatedSourceList = sourceList
+            } catch is CancellationError {
+                // Closing the app or replacing the task is an expected cancellation.
+            } catch {
+                show(error)
+            }
+            isGeneratingSentences = false
+            sentenceGenerationTask = nil
+        }
+    }
+
+    func setGeneratedSentence(_ id: SentenceDraft.ID, selected: Bool) {
+        if selected { selectedGeneratedSentenceIDs.insert(id) }
+        else { selectedGeneratedSentenceIDs.remove(id) }
+    }
+
+    func selectAllGeneratedSentences(_ selected: Bool) {
+        selectedGeneratedSentenceIDs = selected ? Set(generatedSentences.map(\.id)) : []
+    }
+
+    func saveSelectedGeneratedSentences() {
+        guard let sourceList = generatedSourceList else { return }
+        let selected = generatedSentences.filter { selectedGeneratedSentenceIDs.contains($0.id) }
+        guard !selected.isEmpty else { return }
+        let selectedIDs = Set(selected.map(\.id))
+        Task {
+            do {
+                let inserted = try await store.saveSentences(selected, sourceList: sourceList)
+                savedSentences = try await store.savedSentences()
+                generatedSentences.removeAll { selectedIDs.contains($0.id) }
+                selectedGeneratedSentenceIDs.subtract(selectedIDs)
+                if inserted.isEmpty {
+                    showBanner("These sentences were already saved")
+                } else {
+                    showBanner("Saved \(inserted.count) sentence\(inserted.count == 1 ? "" : "s")")
+                }
+            } catch { show(error) }
+        }
+    }
+
+    func deleteSentence(_ sentence: SavedSentence) {
+        Task {
+            do {
+                try await store.deleteSentence(id: sentence.id)
+                savedSentences.removeAll { $0.id == sentence.id }
+                showBanner("Deleted sentence")
+            } catch { show(error) }
+        }
+    }
+
+    func refreshLMStudioModels() {
+        guard !isRefreshingLMStudioModels else { return }
+        isRefreshingLMStudioModels = true
+        Task {
+            do {
+                installedLMStudioModels = try await lmStudio.installedModels()
+            } catch {
+                show(error)
+            }
+            isRefreshingLMStudioModels = false
+        }
+    }
+
+    func updateLMStudioSettings(_ settings: LMStudioSettings) {
+        lmStudioSettings = settings.sanitized
+        lmStudioSettings.save()
+    }
+
+    var configuredLMStudioModel: LMStudioModel? {
+        if lmStudioSettings.modelKey.isEmpty { return installedLMStudioModels.first }
+        return installedLMStudioModels.first { $0.modelKey == lmStudioSettings.modelKey }
+    }
+
+    func translationEntries(for token: SentenceToken) async -> [DictionaryEntry] {
+        do {
+            var entries: [DictionaryEntry] = []
+            if let cardID = token.cardID, let card = try await store.personalCard(id: cardID) {
+                entries.append(.init(
+                    id: card.dictionaryEntryID ?? 0,
+                    german: card.german,
+                    english: card.english,
+                    rawGerman: card.rawGerman,
+                    kind: card.kind,
+                    gender: card.gender,
+                    source: "My words"
+                ))
+            }
+            let dictionaryEntries = try await store.searchDictionary(token.lookupTerm, limit: 12)
+            for entry in dictionaryEntries where !entries.contains(where: {
+                $0.id == entry.id ||
+                (SentenceTokenizer.normalized($0.german) == SentenceTokenizer.normalized(entry.german) && $0.english == entry.english)
+            }) {
+                entries.append(entry)
+            }
+            return entries
+        } catch {
+            show(error)
+            return []
         }
     }
 
@@ -335,5 +504,13 @@ final class AppState: ObservableObject {
 
     private func show(_ error: Error) {
         showBanner(error.localizedDescription)
+    }
+}
+
+private enum SentenceFeatureError: LocalizedError {
+    case emptyWordList
+
+    var errorDescription: String? {
+        "The selected list has no words. Add words before generating sentences."
     }
 }

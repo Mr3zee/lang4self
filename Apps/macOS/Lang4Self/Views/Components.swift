@@ -29,6 +29,23 @@ struct GenderBadge: View {
     }
 }
 
+struct TranslationLanguageBadge: View {
+    let language: TranslationLanguage
+
+    var body: some View {
+        Text(language.shortLabel)
+            .font(.caption2.weight(.bold))
+            .foregroundStyle(language == .english ? Color.blue : Color.purple)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 2)
+            .background(
+                (language == .english ? Color.blue : Color.purple).opacity(0.12),
+                in: Capsule()
+            )
+            .accessibilityLabel(language.label)
+    }
+}
+
 struct GermanWordView: View {
     let entry: DictionaryEntry
     var font: Font = .headline
@@ -54,12 +71,22 @@ struct GermanWordView: View {
 struct EntryRow: View {
     let entry: DictionaryEntry
 
+    private var previewMeanings: [DictionaryMeaning] {
+        var seenLanguages = Set<TranslationLanguage>()
+        let firstInEachLanguage = entry.meanings.filter {
+            seenLanguages.insert($0.language).inserted
+        }
+        let remaining = entry.meanings.filter { !firstInEachLanguage.contains($0) }
+        return Array((firstInEachLanguage + remaining).prefix(3))
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             GermanWordView(entry: entry)
-            ForEach(entry.meanings.prefix(3)) { meaning in
+            ForEach(previewMeanings) { meaning in
                 HStack(spacing: 6) {
-                    Text(meaning.english)
+                    TranslationLanguageBadge(language: meaning.language)
+                    Text(meaning.translation)
                         .lineLimit(1)
                     if entry.gender == .unknown, meaning.gender != .unknown {
                         GenderBadge(gender: meaning.gender)
@@ -136,22 +163,61 @@ struct EntryDetailView: View {
     }
 
     private var meanings: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            ForEach(Array(entry.meanings.enumerated()), id: \.element.id) { index, meaning in
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    if entry.meanings.count > 1 {
-                        Text("\(index + 1).")
+        VStack(alignment: .leading, spacing: 12) {
+            ForEach(TranslationLanguage.allCases, id: \.self) { language in
+                let languageMeanings = entry.meanings.filter { $0.language == language }
+                if !languageMeanings.isEmpty {
+                    VStack(alignment: .leading, spacing: 7) {
+                        Text(language.label.uppercased())
+                            .font(.caption.weight(.bold))
                             .foregroundStyle(.tertiary)
+                        ForEach(Array(languageMeanings.enumerated()), id: \.element.id) { index, meaning in
+                            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                if languageMeanings.count > 1 {
+                                    Text("\(index + 1).")
+                                        .foregroundStyle(.tertiary)
+                                }
+                                VStack(alignment: .leading, spacing: 4) {
+                                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                        Text(meaning.translation)
+                                            .textSelection(.enabled)
+                                        if entry.gender == .unknown, meaning.gender != .unknown {
+                                            GenderBadge(gender: meaning.gender)
+                                        }
+                                        if let usage = meaning.usage {
+                                            Text(usage)
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                        }
+                                    }
+                                    if let explanation = meaning.distinctExplanation {
+                                        Text(explanation)
+                                            .font(.body)
+                                            .foregroundStyle(.secondary)
+                                            .textSelection(.enabled)
+                                    }
+                                }
+                            }
+                        }
                     }
-                    Text(meaning.english)
-                        .textSelection(.enabled)
-                    if entry.gender == .unknown, meaning.gender != .unknown {
-                        GenderBadge(gender: meaning.gender)
-                    }
-                    if let usage = meaning.usage {
-                        Text(usage)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                }
+            }
+
+            if !entry.distinctExplanations.isEmpty {
+                VStack(alignment: .leading, spacing: 7) {
+                    Text("EXPLANATIONS")
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(.tertiary)
+                    ForEach(Array(entry.distinctExplanations.enumerated()), id: \.element.id) { index, explanation in
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            if entry.distinctExplanations.count > 1 {
+                                Text("\(index + 1).")
+                                    .foregroundStyle(.tertiary)
+                            }
+                            Text(explanation.text)
+                                .font(.body)
+                                .textSelection(.enabled)
+                        }
                     }
                 }
             }

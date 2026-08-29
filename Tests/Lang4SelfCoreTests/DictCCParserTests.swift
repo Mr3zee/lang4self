@@ -32,4 +32,15 @@ final class DictCCParserTests: XCTestCase {
         XCTAssertEqual(entry.english, "cat")
         XCTAssertEqual(entry.gender, .feminine)
     }
+
+    func testParsesRussianTranslationAndDeclaredKind() throws {
+        let entry = try XCTUnwrap(DictCCParser.parse(
+            line: "lernen\tучиться [несов.]\tverb\t",
+            translationLanguage: .russian
+        ))
+        XCTAssertEqual(entry.german, "lernen")
+        XCTAssertEqual(entry.english, "учиться")
+        XCTAssertEqual(entry.kind, .verb)
+        XCTAssertEqual(entry.meanings.first?.language, .russian)
+    }
 }

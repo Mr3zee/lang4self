@@ -79,7 +79,7 @@ public enum GermanMorphology {
             )
 
         default:
-            var rows = [WordInfo.Row("German", term), .init("English", entry.english)]
+            var rows = [WordInfo.Row("German", term), .init("Translations", entry.translations)]
             if let usage = entry.usage { rows.append(.init("Usage", usage)) }
             return .init(headline: term, kind: entry.kind, gender: entry.gender, separablePrefix: nil, stem: term, rows: rows, isEstimated: false)
         }

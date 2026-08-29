@@ -72,6 +72,7 @@ struct RootView: View {
         case .speak: SpeakView()
         case .review: ReviewView()
         case .library: LibraryView()
+        case .sentences: SentencesView()
         case .settings: SettingsView()
         }
     }

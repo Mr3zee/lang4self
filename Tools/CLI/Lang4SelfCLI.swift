@@ -21,6 +21,9 @@ enum Lang4SelfCLI {
             case "import":
                 guard let path = arguments.dropFirst().first else { throw CLIError.missingImportPath }
                 try await importDictionary(URL(fileURLWithPath: path))
+            case "import-explanations":
+                guard let path = arguments.dropFirst().first else { throw CLIError.missingImportPath }
+                try await importExplanations(URL(fileURLWithPath: path))
             case "help", "--help", "-h":
                 printHelp()
             case "version", "--version", "-v":
@@ -59,7 +62,10 @@ enum Lang4SelfCLI {
         }
         for entry in entries {
             let article = entry.gender == .unknown ? "" : entry.gender.article.replacingOccurrences(of: " (plural)", with: "") + " "
-            print("\(article)\(entry.german)\t\(entry.english)\t[\(entry.kind.label)]")
+            let translations = entry.meanings
+                .map { "[\($0.language.shortLabel)] \($0.translation)" }
+                .joined(separator: "; ")
+            print("\(article)\(entry.german)\t\(translations)\t[\(entry.kind.label)]")
         }
     }
 
@@ -85,6 +91,17 @@ enum Lang4SelfCLI {
             }
         }
         print("Imported \(imported.formatted()) entries.")
+    }
+
+    private static func importExplanations(_ source: URL) async throws {
+        guard FileManager.default.fileExists(atPath: source.path) else { throw CLIError.fileNotFound(source.path) }
+        let store = try LocalStore()
+        let imported = try await store.importExplanations(from: source) { progress in
+            if progress.imported % 50_000 < 5_000 {
+                FileHandle.standardError.write(Data("Imported \(progress.imported.formatted()) of \(progress.total.formatted()) explanations…\n".utf8))
+            }
+        }
+        print("Imported \(imported.formatted()) explanations.")
     }
 
     private static func prepare(_ source: URL) throws -> (file: URL, temporaryDirectory: URL?) {
@@ -119,11 +136,13 @@ enum Lang4SelfCLI {
         Usage:
           lang4self                 Open the desktop app
           lang4self open            Open the desktop app
-          lang4self search <word>   Search German or English
+          lang4self search <word>   Search German, English, or Russian
           lang4self <word>          Search shorthand
           lang4self stats           Show local study statistics
           lang4self database        Print the SQLite database path
           lang4self import <file>   Import a dict.cc ZIP or text file
+          lang4self import-explanations <database-de.db>
+                                    Import Wiktionary explanations
           lang4self version         Print the CLI version
         """)
     }
@@ -139,7 +158,7 @@ enum Lang4SelfCLI {
         var errorDescription: String? {
             switch self {
             case .appNotInstalled: "Desktop app is not installed. Run scripts/install.sh."
-            case .missingSearchTerm: "Provide a German or English search term."
+            case .missingSearchTerm: "Provide a German, English, or Russian search term."
             case .missingImportPath: "Provide a dict.cc ZIP or text-file path."
             case .fileNotFound(let path): "File not found: \(path)"
             case .extractionFailed: "Could not extract the ZIP archive."

@@ -18,6 +18,21 @@ public struct ImportProgress: Sendable, Equatable {
     }
 }
 
+public struct ExplanationImportProgress: Sendable, Equatable {
+    public let imported: Int
+    public let total: Int
+
+    public init(imported: Int, total: Int) {
+        self.imported = imported
+        self.total = total
+    }
+
+    public var fraction: Double {
+        guard total > 0 else { return 0 }
+        return min(1, Double(imported) / Double(total))
+    }
+}
+
 public enum LocalStoreError: LocalizedError {
     case open(String)
     case sqlite(String)
@@ -25,6 +40,7 @@ public enum LocalStoreError: LocalizedError {
     case invalidListName
     case duplicateListName
     case cannotDeleteDefaultList
+    case invalidExplanationDatabase
 
     public var errorDescription: String? {
         switch self {
@@ -34,6 +50,7 @@ public enum LocalStoreError: LocalizedError {
         case .invalidListName: "List names cannot be empty."
         case .duplicateListName: "A list with that name already exists."
         case .cannotDeleteDefaultList: "The My words list cannot be deleted."
+        case .invalidExplanationDatabase: "This is not a supported Lector German dictionary database."
         }
     }
 }
@@ -90,7 +107,25 @@ public actor LocalStore {
     }
 
     public func hasCompleteDictionary() throws -> Bool {
-        try scalarInt("SELECT COUNT(*) FROM dictionary_entries WHERE source = 'dict.cc'") > 100_000
+        try scalarInt("SELECT COUNT(*) FROM dictionary_entries WHERE source = 'dict.cc' AND translation_language = 'en'") > 100_000
+    }
+
+    public func installedTranslationLanguages() throws -> Set<TranslationLanguage> {
+        let statement = try prepare("SELECT DISTINCT translation_language FROM dictionary_entries WHERE source = 'dict.cc'")
+        defer { sqlite3_finalize(statement) }
+        var result = Set<TranslationLanguage>()
+        while true {
+            let step = sqlite3_step(statement)
+            if step == SQLITE_DONE { return result }
+            guard step == SQLITE_ROW else { throw sqliteError() }
+            if let language = TranslationLanguage(rawValue: text(statement, 0)) {
+                result.insert(language)
+            }
+        }
+    }
+
+    public func explanationCount() throws -> Int {
+        try scalarInt("SELECT COUNT(*) FROM dictionary_explanations")
     }
 
     public func seedStarterDictionaryIfNeeded() throws {
@@ -138,7 +173,8 @@ public actor LocalStore {
             .joined(separator: " ")
         let sql = """
             SELECT d.id, d.german, d.english, d.raw_german, d.raw_english,
-                   d.kind, d.gender, d.usage, d.source
+                   d.kind, d.gender, d.usage, d.source, d.translation_language,
+                   d.explanation
             FROM dictionary_fts
             JOIN dictionary_entries d ON d.id = dictionary_fts.rowid
             WHERE dictionary_fts MATCH ?
@@ -176,12 +212,16 @@ public actor LocalStore {
         let totalBytes = Int64(values.fileSize ?? 0)
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
-        let germanFirst = try detectGermanFirst(in: handle)
+        let format = try detectDictionaryFormat(in: handle)
         try handle.seek(toOffset: 0)
 
         try Self.execute(database, "BEGIN IMMEDIATE")
         do {
-            try Self.execute(database, "DELETE FROM dictionary_entries WHERE source = 'dict.cc'")
+            let deleteStatement = try prepare("DELETE FROM dictionary_entries WHERE source = 'dict.cc' AND translation_language = ?")
+            bind(format.language.rawValue, to: 1, in: deleteStatement)
+            let deleteStep = sqlite3_step(deleteStatement)
+            sqlite3_finalize(deleteStatement)
+            guard deleteStep == SQLITE_DONE else { throw sqliteError() }
             // Building FTS once after the bulk insert is substantially faster than
             // updating its index more than a million times through the trigger.
             try Self.execute(database, "DROP TRIGGER IF EXISTS dictionary_ai; DROP TRIGGER IF EXISTS dictionary_ad; DROP TRIGGER IF EXISTS dictionary_au;")
@@ -198,7 +238,12 @@ public actor LocalStore {
                 while let newline = buffer.firstRange(of: Data([0x0A])) {
                     let lineData = buffer[..<newline.lowerBound]
                     buffer.removeSubrange(...newline.lowerBound)
-                    if let line = String(data: lineData, encoding: .utf8), let entry = DictCCParser.parse(line: line, germanFirst: germanFirst) {
+                    if let line = String(data: lineData, encoding: .utf8),
+                       let entry = DictCCParser.parse(
+                           line: line,
+                           germanFirst: format.germanFirst,
+                           translationLanguage: format.language
+                       ) {
                         validLines += 1
                         try insertDictionaryEntry(entry, using: insertStatement)
                         imported += 1
@@ -208,7 +253,13 @@ public actor LocalStore {
                     progress(.init(imported: imported, bytesRead: bytesRead, totalBytes: totalBytes))
                 }
             }
-            if !buffer.isEmpty, let line = String(data: buffer, encoding: .utf8), let entry = DictCCParser.parse(line: line, germanFirst: germanFirst) {
+            if !buffer.isEmpty,
+               let line = String(data: buffer, encoding: .utf8),
+               let entry = DictCCParser.parse(
+                   line: line,
+                   germanFirst: format.germanFirst,
+                   translationLanguage: format.language
+               ) {
                 validLines += 1
                 try insertDictionaryEntry(entry, using: insertStatement)
                 imported += 1
@@ -220,6 +271,108 @@ public actor LocalStore {
             try Self.execute(database, "PRAGMA optimize")
             progress(.init(imported: imported, bytesRead: totalBytes, totalBytes: totalBytes))
             return imported
+        } catch {
+            try? Self.execute(database, "ROLLBACK")
+            throw error
+        }
+    }
+
+    @discardableResult
+    public func importExplanations(
+        from url: URL,
+        progress: @escaping @Sendable (ExplanationImportProgress) -> Void = { _ in }
+    ) throws -> Int {
+        var sourceDatabase: OpaquePointer?
+        let separator = url.absoluteString.contains("?") ? "&" : "?"
+        let sourceURI = url.absoluteString + separator + "immutable=1"
+        let openResult = sqlite3_open_v2(
+            sourceURI,
+            &sourceDatabase,
+            SQLITE_OPEN_READONLY | SQLITE_OPEN_URI | SQLITE_OPEN_FULLMUTEX,
+            nil
+        )
+        guard openResult == SQLITE_OK, let sourceDatabase else {
+            sqlite3_close(sourceDatabase)
+            throw LocalStoreError.invalidExplanationDatabase
+        }
+        defer { sqlite3_close(sourceDatabase) }
+
+        var countStatement: OpaquePointer?
+        guard sqlite3_prepare_v2(sourceDatabase, "SELECT COUNT(*) FROM senses", -1, &countStatement, nil) == SQLITE_OK else {
+            throw LocalStoreError.invalidExplanationDatabase
+        }
+        defer { sqlite3_finalize(countStatement) }
+        guard sqlite3_step(countStatement) == SQLITE_ROW else {
+            throw LocalStoreError.invalidExplanationDatabase
+        }
+        let total = Int(sqlite3_column_int64(countStatement, 0))
+
+        let sourceSQL = """
+            SELECT s.word, s.pos, s.gloss, s.sort_order
+            FROM senses AS s
+            JOIN entries AS e ON e.word = s.word
+            ORDER BY s.word, s.sort_order, s.id
+            """
+        var sourceStatement: OpaquePointer?
+        guard sqlite3_prepare_v2(sourceDatabase, sourceSQL, -1, &sourceStatement, nil) == SQLITE_OK else {
+            throw LocalStoreError.invalidExplanationDatabase
+        }
+        defer { sqlite3_finalize(sourceStatement) }
+
+        try Self.execute(database, "BEGIN IMMEDIATE")
+        do {
+            let sourceName = "Wiktionary via Lector"
+            let deleteStatement = try prepare("DELETE FROM dictionary_explanations WHERE source = ?")
+            bind(sourceName, to: 1, in: deleteStatement)
+            defer { sqlite3_finalize(deleteStatement) }
+            try stepDone(deleteStatement)
+
+            let insertStatement = try prepare("""
+                INSERT OR IGNORE INTO dictionary_explanations
+                  (german_key, kind, explanation, source, sort_order)
+                VALUES (?, ?, ?, ?, ?)
+                """)
+            defer { sqlite3_finalize(insertStatement) }
+
+            var imported = 0
+            while true {
+                let step = sqlite3_step(sourceStatement)
+                if step == SQLITE_DONE { break }
+                guard step == SQLITE_ROW,
+                      let wordValue = sqlite3_column_text(sourceStatement, 0),
+                      let glossValue = sqlite3_column_text(sourceStatement, 2) else {
+                    throw LocalStoreError.invalidExplanationDatabase
+                }
+                let word = dictionaryGroupingTerm(String(cString: wordValue))
+                let gloss = String(cString: glossValue).trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !word.isEmpty, !gloss.isEmpty else { continue }
+                let position = sqlite3_column_int(sourceStatement, 3)
+                let partOfSpeech = sqlite3_column_text(sourceStatement, 1).map { String(cString: $0) } ?? ""
+
+                sqlite3_reset(insertStatement)
+                sqlite3_clear_bindings(insertStatement)
+                bind(word, to: 1, in: insertStatement)
+                bind(wordKind(forLectorPartOfSpeech: partOfSpeech).rawValue, to: 2, in: insertStatement)
+                bind(gloss, to: 3, in: insertStatement)
+                bind(sourceName, to: 4, in: insertStatement)
+                sqlite3_bind_int(insertStatement, 5, position)
+                try stepDone(insertStatement)
+                imported += 1
+                if imported % 5_000 == 0 {
+                    progress(.init(imported: imported, total: total))
+                }
+            }
+            let stored: Int
+            do {
+                let storedStatement = try prepare("SELECT COUNT(*) FROM dictionary_explanations WHERE source = ?")
+                defer { sqlite3_finalize(storedStatement) }
+                bind(sourceName, to: 1, in: storedStatement)
+                stored = try readScalarInt(storedStatement)
+            }
+            try Self.execute(database, "COMMIT")
+            try Self.execute(database, "PRAGMA optimize")
+            progress(.init(imported: imported, total: total))
+            return stored
         } catch {
             try? Self.execute(database, "ROLLBACK")
             throw error
@@ -461,6 +614,87 @@ public actor LocalStore {
         try stepDone(statement)
     }
 
+    public func personalCard(id: PersonalCard.ID) throws -> PersonalCard? {
+        try card(id: id)
+    }
+
+    public func savedSentences(limit: Int = 500) throws -> [SavedSentence] {
+        guard limit > 0 else { return [] }
+        let statement = try prepare("""
+            SELECT id, german, translation, source_list_id, source_list_name, tokens_json, created_at
+            FROM saved_sentences
+            ORDER BY created_at DESC, id DESC
+            LIMIT ?
+            """)
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_int(statement, 1, Int32(clamping: limit))
+        return try readSentences(statement)
+    }
+
+    @discardableResult
+    public func saveSentences(_ drafts: [SentenceDraft], sourceList: WordList) throws -> [SavedSentence] {
+        let validDrafts = drafts.prefix(10).filter {
+            !$0.german.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+            !$0.translation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+            !$0.tokens.isEmpty
+        }
+        guard !validDrafts.isEmpty else { return [] }
+
+        try Self.execute(database, "BEGIN IMMEDIATE")
+        do {
+            let sql = """
+                INSERT OR IGNORE INTO saved_sentences
+                  (german, translation, source_list_id, source_list_name, tokens_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """
+            let statement = try prepare(sql)
+            defer { sqlite3_finalize(statement) }
+            let encoder = JSONEncoder()
+            var result: [SavedSentence] = []
+
+            for draft in validDrafts {
+                sqlite3_reset(statement)
+                sqlite3_clear_bindings(statement)
+                bind(draft.german.trimmingCharacters(in: .whitespacesAndNewlines), to: 1, in: statement)
+                bind(draft.translation.trimmingCharacters(in: .whitespacesAndNewlines), to: 2, in: statement)
+                sqlite3_bind_int64(statement, 3, sourceList.id)
+                bind(sourceList.name, to: 4, in: statement)
+                let tokenData = try encoder.encode(draft.tokens)
+                guard let tokenJSON = String(data: tokenData, encoding: .utf8) else {
+                    throw LocalStoreError.sqlite("Could not encode sentence words")
+                }
+                bind(tokenJSON, to: 5, in: statement)
+                let createdAt = Date()
+                sqlite3_bind_double(statement, 6, createdAt.timeIntervalSince1970)
+                try stepDone(statement)
+
+                if sqlite3_changes(database) > 0 {
+                    result.append(.init(
+                        id: sqlite3_last_insert_rowid(database),
+                        german: draft.german,
+                        translation: draft.translation,
+                        sourceListID: sourceList.id,
+                        sourceListName: sourceList.name,
+                        tokens: draft.tokens,
+                        createdAt: createdAt
+                    ))
+                }
+            }
+            try Self.execute(database, "COMMIT")
+            return result
+        } catch {
+            try? Self.execute(database, "ROLLBACK")
+            throw error
+        }
+    }
+
+    public func deleteSentence(id: SavedSentence.ID) throws {
+        let statement = try prepare("DELETE FROM saved_sentences WHERE id = ?")
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_int64(statement, 1, id)
+        try stepDone(statement)
+    }
+
     public func stats(listID: Int64 = WordList.defaultID, now: Date = .now, calendar: Calendar = .current) throws -> StudyStats {
         let totalStatement = try prepare("SELECT COUNT(*) FROM card_lists WHERE list_id = ?")
         defer { sqlite3_finalize(totalStatement) }
@@ -506,10 +740,23 @@ public actor LocalStore {
               gender TEXT NOT NULL,
               usage TEXT,
               source TEXT NOT NULL,
-              UNIQUE(raw_german, raw_english)
+              translation_language TEXT NOT NULL DEFAULT 'en',
+              explanation TEXT,
+              UNIQUE(raw_german, raw_english, translation_language)
             );
             CREATE INDEX IF NOT EXISTS dictionary_source ON dictionary_entries(source);
             CREATE INDEX IF NOT EXISTS dictionary_word_kind ON dictionary_entries(normalized_german, kind);
+            CREATE TABLE IF NOT EXISTS dictionary_explanations (
+              id INTEGER PRIMARY KEY,
+              german_key TEXT NOT NULL,
+              kind TEXT NOT NULL,
+              explanation TEXT NOT NULL,
+              source TEXT NOT NULL,
+              sort_order INTEGER NOT NULL DEFAULT 0,
+              UNIQUE(german_key, kind, explanation, source)
+            );
+            CREATE INDEX IF NOT EXISTS dictionary_explanations_word_kind
+              ON dictionary_explanations(german_key, kind, sort_order);
             CREATE VIRTUAL TABLE IF NOT EXISTS dictionary_fts USING fts5(
               german, english, content='dictionary_entries', content_rowid='id',
               tokenize='unicode61 remove_diacritics 2'
@@ -554,7 +801,25 @@ public actor LocalStore {
               reviewed_at REAL NOT NULL,
               interval_days REAL NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS saved_sentences (
+              id INTEGER PRIMARY KEY,
+              german TEXT NOT NULL,
+              translation TEXT NOT NULL,
+              source_list_id INTEGER REFERENCES word_lists(id) ON DELETE SET NULL,
+              source_list_name TEXT NOT NULL,
+              tokens_json TEXT NOT NULL,
+              created_at REAL NOT NULL,
+              UNIQUE(german, translation)
+            );
+            CREATE INDEX IF NOT EXISTS saved_sentences_created ON saved_sentences(created_at DESC);
             """)
+        if try !table("dictionary_entries", hasColumn: "translation_language", in: database) {
+            try execute(database, "ALTER TABLE dictionary_entries ADD COLUMN translation_language TEXT NOT NULL DEFAULT 'en'")
+        }
+        if try !table("dictionary_entries", hasColumn: "explanation", in: database) {
+            try execute(database, "ALTER TABLE dictionary_entries ADD COLUMN explanation TEXT")
+        }
+        try execute(database, "CREATE INDEX IF NOT EXISTS dictionary_source_language ON dictionary_entries(source, translation_language)")
         let defaultName = "My words".replacingOccurrences(of: "'", with: "''")
         try execute(database, "INSERT OR IGNORE INTO word_lists (id, name, created_at) VALUES (\(WordList.defaultID), '\(defaultName)', strftime('%s', 'now'))")
         try execute(database, "INSERT OR IGNORE INTO card_lists (card_id, list_id, added_at) SELECT id, \(WordList.defaultID), created_at FROM personal_cards WHERE NOT EXISTS (SELECT 1 FROM card_lists)")
@@ -580,14 +845,20 @@ public actor LocalStore {
         bind(entry.gender.rawValue, to: 8, in: statement)
         if let usage = entry.usage { bind(usage, to: 9, in: statement) } else { sqlite3_bind_null(statement, 9) }
         bind(entry.source, to: 10, in: statement)
+        bind(entry.meanings.first?.language.rawValue ?? TranslationLanguage.english.rawValue, to: 11, in: statement)
+        if let explanation = entry.meanings.first?.explanation {
+            bind(explanation, to: 12, in: statement)
+        } else {
+            sqlite3_bind_null(statement, 12)
+        }
         try stepDone(statement)
     }
 
     private var dictionaryInsertSQL: String {
         """
         INSERT OR IGNORE INTO dictionary_entries
-          (german, english, normalized_german, normalized_english, raw_german, raw_english, kind, gender, usage, source)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          (german, english, normalized_german, normalized_english, raw_german, raw_english, kind, gender, usage, source, translation_language, explanation)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
     }
 
@@ -628,7 +899,9 @@ public actor LocalStore {
                 kind: WordKind(rawValue: text(statement, 5)) ?? .other,
                 gender: Gender(rawValue: text(statement, 6)) ?? .unknown,
                 usage: nullableText(statement, 7),
-                source: text(statement, 8)
+                source: text(statement, 8),
+                explanation: nullableText(statement, 10),
+                translationLanguage: TranslationLanguage(rawValue: text(statement, 9)) ?? .english
             ))
         }
     }
@@ -636,7 +909,8 @@ public actor LocalStore {
     private func dictionaryGroup(representedBy representative: DictionaryEntry) throws -> DictionaryEntry {
         let sql = """
             SELECT id, german, english, raw_german, raw_english,
-                   kind, gender, usage, source
+                   kind, gender, usage, source, translation_language,
+                   explanation
             FROM dictionary_entries
             WHERE normalized_german = ? AND kind = ?
             ORDER BY id
@@ -656,8 +930,10 @@ public actor LocalStore {
             let meaning = DictionaryMeaning(
                 english: entry.english,
                 rawEnglish: entry.rawEnglish,
+                language: entry.meanings.first?.language ?? .english,
                 gender: entry.gender,
-                usage: entry.usage
+                usage: entry.usage,
+                explanation: entry.meanings.first?.explanation
             )
             return seenMeanings.insert(meaning.id).inserted ? meaning : nil
         }
@@ -665,6 +941,10 @@ public actor LocalStore {
         let usages = Set(entries.map(\.usage))
         let sources = entries.map(\.source).reduce(into: [String]()) { result, source in
             if !result.contains(source) { result.append(source) }
+        }
+        let explanations = try dictionaryExplanations(for: canonical)
+        let allSources = explanations.reduce(into: sources) { result, explanation in
+            if !result.contains(explanation.source) { result.append(explanation.source) }
         }
 
         return DictionaryEntry(
@@ -676,9 +956,29 @@ public actor LocalStore {
             kind: canonical.kind,
             gender: genders.count == 1 ? canonical.gender : .unknown,
             usage: usages.count == 1 ? canonical.usage : nil,
-            source: sources.joined(separator: ", "),
-            meanings: meanings
+            source: allSources.joined(separator: ", "),
+            meanings: meanings,
+            explanations: explanations
         )
+    }
+
+    private func dictionaryExplanations(for entry: DictionaryEntry) throws -> [DictionaryExplanation] {
+        let statement = try prepare("""
+            SELECT explanation, source
+            FROM dictionary_explanations
+            WHERE german_key = ? AND kind = ?
+            ORDER BY sort_order, id
+            """)
+        defer { sqlite3_finalize(statement) }
+        bind(dictionaryGroupingTerm(entry.german), to: 1, in: statement)
+        bind(entry.kind.rawValue, to: 2, in: statement)
+        var result: [DictionaryExplanation] = []
+        while true {
+            let step = sqlite3_step(statement)
+            if step == SQLITE_DONE { return result }
+            guard step == SQLITE_ROW else { throw sqliteError() }
+            result.append(.init(text: text(statement, 0), source: text(statement, 1)))
+        }
     }
 
     private func readCards(_ statement: OpaquePointer?) throws -> [PersonalCard] {
@@ -708,6 +1008,31 @@ public actor LocalStore {
                 lapses: Int(sqlite3_column_int(statement, 15)),
                 isStarred: sqlite3_column_int(statement, 16) != 0,
                 isSuspended: sqlite3_column_int(statement, 17) != 0
+            ))
+        }
+    }
+
+    private func readSentences(_ statement: OpaquePointer?) throws -> [SavedSentence] {
+        let decoder = JSONDecoder()
+        var result: [SavedSentence] = []
+        while true {
+            let step = sqlite3_step(statement)
+            if step == SQLITE_DONE { return result }
+            guard step == SQLITE_ROW else { throw sqliteError() }
+            let sourceListID = sqlite3_column_type(statement, 3) == SQLITE_NULL
+                ? nil
+                : sqlite3_column_int64(statement, 3)
+            let tokenData = Data(text(statement, 5).utf8)
+            let tokens = (try? decoder.decode([SentenceToken].self, from: tokenData))
+                ?? SentenceTokenizer.tokens(in: text(statement, 1))
+            result.append(.init(
+                id: sqlite3_column_int64(statement, 0),
+                german: text(statement, 1),
+                translation: text(statement, 2),
+                sourceListID: sourceListID,
+                sourceListName: text(statement, 4),
+                tokens: tokens,
+                createdAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 6))
             ))
         }
     }
@@ -753,9 +1078,24 @@ public actor LocalStore {
             .replacingOccurrences(of: "_", with: "\\_")
     }
 
-    private func detectGermanFirst(in handle: FileHandle) throws -> Bool {
+    private func detectDictionaryFormat(in handle: FileHandle) throws -> DictionaryFormat {
         guard let sample = try handle.read(upToCount: 4_194_304),
-              let text = String(data: sample, encoding: .utf8) else { return true }
+              let text = String(data: sample, encoding: .utf8) else {
+            return .init(germanFirst: true, language: .english)
+        }
+        let header = text.prefix(2_000).uppercased()
+        if header.contains("DE-RU VOCABULARY DATABASE") {
+            return .init(germanFirst: true, language: .russian)
+        }
+        if header.contains("RU-DE VOCABULARY DATABASE") {
+            return .init(germanFirst: false, language: .russian)
+        }
+        if header.contains("DE-EN VOCABULARY DATABASE") {
+            return .init(germanFirst: true, language: .english)
+        }
+        if header.contains("EN-DE VOCABULARY DATABASE") {
+            return .init(germanFirst: false, language: .english)
+        }
         var firstColumnTags = 0
         var secondColumnTags = 0
         for line in text.split(separator: "\n") where !line.hasPrefix("#") {
@@ -764,7 +1104,7 @@ public actor LocalStore {
             firstColumnTags += germanGrammarTagCount(in: columns[0])
             secondColumnTags += germanGrammarTagCount(in: columns[1])
         }
-        return firstColumnTags >= secondColumnTags
+        return .init(germanFirst: firstColumnTags >= secondColumnTags, language: .english)
     }
 
     private func germanGrammarTagCount(in value: Substring) -> Int {
@@ -785,6 +1125,19 @@ public actor LocalStore {
             sqlite3_free(error)
             throw LocalStoreError.sqlite(message)
         }
+    }
+
+    private static func table(_ table: String, hasColumn column: String, in database: OpaquePointer?) throws -> Bool {
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(database, "PRAGMA table_info(\(table))", -1, &statement, nil) == SQLITE_OK else {
+            throw LocalStoreError.sqlite(database.map { String(cString: sqlite3_errmsg($0)) } ?? "unknown error")
+        }
+        defer { sqlite3_finalize(statement) }
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let value = sqlite3_column_text(statement, 1) else { continue }
+            if String(cString: value) == column { return true }
+        }
+        return false
     }
 
     private static func createDictionaryTriggers(_ database: OpaquePointer?) throws {
@@ -810,6 +1163,22 @@ private struct DictionaryGroupKey: Hashable {
     init(_ entry: DictionaryEntry) {
         german = dictionaryGroupingTerm(entry.german)
         kind = entry.kind
+    }
+}
+
+private struct DictionaryFormat {
+    let germanFirst: Bool
+    let language: TranslationLanguage
+}
+
+private func wordKind(forLectorPartOfSpeech value: String) -> WordKind {
+    switch value {
+    case "noun": .noun
+    case "verb": .verb
+    case "adj": .adjective
+    case "adv": .adverb
+    case "phrase", "prep_phrase", "proverb": .phrase
+    default: .other
     }
 }
 

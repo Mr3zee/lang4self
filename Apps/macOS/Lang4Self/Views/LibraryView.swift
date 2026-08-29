@@ -258,7 +258,7 @@ private struct CardEditor: View {
             Text("Edit entry").font(.title2.weight(.bold))
             Form {
                 TextField("German", text: $card.german)
-                TextField("English", text: $card.english)
+                TextField("Translations", text: $card.english)
                 TextField("Tags", text: $card.tags, prompt: Text("travel, A2"))
                 TextField("Notes", text: $card.notes, axis: .vertical)
                     .lineLimit(3...8)

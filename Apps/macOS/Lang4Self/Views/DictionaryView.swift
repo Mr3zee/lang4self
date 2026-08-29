@@ -10,7 +10,7 @@ struct DictionaryView: View {
             VStack(spacing: 0) {
                 HStack {
                     Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                    TextField("German or English", text: $state.searchQuery)
+                    TextField("German, English, or Russian", text: $state.searchQuery)
                         .textFieldStyle(.plain)
                         .focused($searchFocused)
                         .onSubmit {
@@ -31,7 +31,7 @@ struct DictionaryView: View {
                 Divider()
 
                 if state.searchQuery.isEmpty {
-                    PlaceholderView(symbol: "text.magnifyingglass", title: "Search locally", detail: "Type a German or English word or phrase. Press ⌘F from anywhere.")
+                    PlaceholderView(symbol: "text.magnifyingglass", title: "Search locally", detail: "Type a German, English, or Russian word or phrase. Press ⌘F from anywhere.")
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else if state.searchResults.isEmpty {
                     PlaceholderView(symbol: "questionmark.folder", title: "No match", detail: "Try another spelling or import the complete dict.cc file in Settings.")
@@ -54,7 +54,7 @@ struct DictionaryView: View {
                     state.addToPersonalDictionary(entry)
                 }
             } else {
-                PlaceholderView(symbol: "character.book.closed", title: "Lang4Self", detail: "Your offline German–English dictionary")
+                PlaceholderView(symbol: "character.book.closed", title: "Lang4Self", detail: "Your offline German dictionary")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }

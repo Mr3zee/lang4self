@@ -15,7 +15,7 @@ struct ReviewView: View {
             if let card = current {
                 VStack(spacing: 24) {
                     Spacer()
-                    Text("ENGLISH → GERMAN")
+                    Text("TRANSLATIONS → GERMAN")
                         .font(.caption.weight(.bold))
                         .foregroundStyle(.secondary)
                     Text(card.english)

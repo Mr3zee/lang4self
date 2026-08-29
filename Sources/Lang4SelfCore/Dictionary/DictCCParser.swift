@@ -5,7 +5,11 @@ public enum DictCCParser {
     private static let squareExpression = try! NSRegularExpression(pattern: #"\s*\[[^]]+\]"#)
     private static let angleExpression = try! NSRegularExpression(pattern: #"\s*<[^>]+>"#)
 
-    public static func parse(line: String, germanFirst: Bool = true) -> DictionaryEntry? {
+    public static func parse(
+        line: String,
+        germanFirst: Bool = true,
+        translationLanguage: TranslationLanguage = .english
+    ) -> DictionaryEntry? {
         guard !line.isEmpty, !line.hasPrefix("#") else { return nil }
         let columns = line.split(separator: "\t", omittingEmptySubsequences: false)
         guard columns.count >= 2 else { return nil }
@@ -14,10 +18,13 @@ public enum DictCCParser {
         let englishColumn = germanFirst ? 1 : 0
         let rawGerman = String(columns[germanColumn]).trimmingCharacters(in: .whitespacesAndNewlines)
         let rawEnglish = String(columns[englishColumn]).trimmingCharacters(in: .whitespacesAndNewlines)
+        let declaredKind = columns.count > 2
+            ? String(columns[2]).trimmingCharacters(in: .whitespacesAndNewlines)
+            : ""
         guard !rawGerman.isEmpty, !rawEnglish.isEmpty else { return nil }
 
         let gender = detectGender(in: rawGerman)
-        let kind = detectKind(in: rawGerman, english: rawEnglish, gender: gender)
+        let kind = detectKind(in: rawGerman, english: rawEnglish, declaredKind: declaredKind, gender: gender)
         let german = cleanedTerm(rawGerman)
         let english = cleanedTerm(rawEnglish)
         guard !german.isEmpty, !english.isEmpty else { return nil }
@@ -30,7 +37,8 @@ public enum DictCCParser {
             kind: kind,
             gender: gender,
             usage: extractUsage(from: rawGerman),
-            source: "dict.cc"
+            source: "dict.cc",
+            translationLanguage: translationLanguage
         )
     }
 
@@ -60,8 +68,13 @@ public enum DictCCParser {
         return .unknown
     }
 
-    private static func detectKind(in value: String, english: String, gender: Gender) -> WordKind {
+    private static func detectKind(in value: String, english: String, declaredKind: String, gender: Gender) -> WordKind {
         if gender != .unknown { return .noun }
+        let declaration = declaredKind.lowercased()
+        if declaration.contains("noun") { return .noun }
+        if declaration.contains("verb") { return .verb }
+        if declaration.contains("adj") || declaration.contains("past-p") || declaration.contains("pres-p") { return .adjective }
+        if declaration.contains("adv") { return .adverb }
         let lower = value.lowercased()
         let lowerEnglish = english.lowercased()
         if ["{vi}", "{vt}", "{vr}", "{verb}", "{v.i.}", "{v.t.}"].contains(where: lower.contains)
