@@ -15,14 +15,16 @@ struct Lang4SelfApp: App {
         )
         _dependencies = StateObject(wrappedValue: dependencies)
         appDelegate.appState = dependencies.state
+        appDelegate.speakShortcut = dependencies.speakShortcut
     }
 
     var body: some Scene {
         WindowGroup {
-            if let state = dependencies.state {
+            if let state = dependencies.state, let speakShortcut = dependencies.speakShortcut {
                 RootView()
                     .environmentObject(state)
                     .environmentObject(dependencies.speech)
+                    .environmentObject(speakShortcut)
             } else {
                 StartupFailureView(message: dependencies.startupFailure ?? "The application could not start.")
             }
@@ -41,6 +43,7 @@ struct Lang4SelfApp: App {
 private final class Lang4SelfDependencies: ObservableObject {
     let state: AppState?
     let speech: SpeechRecognizer
+    let speakShortcut: SpeakShortcutController?
     let startupFailure: String?
 
     init(processInfo: ProcessInfo, settingsDefaults: UserDefaults) {
@@ -51,7 +54,7 @@ private final class Lang4SelfDependencies: ObservableObject {
                 .map(URL.init(fileURLWithPath:))
             let store = try LocalStore(url: databaseURL, now: { .now })
             let settingsStore = UserDefaultsLMStudioSettingsStore(defaults: settingsDefaults)
-            state = AppState(
+            let state = AppState(
                 store: store,
                 sentenceGenerator: LMStudioService(),
                 dictionaryFilePreparer: SystemDictionaryFilePreparer(),
@@ -60,9 +63,16 @@ private final class Lang4SelfDependencies: ObservableObject {
                 now: { .now },
                 calendar: .autoupdatingCurrent
             )
+            self.state = state
+            speakShortcut = SpeakShortcutController(
+                router: state,
+                speech: speech,
+                holdDelay: 0.18
+            )
             startupFailure = nil
         } catch {
             state = nil
+            speakShortcut = nil
             startupFailure = error.localizedDescription
         }
     }
@@ -81,12 +91,15 @@ private struct StartupFailureView: View {
     }
 }
 
+@MainActor
 private final class Lang4SelfAppDelegate: NSObject, NSApplicationDelegate {
     weak var appState: AppState?
+    var speakShortcut: SpeakShortcutController?
     private var shortcutHotKey: EventHotKeyRef?
     private var shortcutHotKeyHandler: EventHandlerRef?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        speakShortcut?.startMonitoring()
         installShortcutHotKeyHandler()
         registerShortcutHotKey()
 
@@ -112,6 +125,7 @@ private final class Lang4SelfAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillResignActive(_ notification: Notification) {
+        speakShortcut?.releaseSpaceHold()
         unregisterShortcutHotKey()
     }
 
@@ -124,6 +138,7 @@ private final class Lang4SelfAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        speakShortcut?.stopMonitoring()
         unregisterShortcutHotKey()
         if let shortcutHotKeyHandler { RemoveEventHandler(shortcutHotKeyHandler) }
         shortcutHotKeyHandler = nil

@@ -25,11 +25,12 @@
 # macOS UI tests
 
 - Tests live in `Tests/Lang4SelfUITests/Lang4SelfUITests.swift`.
-- Run one test first with `-only-testing:Lang4SelfUITests/Lang4SelfUITests/testName`, then run the full UI-test target.
+- Run only the focused test(s) relevant to the change by default, using `-only-testing:Lang4SelfUITests/Lang4SelfUITests/testName`.
+- Do not run the full UI-test target unless the user explicitly asks for it; the full suite is very slow.
 - Use Xcode's default Derived Data. Never use `-derivedDataPath .derived`: this Desktop-hosted repository causes repeated macOS permission prompts.
 - Add stable accessibility identifiers and deterministic `--ui-testing` fixtures for new interactions.
 - Ignore locked-iPhone `notification_proxy` warnings; they are unrelated to macOS tests.
-- Run all UI tests with:
+- When the user explicitly asks for the full UI suite, run it with:
 
 ```sh
 xcodebuild -quiet -project Lang4Self.xcodeproj -scheme Lang4Self \

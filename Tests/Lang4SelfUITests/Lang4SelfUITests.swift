@@ -126,6 +126,10 @@ final class Lang4SelfUITests: XCTestCase {
         waitForUIToSettle()
         app.typeKey(.space, modifierFlags: [])
         XCTAssertTrue(app.buttons["speak.confirm"].waitForExistence(timeout: 3))
+        let results = element("speak.results")
+        XCTAssertTrue(results.waitForExistence(timeout: 3))
+        assertFocused(results)
+        XCTAssertTrue(app.staticTexts["Part of speech: Noun"].firstMatch.exists)
         app.typeKey(.return, modifierFlags: [])
         XCTAssertTrue(app.buttons["banner.dismiss"].waitForExistence(timeout: 3))
 
@@ -142,6 +146,18 @@ final class Lang4SelfUITests: XCTestCase {
         XCTAssertTrue(app.buttons["speak.confirm"].waitForExistence(timeout: 3))
     }
 
+    func testSpaceOpensSpeakAndRecordsFromAnotherPage() {
+        openRoute("6", route: "settings")
+
+        app.typeKey(.space, modifierFlags: [])
+
+        XCTAssertTrue(app.buttons["speak.record"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.buttons["speak.confirm"].waitForExistence(timeout: 3))
+        let results = element("speak.results")
+        XCTAssertTrue(results.waitForExistence(timeout: 3))
+        assertFocused(results)
+    }
+
     func testReviewRevealAndEveryRatingShortcut() {
         for rating in ["1", "2", "3", "4"] {
             relaunchFixture()
@@ -153,6 +169,15 @@ final class Lang4SelfUITests: XCTestCase {
             app.typeKey(rating, modifierFlags: [])
             XCTAssertTrue(app.buttons["review.reveal"].waitForExistence(timeout: 3))
         }
+    }
+
+    func testReviewPromptShowsPartOfSpeechBeforeReveal() {
+        openRoute("3", route: "review")
+
+        let partOfSpeech = element("review.part-of-speech")
+        XCTAssertTrue(partOfSpeech.waitForExistence(timeout: 3))
+        XCTAssertTrue(app.staticTexts["Part of speech: Noun"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.buttons["review.reveal"].exists)
     }
 
     func testReviewListScopeCompletionAndRestart() {

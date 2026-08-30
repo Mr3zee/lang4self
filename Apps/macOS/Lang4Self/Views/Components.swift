@@ -46,6 +46,24 @@ struct TranslationLanguageBadge: View {
     }
 }
 
+struct PartOfSpeechBadge: View {
+    let kind: WordKind
+
+    private var title: String {
+        kind == .other ? "Unclassified" : kind.label
+    }
+
+    var body: some View {
+        Text(title)
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(.quaternary, in: Capsule())
+            .accessibilityLabel("Part of speech: \(title)")
+    }
+}
+
 struct GermanWordView: View {
     let entry: DictionaryEntry
     var font: Font = .headline
@@ -70,39 +88,66 @@ struct GermanWordView: View {
 
 struct EntryRow: View {
     let entry: DictionaryEntry
+    @State private var expandedLanguages: Set<TranslationLanguage> = []
 
-    private var previewMeanings: [DictionaryMeaning] {
-        var seenLanguages = Set<TranslationLanguage>()
-        let firstInEachLanguage = entry.meanings.filter {
-            seenLanguages.insert($0.language).inserted
-        }
-        let remaining = entry.meanings.filter { !firstInEachLanguage.contains($0) }
-        return Array((firstInEachLanguage + remaining).prefix(3))
+    private func meanings(for language: TranslationLanguage) -> [DictionaryMeaning] {
+        entry.meanings.filter { $0.language == language }
+    }
+
+    private func previewLimit(for language: TranslationLanguage) -> Int {
+        language == .english ? 3 : 1
+    }
+
+    private func visibleMeanings(for language: TranslationLanguage) -> [DictionaryMeaning] {
+        let languageMeanings = meanings(for: language)
+        guard !expandedLanguages.contains(language) else { return languageMeanings }
+        return Array(languageMeanings.prefix(previewLimit(for: language)))
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            GermanWordView(entry: entry)
-            ForEach(previewMeanings) { meaning in
-                HStack(spacing: 6) {
-                    TranslationLanguageBadge(language: meaning.language)
-                    Text(meaning.translation)
-                        .lineLimit(1)
-                    if entry.gender == .unknown, meaning.gender != .unknown {
-                        GenderBadge(gender: meaning.gender)
-                    }
-                }
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
+            HStack(spacing: 7) {
+                GermanWordView(entry: entry)
+                PartOfSpeechBadge(kind: entry.kind)
             }
-            if entry.meanings.count > 3 {
-                Text("+ \(entry.meanings.count - 3) more")
+
+            ForEach(TranslationLanguage.allCases, id: \.self) { language in
+                let languageMeanings = meanings(for: language)
+                ForEach(visibleMeanings(for: language)) { meaning in
+                    HStack(spacing: 6) {
+                        TranslationLanguageBadge(language: language)
+                        Text(meaning.translation)
+                            .lineLimit(1)
+                        if entry.gender == .unknown, meaning.gender != .unknown {
+                            GenderBadge(gender: meaning.gender)
+                        }
+                    }
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                }
+
+                if languageMeanings.count > previewLimit(for: language) {
+                    Button {
+                        if expandedLanguages.contains(language) {
+                            expandedLanguages.remove(language)
+                        } else {
+                            expandedLanguages.insert(language)
+                        }
+                    } label: {
+                        let remaining = languageMeanings.count - previewLimit(for: language)
+                        Text(expandedLanguages.contains(language)
+                            ? "Show less \(language.label)"
+                            : "+ \(remaining) more \(language.label)")
+                    }
+                    .buttonStyle(.plain)
                     .font(.caption)
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(.tint)
+                    .accessibilityIdentifier("entry.\(entry.id).meanings.\(language.rawValue).toggle")
+                }
             }
         }
         .padding(.vertical, 4)
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .contain)
     }
 }
 
@@ -117,12 +162,12 @@ struct EntryDetailView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
                 VStack(alignment: .leading, spacing: 8) {
-                    GermanWordView(entry: entry, font: .largeTitle.weight(.bold))
+                    HStack(spacing: 9) {
+                        GermanWordView(entry: entry, font: .largeTitle.weight(.bold))
+                        PartOfSpeechBadge(kind: entry.kind)
+                    }
                     meanings
                     HStack {
-                        Text(entry.kind.label)
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.secondary)
                         GenderBadge(gender: entry.gender)
                     }
                 }
@@ -292,12 +337,13 @@ struct AppShortcut: Identifiable {
         .init(group: .global, keys: "⌘,", action: "Open Settings"),
         .init(group: .global, keys: "⌘F", action: "Focus search in Dictionary or My Words; open Dictionary elsewhere"),
         .init(group: .global, keys: "⌘?", action: "Show this keyboard shortcut reference"),
+        .init(group: .global, keys: "Hold Space", action: "Open Speak and record from anywhere"),
         .init(group: .global, keys: "Tab / ⇧Tab", action: "Move focus forward or backward"),
         .init(group: .dictionary, keys: "↑ / ↓", action: "Move through search results"),
         .init(group: .dictionary, keys: "Return", action: "Move from search into its results"),
         .init(group: .dictionary, keys: "⌘Return", action: "Add the selected dictionary entry"),
         .init(group: .dictionary, keys: "Esc", action: "Clear the focused search field"),
-        .init(group: .speak, keys: "Hold Space", action: "Record speech; release to look it up"),
+        .init(group: .speak, keys: "Hold Space", action: "Record again; release to look it up"),
         .init(group: .speak, keys: "Return", action: "Confirm the selected spoken entry"),
         .init(group: .review, keys: "Space", action: "Reveal the current answer or restart after completion"),
         .init(group: .review, keys: "1 … 4", action: "Rate Again, Hard, Good, or Easy after revealing"),

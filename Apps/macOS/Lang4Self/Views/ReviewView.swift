@@ -25,6 +25,8 @@ struct ReviewView: View {
                     Text("TRANSLATIONS → GERMAN")
                         .font(.caption.weight(.bold))
                         .foregroundStyle(.secondary)
+                    PartOfSpeechBadge(kind: card.kind)
+                        .accessibilityIdentifier("review.part-of-speech")
                     Text(card.english)
                         .font(.system(size: 36, weight: .bold, design: .rounded))
                         .multilineTextAlignment(.center)

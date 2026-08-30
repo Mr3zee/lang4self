@@ -5,12 +5,11 @@ import Lang4SelfCore
 struct SpeakView: View {
     @EnvironmentObject private var state: AppState
     @EnvironmentObject private var speech: SpeechRecognizer
-    @State private var spaceMonitor: Any?
-    @State private var isSpaceHeld = false
+    @EnvironmentObject private var speakShortcut: SpeakShortcutController
     @State private var isManualRecording = false
     @FocusState private var focusedControl: FocusControl?
 
-    private enum FocusControl: Hashable { case record, confirm }
+    private enum FocusControl: Hashable { case record, results }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -51,6 +50,8 @@ struct SpeakView: View {
                         EntryRow(entry: result).tag(result)
                     }
                     .frame(minWidth: 260, idealWidth: 310)
+                    .focused($focusedControl, equals: .results)
+                    .accessibilityIdentifier("speak.results")
 
                     EntryDetailView(entry: entry)
                 }
@@ -73,17 +74,21 @@ struct SpeakView: View {
                 isManualRecording = false
             }
             if phase == .guess {
-                DispatchQueue.main.async { focusedControl = .confirm }
+                focusResults()
             } else if phase == .idle || phase.isUnavailable {
                 DispatchQueue.main.async { focusedControl = .record }
             }
         }
+        .onChange(of: state.searchResults.map(\.id)) { _, _ in
+            if speech.phase == .guess { focusResults() }
+        }
         .onAppear {
-            installSpaceMonitor()
+            if !speech.transcription.isEmpty {
+                state.search(speech.transcription, immediate: true)
+            }
             DispatchQueue.main.async { focusedControl = .record }
         }
         .onDisappear {
-            removeSpaceMonitor()
             speech.reset()
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in
@@ -105,8 +110,6 @@ struct SpeakView: View {
                     .buttonStyle(.borderedProminent)
                     .disabled(state.selectedEntry == nil)
                     .keyboardShortcut(.return, modifiers: [])
-                    .focusable()
-                    .focused($focusedControl, equals: .confirm)
                     .accessibilityIdentifier("speak.confirm")
             }
         }
@@ -126,7 +129,7 @@ struct SpeakView: View {
         .overlay {
             Capsule()
                 .strokeBorder(
-                    focusedControl == .record && !isSpaceHeld
+                    focusedControl == .record && !speakShortcut.isSpaceHeld
                         ? Color(nsColor: .keyboardFocusIndicatorColor)
                         : .clear,
                     lineWidth: 3
@@ -157,8 +160,8 @@ struct SpeakView: View {
 
     private var holdControlTitle: String {
         switch speech.phase {
-        case .requestingPermission: isSpaceHeld ? "Keep holding Space…" : "Cancel recording"
-        case .listening: isSpaceHeld ? "Release Space to finish" : "Stop recording"
+        case .requestingPermission: speakShortcut.isSpaceHeld ? "Keep holding Space…" : "Cancel recording"
+        case .listening: speakShortcut.isSpaceHeld ? "Release Space to finish" : "Stop recording"
         case .processing: "Record again"
         case .idle, .guess, .unavailable: "Hold Space to record"
         }
@@ -169,43 +172,14 @@ struct SpeakView: View {
     }
 
     private var isRecordingRequested: Bool {
-        isSpaceHeld || isManualRecording
-    }
-
-    private func installSpaceMonitor() {
-        guard spaceMonitor == nil else { return }
-        spaceMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) { event in
-            guard event.keyCode == 49,
-                  event.modifierFlags.intersection([.command, .control, .option]).isEmpty
-            else { return event }
-
-            if event.type == .keyDown {
-                if !event.isARepeat { setSpaceHeld(true) }
-            } else {
-                setSpaceHeld(false)
-            }
-            return nil
-        }
-    }
-
-    private func removeSpaceMonitor() {
-        if let spaceMonitor { NSEvent.removeMonitor(spaceMonitor) }
-        spaceMonitor = nil
-        releaseRecordingHolds()
+        speakShortcut.isSpaceHeld || isManualRecording
     }
 
     private func releaseRecordingHolds() {
         let wasRecording = isRecordingRequested
-        isSpaceHeld = false
+        speakShortcut.releaseSpaceHold()
         isManualRecording = false
         if wasRecording { speech.stop() }
-    }
-
-    private func setSpaceHeld(_ held: Bool) {
-        guard isSpaceHeld != held else { return }
-        let wasRecording = isRecordingRequested
-        isSpaceHeld = held
-        recordingRequestChanged(wasRecording: wasRecording)
     }
 
     private func recordingRequestChanged(wasRecording: Bool) {
@@ -224,7 +198,7 @@ struct SpeakView: View {
     }
 
     private func toggleManualRecording() {
-        guard !isSpaceHeld else { return }
+        guard !speakShortcut.isSpaceHeld else { return }
         let wasRecording = isRecordingRequested
         isManualRecording.toggle()
         recordingRequestChanged(wasRecording: wasRecording)
@@ -234,6 +208,11 @@ struct SpeakView: View {
         guard !speech.transcription.isEmpty, state.selectedEntry != nil else { return }
         state.confirmSpokenEntry()
         speech.reset()
+    }
+
+    private func focusResults() {
+        guard !state.searchResults.isEmpty else { return }
+        DispatchQueue.main.async { focusedControl = .results }
     }
 }
 
