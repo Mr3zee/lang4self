@@ -10,7 +10,7 @@ enum Lang4SelfCLI {
         do {
             switch command {
             case "open":
-                try openDesktopApp()
+                try openApp()
             case "search":
                 try await search(Array(arguments.dropFirst()))
             case "stats":
@@ -38,14 +38,12 @@ enum Lang4SelfCLI {
         }
     }
 
-    private static func openDesktopApp() throws {
-        let desktopApp = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Desktop/Lang4Self.app")
+    private static func openApp() throws {
+        let application = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Applications/Lang4Self.app")
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-        process.arguments = FileManager.default.fileExists(atPath: desktopApp.path)
-            ? [desktopApp.path]
-            : ["-b", "com.alexsysoev.Lang4Self"]
+        process.arguments = [application.path]
         try process.run()
         process.waitUntilExit()
         guard process.terminationStatus == 0 else { throw CLIError.appNotInstalled }
@@ -130,7 +128,7 @@ enum Lang4SelfCLI {
 
         var errorDescription: String? {
             switch self {
-            case .appNotInstalled: "Desktop app is not installed. Run scripts/install.sh."
+            case .appNotInstalled: "App is not installed. Run scripts/install.sh."
             case .missingSearchTerm: "Provide a German, English, or Russian search term."
             case .missingImportPath: "Provide a dict.cc ZIP or text-file path."
             case .fileNotFound(let path): "File not found: \(path)"

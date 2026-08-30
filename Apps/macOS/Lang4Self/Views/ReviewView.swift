@@ -5,6 +5,7 @@ struct ReviewView: View {
     @EnvironmentObject private var state: AppState
     @State private var revealed = false
     @FocusState private var focusedAction: FocusedAction?
+    let automaticallyFocusContent: Bool
 
     private enum FocusedAction: Hashable {
         case reveal
@@ -76,11 +77,11 @@ struct ReviewView: View {
         .navigationTitle("Review")
         .onAppear {
             Task { await state.refreshStudyData() }
-            focusPrimaryAction()
+            if automaticallyFocusContent { focusPrimaryAction() }
         }
         .onChange(of: current?.id) { _, _ in
             revealed = false
-            focusPrimaryAction()
+            if automaticallyFocusContent || focusedAction != nil { focusPrimaryAction() }
         }
         .onChange(of: state.selectedListID) { _, _ in revealed = false }
         .onChange(of: state.isReviewingAll) { _, _ in revealed = false }

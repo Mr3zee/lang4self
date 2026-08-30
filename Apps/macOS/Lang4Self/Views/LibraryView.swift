@@ -8,6 +8,7 @@ struct LibraryView: View {
     @State private var listEditor: ListEditorRequest?
     @State private var showingDeleteListConfirmation = false
     @FocusState private var focusedArea: FocusArea?
+    let automaticallyFocusContent: Bool
 
     private enum FocusArea: Hashable { case search, cards }
 
@@ -25,13 +26,15 @@ struct LibraryView: View {
                     }
                     .labelsHidden()
                     .pickerStyle(.menu)
+                    .controlSize(.large)
                     .accessibilityIdentifier("library.list-picker")
 
                     Button {
                         listEditor = .new
                     } label: {
-                        Image(systemName: "plus")
+                        LibraryHeaderIcon(systemName: "plus")
                     }
+                    .buttonStyle(.plain)
                     .help("New list")
                     .accessibilityLabel("New list")
                     .accessibilityIdentifier("library.new-list")
@@ -45,9 +48,10 @@ struct LibraryView: View {
                         }
                         .disabled(state.selectedListID == WordList.defaultID)
                     } label: {
-                        Image(systemName: "ellipsis.circle")
+                        LibraryHeaderIcon(systemName: "ellipsis.circle")
                     }
                     .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
                     .help("List actions")
                     .accessibilityLabel("List actions")
                     .accessibilityIdentifier("library.list-actions")
@@ -125,11 +129,11 @@ struct LibraryView: View {
         }
         .onChange(of: state.cards.map(\.id)) { _, ids in
             if selectedID.map({ ids.contains($0) }) != true { selectedID = ids.first }
-            if focusedArea != .search { focusCardList() }
+            if automaticallyFocusContent, focusedArea != .search { focusCardList() }
         }
         .onAppear {
             state.loadLibrary()
-            focusCardList()
+            if automaticallyFocusContent { focusCardList() }
         }
         .onReceive(NotificationCenter.default.publisher(for: .focusLibrarySearch)) { _ in
             state.route = .library
@@ -266,6 +270,22 @@ struct LibraryView: View {
 
     private func entry(for card: PersonalCard) -> DictionaryEntry {
         .init(id: card.dictionaryEntryID ?? 0, german: card.german, english: card.english, rawGerman: card.rawGerman, kind: card.kind, gender: card.gender, source: "My words")
+    }
+}
+
+private struct LibraryHeaderIcon: View {
+    let systemName: String
+
+    var body: some View {
+        Image(systemName: systemName)
+            .font(.body.weight(.medium))
+            .frame(width: 32, height: 30)
+            .background(.quaternary, in: RoundedRectangle(cornerRadius: 7))
+            .overlay {
+                RoundedRectangle(cornerRadius: 7)
+                    .stroke(.separator.opacity(0.5), lineWidth: 0.5)
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 7))
     }
 }
 

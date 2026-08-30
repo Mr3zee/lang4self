@@ -947,12 +947,14 @@ public actor LocalStore {
                    explanation
             FROM dictionary_entries
             WHERE kind = 'noun' AND gender = 'plural'
-              AND normalized_german LIKE ? ESCAPE '\\'
+              AND normalized_german >= ? AND normalized_german < ?
             ORDER BY length(normalized_german), id
             LIMIT 32
             """)
         defer { sqlite3_finalize(statement) }
-        bind(escapedLike(DictCCParser.normalized(entry.german)) + "%", to: 1, in: statement)
+        let prefix = DictCCParser.normalized(entry.german)
+        bind(prefix, to: 1, in: statement)
+        bind(prefix + "\u{10FFFF}", to: 2, in: statement)
         return try readEntries(statement).reduce(into: [String]()) { forms, candidate in
             if GermanMorphology.isPluralForm(candidate.german, of: entry.german),
                !forms.contains(candidate.german) {

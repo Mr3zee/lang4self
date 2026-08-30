@@ -1,5 +1,4 @@
 import AppKit
-import Carbon
 import SwiftUI
 import Lang4SelfCore
 
@@ -54,7 +53,10 @@ private final class Lang4SelfDependencies: ObservableObject {
     init(processInfo: ProcessInfo, settingsDefaults: UserDefaults) {
         let isUITesting = processInfo.arguments.contains("--ui-testing")
         self.isUITesting = isUITesting
-        speech = SpeechRecognizer(isUITesting: isUITesting)
+        speech = SpeechRecognizer(
+            isUITesting: isUITesting,
+            simulatesUndeterminedPermissions: processInfo.arguments.contains("--ui-testing-speech-permission-setup")
+        )
         do {
             let databaseURL = processInfo.environment["LANG4SELF_UI_TEST_DATABASE"]
                 .map(URL.init(fileURLWithPath:))
@@ -102,13 +104,11 @@ private final class Lang4SelfAppDelegate: NSObject, NSApplicationDelegate {
     weak var appState: AppState?
     var speakShortcut: SpeakShortcutController?
     var isUITesting = false
-    private var shortcutHotKey: EventHotKeyRef?
-    private var shortcutHotKeyHandler: EventHandlerRef?
+    private var shortcutKeyMonitor: Any?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         speakShortcut?.startMonitoring()
-        installShortcutHotKeyHandler()
-        registerShortcutHotKey()
+        installShortcutKeyMonitor()
 
         guard isUITesting else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
@@ -127,13 +127,8 @@ private final class Lang4SelfAppDelegate: NSObject, NSApplicationDelegate {
         true
     }
 
-    func applicationDidBecomeActive(_ notification: Notification) {
-        registerShortcutHotKey()
-    }
-
     func applicationWillResignActive(_ notification: Notification) {
-        speakShortcut?.releaseSpaceHold()
-        unregisterShortcutHotKey()
+        speakShortcut?.cancelSpaceHold()
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -146,46 +141,24 @@ private final class Lang4SelfAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         speakShortcut?.stopMonitoring()
-        unregisterShortcutHotKey()
-        if let shortcutHotKeyHandler { RemoveEventHandler(shortcutHotKeyHandler) }
-        shortcutHotKeyHandler = nil
+        if let shortcutKeyMonitor { NSEvent.removeMonitor(shortcutKeyMonitor) }
+        shortcutKeyMonitor = nil
     }
 
-    private func installShortcutHotKeyHandler() {
-        guard shortcutHotKeyHandler == nil else { return }
-        var eventType = EventTypeSpec(
-            eventClass: OSType(kEventClassKeyboard),
-            eventKind: UInt32(kEventHotKeyPressed)
-        )
-        InstallEventHandler(
-            GetApplicationEventTarget(),
-            { _, _, _ in
+    private func installShortcutKeyMonitor() {
+        guard shortcutKeyMonitor == nil else { return }
+        shortcutKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            guard modifiers.contains(.command),
+                  modifiers.intersection([.control, .option]).isEmpty,
+                  event.charactersIgnoringModifiers.map({ $0 == "/" || $0 == "?" }) == true
+            else { return event }
+
+            if !event.isARepeat {
                 NotificationCenter.default.post(name: .showKeyboardShortcuts, object: nil)
-                return noErr
-            },
-            1,
-            &eventType,
-            nil,
-            &shortcutHotKeyHandler
-        )
-    }
-
-    private func registerShortcutHotKey() {
-        guard shortcutHotKey == nil else { return }
-        let identifier = EventHotKeyID(signature: OSType(0x4C345348), id: 1) // L4SH
-        RegisterEventHotKey(
-            UInt32(kVK_ANSI_Slash),
-            UInt32(cmdKey | shiftKey),
-            identifier,
-            GetApplicationEventTarget(),
-            0,
-            &shortcutHotKey
-        )
-    }
-
-    private func unregisterShortcutHotKey() {
-        if let shortcutHotKey { UnregisterEventHotKey(shortcutHotKey) }
-        shortcutHotKey = nil
+            }
+            return nil
+        }
     }
 }
 

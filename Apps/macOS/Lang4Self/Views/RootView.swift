@@ -2,6 +2,7 @@ import SwiftUI
 
 struct RootView: View {
     @EnvironmentObject private var state: AppState
+    @FocusState private var sidebarFocused: Bool
 
     var body: some View {
         NavigationSplitView {
@@ -23,6 +24,15 @@ struct RootView: View {
                 }
                 .tag(route)
                 .accessibilityIdentifier("sidebar.\(route.rawValue)")
+            }
+            .focused($sidebarFocused)
+            .onKeyPress(.upArrow) {
+                moveSidebarSelection(by: -1)
+                return .handled
+            }
+            .onKeyPress(.downArrow) {
+                moveSidebarSelection(by: 1)
+                return .handled
             }
             .navigationSplitViewColumnWidth(min: 170, ideal: 205)
             .safeAreaInset(edge: .bottom) {
@@ -82,13 +92,19 @@ struct RootView: View {
     @ViewBuilder
     private var content: some View {
         switch state.route {
-        case .dictionary: DictionaryView()
-        case .speak: SpeakView()
-        case .review: ReviewView()
-        case .library: LibraryView()
-        case .sentences: SentencesView()
-        case .settings: SettingsView()
+        case .dictionary: DictionaryView(automaticallyFocusContent: !sidebarFocused)
+        case .speak: SpeakView(automaticallyFocusContent: !sidebarFocused)
+        case .review: ReviewView(automaticallyFocusContent: !sidebarFocused)
+        case .library: LibraryView(automaticallyFocusContent: !sidebarFocused)
+        case .sentences: SentencesView(automaticallyFocusContent: !sidebarFocused)
+        case .settings: SettingsView(automaticallyFocusContent: !sidebarFocused)
         }
+    }
+
+    private func moveSidebarSelection(by offset: Int) {
+        guard let index = AppRoute.allCases.firstIndex(of: state.route) else { return }
+        let count = AppRoute.allCases.count
+        state.route = AppRoute.allCases[(index + offset + count) % count]
     }
 }
 

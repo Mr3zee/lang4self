@@ -59,7 +59,7 @@ final class Lang4SelfUITests: XCTestCase {
         app.typeKey(",", modifierFlags: .command)
         XCTAssertTrue(routeElement("settings").waitForExistence(timeout: 3))
 
-        app.typeKey("?", modifierFlags: .command)
+        app.typeKey("/", modifierFlags: .command)
         XCTAssertTrue(app.sheets.firstMatch.waitForExistence(timeout: 3))
         for heading in ["Global", "Dictionary", "Speak", "Review", "Lists and sentences", "Dialogs and controls", "Standard macOS"] {
             XCTAssertTrue(app.staticTexts[heading].exists, "Missing shortcut group: \(heading)")
@@ -88,6 +88,22 @@ final class Lang4SelfUITests: XCTestCase {
         assertFocused(app.textFields["library.search"])
         app.typeText("Haus")
         XCTAssertEqual(app.textFields["library.search"].value as? String, "Haus")
+    }
+
+    func testSidebarArrowNavigationWrapsWithoutLosingFocus() {
+        app.typeKey("1", modifierFlags: .command)
+        element("sidebar.dictionary").click()
+
+        app.typeKey(.upArrow, modifierFlags: [])
+        XCTAssertTrue(routeElement("settings").waitForExistence(timeout: 3))
+        app.typeKey(.upArrow, modifierFlags: [])
+        XCTAssertTrue(routeElement("sentences").waitForExistence(timeout: 3))
+
+        element("sidebar.settings").click()
+        app.typeKey(.downArrow, modifierFlags: [])
+        XCTAssertTrue(routeElement("dictionary").waitForExistence(timeout: 3))
+        app.typeKey(.downArrow, modifierFlags: [])
+        XCTAssertTrue(routeElement("speak").waitForExistence(timeout: 3))
     }
 
     func testCommandNOnlyCreatesAListInMyWords() {
@@ -173,6 +189,22 @@ final class Lang4SelfUITests: XCTestCase {
         XCTAssertTrue(app.buttons["speak.confirm"].waitForExistence(timeout: 3))
     }
 
+    func testFirstSpaceReleaseCompletesPermissionSetupBeforeRecording() {
+        app.terminate()
+        app.launchArguments.append("--ui-testing-speech-permission-setup")
+        app.launch()
+        XCTAssertTrue(app.textFields["dictionary.search"].waitForExistence(timeout: 8))
+
+        openRoute("2", route: "speak")
+        app.typeKey(.space, modifierFlags: [])
+        XCTAssertTrue(app.staticTexts["Checking local speech access…"].waitForExistence(timeout: 2))
+        XCTAssertTrue(app.staticTexts["Hold Space to speak"].waitForExistence(timeout: 2))
+        XCTAssertFalse(app.buttons["speak.confirm"].exists)
+
+        app.typeKey(.space, modifierFlags: [])
+        XCTAssertTrue(app.buttons["speak.confirm"].waitForExistence(timeout: 3))
+    }
+
     func testSpaceOpensSpeakAndRecordsFromAnotherPage() {
         openRoute("6", route: "settings")
 
@@ -231,6 +263,13 @@ final class Lang4SelfUITests: XCTestCase {
 
     func testListCreationRenameDeletionSearchAndEditorFocus() {
         openLibrary()
+
+        let listPicker = element("library.list-picker")
+        let newList = element("library.new-list")
+        let listActions = element("library.list-actions")
+        XCTAssertTrue(newList.exists)
+        XCTAssertTrue(listActions.exists)
+        XCTAssertEqual(newList.frame.height, listPicker.frame.height, accuracy: 1)
 
         app.typeKey("f", modifierFlags: .command)
         app.typeText("Haus")
@@ -434,7 +473,7 @@ final class Lang4SelfUITests: XCTestCase {
         XCTAssertGreaterThanOrEqual(app.sliders.count, 2)
         XCTAssertTrue(app.buttons["settings.reset-model-defaults"].exists)
 
-        for shortcut in ["⌘1 … ⌘6", "⌘,", "⌘F", "⌘?", "⌘Return", "⌘N", "1 … 4", "Delete", "⌘Q", "⌘Z / ⇧⌘Z"] {
+        for shortcut in ["⌘1 … ⌘6", "⌘,", "⌘F", "⌘/ or ⌘?", "⌘Return", "⌘N", "1 … 4", "Delete", "⌘Q", "⌘Z / ⇧⌘Z"] {
             XCTAssertTrue(app.staticTexts[shortcut].exists, "Settings is missing \(shortcut)")
         }
 
@@ -473,6 +512,18 @@ final class Lang4SelfUITests: XCTestCase {
             // Other macOS audit types currently flag system menus and standard SwiftUI layout controls.
             try app.performAccessibilityAudit(for: .elementDetection)
         }
+    }
+
+    func testCaptureReadmeScreenshots() {
+        app.typeText("Haus")
+        XCTAssertTrue(app.staticTexts["Haus"].waitForExistence(timeout: 3))
+        attachWindowScreenshot(named: "dictionary")
+
+        openLibrary()
+        attachWindowScreenshot(named: "my-words")
+
+        openRoute("5", route: "sentences")
+        attachWindowScreenshot(named: "sentences")
     }
 
     private func openLibrary() {
@@ -521,6 +572,14 @@ final class Lang4SelfUITests: XCTestCase {
     private func waitForUIToSettle(_ delay: TimeInterval = 0.25) {
         let readyAt = Date().addingTimeInterval(delay)
         _ = waitUntil(timeout: delay + 0.5) { Date() >= readyAt }
+    }
+
+    private func attachWindowScreenshot(named name: String) {
+        waitForUIToSettle()
+        let attachment = XCTAttachment(screenshot: app.windows.firstMatch.screenshot())
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
     }
 
     @discardableResult

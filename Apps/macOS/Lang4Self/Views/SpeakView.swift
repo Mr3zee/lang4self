@@ -8,6 +8,7 @@ struct SpeakView: View {
     @EnvironmentObject private var speakShortcut: SpeakShortcutController
     @State private var isManualRecording = false
     @FocusState private var focusedControl: FocusControl?
+    let automaticallyFocusContent: Bool
 
     private enum FocusControl: Hashable { case record, results }
 
@@ -65,6 +66,11 @@ struct SpeakView: View {
             }
         }
         .navigationTitle("Speak")
+        .onKeyPress(.space, phases: .repeat) { _ in
+            // The AppKit monitor owns the hold gesture. Consume any repeat that
+            // reaches SwiftUI so a focused control cannot emit an error beep.
+            .handled
+        }
         .onChange(of: speech.transcription) { _, value in
             if !value.isEmpty { state.search(value, immediate: true) }
         }
@@ -86,7 +92,9 @@ struct SpeakView: View {
             if !speech.transcription.isEmpty {
                 state.search(speech.transcription, immediate: true)
             }
-            DispatchQueue.main.async { focusedControl = .record }
+            if automaticallyFocusContent {
+                DispatchQueue.main.async { focusedControl = .record }
+            }
         }
         .onDisappear {
             speech.reset()
@@ -143,7 +151,8 @@ struct SpeakView: View {
     }
 
     private var statusTitle: String {
-        switch speech.phase {
+        if speakShortcut.isAwaitingPermissionSetup { return "Set up speech access" }
+        return switch speech.phase {
         case .idle: "Hold Space to speak"
         case .requestingPermission: "Checking local speech access…"
         case .listening: "Listening…"
@@ -154,12 +163,16 @@ struct SpeakView: View {
     }
 
     private var statusDetail: String {
+        if speakShortcut.isAwaitingPermissionSetup {
+            return "Release Space, allow access in macOS, then hold Space again to record."
+        }
         if case .unavailable(let message) = speech.phase { return message }
         return "Hold Space while speaking · Release to look up · Return confirms"
     }
 
     private var holdControlTitle: String {
-        switch speech.phase {
+        if speakShortcut.isAwaitingPermissionSetup { return "Release Space to continue" }
+        return switch speech.phase {
         case .requestingPermission: speakShortcut.isSpaceHeld ? "Keep holding Space…" : "Cancel recording"
         case .listening: speakShortcut.isSpaceHeld ? "Release Space to finish" : "Stop recording"
         case .processing: "Record again"
@@ -177,7 +190,7 @@ struct SpeakView: View {
 
     private func releaseRecordingHolds() {
         let wasRecording = isRecordingRequested
-        speakShortcut.releaseSpaceHold()
+        speakShortcut.cancelSpaceHold()
         isManualRecording = false
         if wasRecording { speech.stop() }
     }

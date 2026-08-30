@@ -4,6 +4,7 @@ import Lang4SelfCore
 struct DictionaryView: View {
     @EnvironmentObject private var state: AppState
     @FocusState private var focusedArea: FocusArea?
+    let automaticallyFocusContent: Bool
 
     private enum FocusArea: Hashable { case search, results }
 
@@ -42,6 +43,14 @@ struct DictionaryView: View {
                 if state.searchQuery.isEmpty {
                     PlaceholderView(symbol: "text.magnifyingglass", title: "Search locally", detail: "Type a German, English, or Russian word or phrase. Press ⌘F from anywhere.")
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if state.isSearchingDictionary {
+                    VStack(spacing: 12) {
+                        ProgressView()
+                        Text("Searching…")
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .accessibilityIdentifier("dictionary.searching")
                 } else if state.searchResults.isEmpty {
                     PlaceholderView(symbol: "questionmark.folder", title: "No match", detail: "Try another spelling or import the complete dict.cc file in Settings.")
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -76,6 +85,7 @@ struct DictionaryView: View {
             focusedArea = .search
         }
         .onAppear {
+            guard automaticallyFocusContent else { return }
             DispatchQueue.main.async { focusedArea = .search }
         }
     }

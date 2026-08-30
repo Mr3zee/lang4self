@@ -378,7 +378,7 @@ struct AppShortcut: Identifiable {
         .init(group: .global, keys: "⌘1 … ⌘6", action: "Open Dictionary, Speak, Review, My Words, Sentences, or Settings"),
         .init(group: .global, keys: "⌘,", action: "Open Settings"),
         .init(group: .global, keys: "⌘F", action: "Focus search in Dictionary or My Words; open Dictionary elsewhere"),
-        .init(group: .global, keys: "⌘?", action: "Show this keyboard shortcut reference"),
+        .init(group: .global, keys: "⌘/ or ⌘?", action: "Show this keyboard shortcut reference"),
         .init(group: .global, keys: "Hold Space", action: "Open Speak and record from anywhere"),
         .init(group: .global, keys: "Tab / ⇧Tab", action: "Move focus forward or backward"),
         .init(group: .dictionary, keys: "↑ / ↓", action: "Move through search results"),

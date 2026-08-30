@@ -7,6 +7,7 @@ struct SettingsView: View {
     @State private var showingImporter = false
     @State private var showingExplanationImporter = false
     @FocusState private var firstControlFocused: Bool
+    let automaticallyFocusContent: Bool
 
     var body: some View {
         ScrollView {
@@ -238,8 +239,8 @@ struct SettingsView: View {
             .padding(28)
         }
         .navigationTitle("Settings")
-        .defaultFocus($firstControlFocused, true)
         .onAppear {
+            guard automaticallyFocusContent else { return }
             DispatchQueue.main.async { firstControlFocused = true }
         }
         .task {

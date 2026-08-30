@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  core-tests:
+    name: Core tests
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check for private dictionary data
+        run: ./scripts/check-public-data.sh
+      - name: Run Swift tests
+        run: swift test
+
+  ui-tests:
+    name: macOS UI tests
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run UI tests
+        run: |
+          xcodebuild -quiet \
+            -project Lang4Self.xcodeproj \
+            -scheme Lang4Self \
+            -destination 'platform=macOS' \
+            -resultBundlePath TestResults.xcresult \
+            -only-testing:Lang4SelfUITests \
+            test
+      - name: Upload test results
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macOS-ui-test-results
+          path: TestResults.xcresult
+          retention-days: 7

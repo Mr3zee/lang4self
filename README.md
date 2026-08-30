@@ -1,64 +1,83 @@
-# Lang4Self
+<p align="center">
+  <img src="Apps/macOS/Lang4Self/Resources/AppIcon-1024.png" width="144" alt="Lang4Self icon">
+</p>
 
-A keyboard-first, fully local German-learning app for macOS 14+.
+<h1 align="center">Lang4Self</h1>
 
-## Run it
+<p align="center">A keyboard-first, fully local German-learning app for macOS 14+.</p>
 
-1. Open `Lang4Self.xcodeproj` in Xcode.
-2. Select the **Lang4Self** scheme and **My Mac**.
-3. Press **⌘R**.
-4. In **Settings**, request the `DE → EN` and/or `DE → RU` UTF-8 files from dict.cc, then import each downloaded ZIP or text file.
-5. Optionally download Lector's [German SQLite dictionary](https://lector.dev/free/german-dictionary/) and import it in **Settings** to add offline Wiktionary explanations.
-6. For sentence generation, install a text-generation model and the `lms` CLI from LM Studio. Choose the model and generation parameters in **Settings**. Lang4Self starts the localhost server, loads the model on first use, and offloads its model instance when the app quits.
+<p align="center">
+  <a href="https://github.com/Mr3zee/lang4self/actions/workflows/ci.yml"><img src="https://github.com/Mr3zee/lang4self/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--2.0--or--later-blue" alt="GPL-2.0-or-later"></a>
+</p>
 
-The app includes a tiny original starter list. The complete dict.cc file stays on your Mac and is never committed or redistributed.
+Lang4Self combines a fast offline dictionary, speech lookup, spaced-repetition review, word lists, and locally generated example sentences. There is no account, telemetry, or cloud backend.
 
-## Main controls
+## Screenshots
 
-| Keys | Action |
+| Dictionary | My words |
 |---|---|
-| ⌘1 … ⌘6 | Dictionary, Speak, Review, My words, Sentences, Settings |
-| ⌘, | Open Settings |
-| ⌘F | Focus Dictionary or My words search; open Dictionary elsewhere |
-| ⌘? | Show the complete keyboard shortcut reference |
-| Tab / ⇧Tab | Move focus forward or backward |
-| ↑ / ↓ | Navigate dictionary results, saved cards, and sentences |
-| ← / → | Navigate words in the sentence inspector |
-| Return | Enter results, edit a card, inspect a sentence, confirm speech, or accept a dialog |
-| ⌘Return | Add the selected dictionary entry |
-| ⌘N | Create a list in My words |
-| Hold Space | Open Speak from anywhere and record; release to look it up |
-| Space | Reveal a review or activate a focused control |
-| 1 … 4 | Rate a revealed review: Again, Hard, Good, Easy |
-| Delete | Remove the selected saved card or sentence |
-| Esc | Clear focused search, leave sentence inspection, or close a dialog |
+| ![Searching the offline dictionary for Haus](docs/screenshots/dictionary.png) | ![Saved words and word details](docs/screenshots/my-words.png) |
 
-## Local architecture
+![Generated and saved example sentences](docs/screenshots/sentences.png)
 
-- SwiftUI macOS application
-- Apple Speech with `requiresOnDeviceRecognition = true`
-- SQLite + FTS5 for fast lookup across 1M+ entries
-- Streaming tab-delimited import, so the whole source file is never loaded into memory
-- Durable named word lists, personal cards, and review log
-- Local LM Studio sentence generation from a selected word list, with explicit model loading and offloading
-- A separate saved-sentences library with keyboard word inspection
-- SM-2-style intervals with Again / Hard / Good / Easy
-- Rule-based German morphology plus explicit common irregular forms
-- Shared `Lang4SelfCore`, ready for later iOS and server targets
+The screenshots use the app's small deterministic test fixture. They do not contain imported dict.cc or personal data.
 
-Run the core test suite with:
+## Features
+
+- Fast SQLite + FTS5 lookup across more than one million imported entries
+- English and Russian translations from user-supplied dict.cc exports
+- Optional offline Wiktionary explanations
+- On-device Apple Speech lookup
+- Named word lists and SM-2-style review scheduling
+- Local example-sentence generation through LM Studio
+- Keyboard navigation throughout the app
+- A shared `Lang4SelfCore` library and a small command-line client
+
+## Run locally
+
+Requirements: macOS 14 or newer, Xcode 15.3 or newer, and the Xcode command-line tools.
+
+```sh
+git clone https://github.com/Mr3zee/lang4self.git
+cd lang4self
+open Lang4Self.xcodeproj
+```
+
+In Xcode, select the **Lang4Self** scheme and **My Mac**, then press **⌘R**. The first launch creates a local database and adds a tiny original starter dictionary; no separate download is required to try the app.
+
+### Get the full dictionary data
+
+dict.cc does not permit its translation data to be redistributed with this repository. Each user must download their own copy:
+
+1. Open the official [dict.cc translation file request](https://www1.dict.cc/translation_file_request.php?l=e).
+2. Accept the terms and request the `DE → EN`, `DE → RU`, or both UTF-8 exports.
+3. Download the ZIP or text file from the email sent by dict.cc.
+4. In Lang4Self, open **Settings → Offline dictionary → Import Dictionary** and choose the downloaded file. ZIP files can be selected directly.
+
+Keep downloaded exports outside this checkout. Common dict.cc filenames, archives, and SQLite databases are ignored as an extra safeguard, and CI rejects local data files if they become tracked.
+
+For richer German definitions, optionally download Lector's [free German SQLite dictionary](https://lector.dev/free/german-dictionary/). Import the `.db` file using **Settings → German explanations → Import Explanations**. The data remains on your Mac.
+
+### Enable local sentence generation
+
+1. Install [LM Studio](https://lmstudio.ai/) and a text-generation model.
+2. Install the [`lms` command-line tool](https://lmstudio.ai/docs/developer/core/lms-cli) from LM Studio.
+3. Choose the model and generation settings in Lang4Self's **Settings**.
+
+Lang4Self starts the localhost server and loads the selected model on first use. It offloads its model instance when the app quits.
+
+## Tests and builds
+
+Run the core tests and repository checks:
 
 ```sh
 swift test
-```
-
-Run the standard architecture/build check with:
-
-```sh
+./scripts/check-public-data.sh
 ./scripts/check.sh
 ```
 
-Run the macOS UI test suite with the **Lang4Self** scheme in Xcode, or with:
+Run the macOS UI tests:
 
 ```sh
 xcodebuild -quiet -project Lang4Self.xcodeproj -scheme Lang4Self \
@@ -66,31 +85,17 @@ xcodebuild -quiet -project Lang4Self.xcodeproj -scheme Lang4Self \
   -only-testing:Lang4SelfUITests test
 ```
 
-Build the actual app bundle from Terminal with:
+GitHub Actions runs both the core and complete macOS UI suites on every push to `main` and every pull request targeting `main`.
+
+Build the app bundle or install a local release:
 
 ```sh
 ./scripts/build-macos.sh
-```
-
-Build an optimized release app bundle with:
-
-```sh
 ./scripts/build-release.sh
-```
-
-Stop, rebuild, and relaunch the development app with:
-
-```sh
-./scripts/reload-macos.sh
-```
-
-Build and install the release app on the Desktop and the CLI in `~/.local/bin`:
-
-```sh
 ./scripts/release.sh
 ```
 
-`./scripts/install.sh` remains an alias for the same command.
+The release script installs `Lang4Self.app` in `~/Applications`, registers it for Spotlight, and installs the CLI in `~/.local/bin`. `./scripts/install.sh` is an alias for the same command.
 
 CLI examples:
 
@@ -98,14 +103,28 @@ CLI examples:
 lang4self                 # open the app
 lang4self Haus            # search the local dictionary
 lang4self stats
-lang4self import dict.zip
-lang4self import-explanations dictionary-de.db
+lang4self import ~/Downloads/dict.zip
+lang4self import-explanations ~/Downloads/dictionary-de.db
 ```
 
-## dict.cc licensing
+## Keyboard controls
 
-dict.cc states that its translation data is **not open-source data**. Personal use is allowed, but each user must accept its terms and download their own copy. Software using it must be GPL-compatible, and the data must not be bundled or republished. Lang4Self therefore links to the official request page and only imports the user's local file.
+| Keys | Action |
+|---|---|
+| ⌘1 … ⌘6 | Open Dictionary, Speak, Review, My words, Sentences, or Settings |
+| ⌘F | Focus Dictionary or My words search |
+| ⌘? | Show all shortcuts |
+| ↑ / ↓ | Navigate results, saved cards, and sentences |
+| Return | Open or confirm the current selection |
+| ⌘Return | Add the selected dictionary entry |
+| Hold Space | Record speech; release to look it up |
+| Space | Reveal a review |
+| 1 … 4 | Rate a review: Again, Hard, Good, or Easy |
+| Delete | Remove the selected saved card or sentence |
+| Esc | Clear search, leave inspection, or close a dialog |
 
-Code in this repository is licensed under GPL-2.0-or-later. dict.cc data is governed separately by the dict.cc terms.
+## Data and licensing
 
-Imported explanations are derived from Wiktionary through kaikki.org and Lector and are licensed under CC BY-SA 4.0. They remain local and are not bundled with this repository.
+Code in this repository is licensed under [GPL-2.0-or-later](LICENSE).
+
+dict.cc translation data is not open-source data. Personal use is allowed under the separate dict.cc terms, but the exports are never bundled or republished here. Imported explanations originate from Wiktionary via kaikki.org and Lector and are licensed under CC BY-SA 4.0; they also remain local and are not bundled.

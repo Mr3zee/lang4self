@@ -40,6 +40,7 @@ final class AppState: ObservableObject {
     @Published var route: AppRoute = .dictionary
     @Published var searchQuery = ""
     @Published private(set) var searchResults: [DictionaryEntry] = []
+    @Published private(set) var isSearchingDictionary = false
     @Published var selectedEntry: DictionaryEntry?
     @Published private(set) var wordLists: [WordList] = []
     @Published private(set) var selectedListID: WordList.ID = WordList.defaultID
@@ -71,6 +72,7 @@ final class AppState: ObservableObject {
 
     private let store: any AppDataStore
     private var searchTask: Task<Void, Never>?
+    private var searchGeneration = UUID()
     private var libraryTask: Task<Void, Never>?
     private var sentenceGenerationTask: Task<Void, Never>?
     private var bannerDismissTask: Task<Void, Never>?
@@ -182,22 +184,29 @@ final class AppState: ObservableObject {
     func search(_ value: String, immediate: Bool = false) {
         searchQuery = value
         searchTask?.cancel()
+        let generation = UUID()
+        searchGeneration = generation
         guard !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             searchResults = []
             selectedEntry = nil
+            isSearchingDictionary = false
             return
         }
+        isSearchingDictionary = true
         searchTask = Task {
             if !immediate { try? await Task.sleep(nanoseconds: 160_000_000) }
             guard !Task.isCancelled else { return }
             do {
                 let results = try await store.searchDictionary(value)
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled, searchGeneration == generation else { return }
                 searchResults = results
                 if selectedEntry == nil || !results.contains(where: { $0.id == selectedEntry?.id }) {
                     selectedEntry = results.first
                 }
+                isSearchingDictionary = false
             } catch {
+                guard searchGeneration == generation else { return }
+                isSearchingDictionary = false
                 show(error)
             }
         }

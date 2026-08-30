@@ -27,11 +27,18 @@ final class SpeechRecognizer: NSObject, ObservableObject {
     private var startGeneration = UUID()
     private var recognitionGeneration = UUID()
     private let isUITesting: Bool
+    private var simulatesUndeterminedPermissions: Bool
 
     var isListening: Bool { phase == .listening }
+    var needsPermissionSetup: Bool {
+        if isUITesting { return simulatesUndeterminedPermissions }
+        return SFSpeechRecognizer.authorizationStatus() == .notDetermined
+            || AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined
+    }
 
-    init(isUITesting: Bool) {
+    init(isUITesting: Bool, simulatesUndeterminedPermissions: Bool) {
         self.isUITesting = isUITesting
+        self.simulatesUndeterminedPermissions = simulatesUndeterminedPermissions
         super.init()
     }
 
@@ -60,6 +67,29 @@ final class SpeechRecognizer: NSObject, ObservableObject {
     func rerecord() {
         cancel()
         start()
+    }
+
+    func requestPermissions() {
+        guard phase != .requestingPermission else { return }
+        if isUITesting {
+            phase = .requestingPermission
+            Task {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                simulatesUndeterminedPermissions = false
+                phase = .idle
+            }
+            return
+        }
+        let generation = UUID()
+        startGeneration = generation
+        Task {
+            phase = .requestingPermission
+            let granted = await permissionsGranted()
+            guard startGeneration == generation else { return }
+            phase = granted
+                ? .idle
+                : .unavailable("Microphone and Speech Recognition access are required. Enable both in System Settings → Privacy & Security.")
+        }
     }
 
     func stop() {
@@ -215,9 +245,11 @@ extension AppState: SpeakShortcutRouting {}
 @MainActor
 protocol SpeakShortcutRecording: AnyObject {
     var phase: SpeechRecognizer.Phase { get }
+    var needsPermissionSetup: Bool { get }
     func start()
     func rerecord()
     func stop()
+    func requestPermissions()
 }
 
 extension SpeechRecognizer: SpeakShortcutRecording {}
@@ -225,6 +257,7 @@ extension SpeechRecognizer: SpeakShortcutRecording {}
 @MainActor
 final class SpeakShortcutController: ObservableObject {
     @Published private(set) var isSpaceHeld = false
+    @Published private(set) var isAwaitingPermissionSetup = false
 
     private let router: any SpeakShortcutRouting
     private let speech: any SpeakShortcutRecording
@@ -253,42 +286,62 @@ final class SpeakShortcutController: ObservableObject {
     func stopMonitoring() {
         if let eventMonitor { NSEvent.removeMonitor(eventMonitor) }
         eventMonitor = nil
-        releaseSpaceHold()
+        cancelSpaceHold()
     }
 
     func releaseSpaceHold() {
+        endSpaceHold(requestPermissions: true)
+    }
+
+    func cancelSpaceHold() {
+        endSpaceHold(requestPermissions: false)
+    }
+
+    private func endSpaceHold(requestPermissions: Bool) {
         isSpaceDown = false
         pendingHold = nil
         guard isSpaceHeld else { return }
         isSpaceHeld = false
-        speech.stop()
+        let needsSetup = isAwaitingPermissionSetup
+        isAwaitingPermissionSetup = false
+        if needsSetup, requestPermissions {
+            speech.requestPermissions()
+        } else {
+            speech.stop()
+        }
     }
 
     private func handle(_ event: NSEvent) -> NSEvent? {
-        guard event.keyCode == 49,
+        guard event.keyCode == 49 else { return event }
+
+        // Finish or consume a gesture that already began even if a sheet appeared
+        // or modifiers changed while Space was down. Otherwise repeats escape to
+        // the new responder and macOS emits its invalid-action beep.
+        if isSpaceDown {
+            if event.type == .keyDown { return nil }
+            pendingHold = nil
+            if isSpaceHeld {
+                releaseSpaceHold()
+                return nil
+            }
+            isSpaceDown = false
+            return event
+        }
+
+        guard event.type == .keyDown,
               event.modifierFlags.intersection([.command, .control, .option]).isEmpty,
               !hasActiveDialog
         else { return event }
 
-        if event.type == .keyDown {
-            guard !event.isARepeat else { return isSpaceHeld ? nil : event }
-            isSpaceDown = true
+        guard !event.isARepeat else { return nil }
+        isSpaceDown = true
 
-            if router.route == .speak || !requiresHoldGesture {
-                beginSpaceHold()
-                return nil
-            }
-
-            scheduleSpaceHold()
-            return event
-        }
-
-        isSpaceDown = false
-        pendingHold = nil
-        if isSpaceHeld {
-            releaseSpaceHold()
+        if router.route == .speak || !requiresHoldGesture {
+            beginSpaceHold()
             return nil
         }
+
+        scheduleSpaceHold()
         return event
     }
 
@@ -321,6 +374,14 @@ final class SpeakShortcutController: ObservableObject {
         guard isSpaceDown, !isSpaceHeld else { return }
         isSpaceHeld = true
         router.route = .speak
+
+        if speech.needsPermissionSetup {
+            // Never show a system permission dialog while a key is physically
+            // held: the app loses activation and key repeats beep in the dialog.
+            // Ask after key-up, then the next hold starts recording normally.
+            isAwaitingPermissionSetup = true
+            return
+        }
 
         switch speech.phase {
         case .idle, .unavailable:

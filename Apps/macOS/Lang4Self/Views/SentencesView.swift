@@ -6,6 +6,7 @@ struct SentencesView: View {
     @State private var generationCount = 5
     @State private var selection: SentenceSelection?
     @FocusState private var sentenceListFocused: Bool
+    let automaticallyFocusContent: Bool
 
     var body: some View {
         HSplitView {
@@ -35,7 +36,9 @@ struct SentencesView: View {
         .navigationTitle("Sentences")
         .onAppear {
             repairSelection()
-            DispatchQueue.main.async { sentenceListFocused = true }
+            if automaticallyFocusContent {
+                DispatchQueue.main.async { sentenceListFocused = true }
+            }
         }
         .onChange(of: state.generatedSentences.map(\.id)) { _, _ in repairSelection(preferGenerated: true) }
         .onChange(of: state.savedSentences.map(\.id)) { _, _ in repairSelection() }
