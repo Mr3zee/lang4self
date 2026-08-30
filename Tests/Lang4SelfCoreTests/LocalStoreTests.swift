@@ -53,6 +53,57 @@ final class LocalStoreTests: XCTestCase {
         }
     }
 
+    func testMigratesAnnotatedDeterminersAndLinkedCards() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let databaseURL = directory.appendingPathComponent("version-one.sqlite3")
+        try createVersionOneClassificationFixture(at: databaseURL)
+
+        _ = try LocalStore(url: databaseURL)
+
+        XCTAssertEqual(try readSchemaVersion(at: databaseURL), LocalStore.latestSchemaVersion)
+        XCTAssertEqual(
+            try readTextValues(at: databaseURL, sql: "SELECT kind FROM dictionary_entries ORDER BY id"),
+            ["determiner", "other"]
+        )
+        XCTAssertEqual(
+            try readTextValues(at: databaseURL, sql: "SELECT kind FROM personal_cards ORDER BY id"),
+            ["determiner", "other"]
+        )
+        XCTAssertEqual(
+            try readTextValues(at: databaseURL, sql: "SELECT notes FROM personal_cards ORDER BY id"),
+            ["keep me", "also keep me"]
+        )
+    }
+
+    func testClassificationMigrationRollsBackAllWrites() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let databaseURL = directory.appendingPathComponent("version-one.sqlite3")
+        try createVersionOneClassificationFixture(at: databaseURL)
+        try executeSQLite(at: databaseURL, sql: """
+            CREATE TRIGGER reject_card_kind_migration
+            BEFORE UPDATE OF kind ON personal_cards
+            BEGIN
+              SELECT RAISE(ABORT, 'forced classification migration failure');
+            END;
+            """)
+
+        XCTAssertThrowsError(try LocalStore(url: databaseURL))
+
+        XCTAssertEqual(try readSchemaVersion(at: databaseURL), 1)
+        XCTAssertEqual(
+            try readTextValues(at: databaseURL, sql: "SELECT kind FROM dictionary_entries ORDER BY id"),
+            ["other", "other"]
+        )
+        XCTAssertEqual(
+            try readTextValues(at: databaseURL, sql: "SELECT kind FROM personal_cards ORDER BY id"),
+            ["other", "other"]
+        )
+    }
+
     func testSearchCardsAndReviewPersistLocally() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -268,6 +319,27 @@ final class LocalStoreTests: XCTestCase {
         XCTAssertEqual(nounFromEnglishSearch.meanings.map(\.english), ["bank", "bench"])
     }
 
+    func testInflectedVerbSearchPrefersTheBaseVerbOverLiteralHomonyms() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixture = directory.appendingPathComponent("dict.txt")
+        try """
+        bin\tam
+        Sein {n}\tbeing
+        sein {vi}\tto be
+        sein\this
+        """.write(to: fixture, atomically: true, encoding: .utf8)
+
+        let store = try LocalStore(url: directory.appendingPathComponent("test.sqlite3"))
+        _ = try await store.importDictionary(from: fixture)
+        let results = try await store.searchDictionary("bin")
+
+        XCTAssertEqual(GermanMorphology.lookupTerms(for: "bin"), ["bin", "sein"])
+        XCTAssertEqual(results.first?.german, "sein")
+        XCTAssertEqual(results.first?.kind, .verb)
+    }
+
     func testDoesNotGroupWordsThatOnlyDifferByDiacritics() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -362,6 +434,36 @@ final class LocalStoreTests: XCTestCase {
         let reopenedTravelCards = try await reopened.cards(listID: travel.id)
         XCTAssertEqual(reopenedDefaultCards, [])
         XCTAssertEqual(reopenedTravelCards.map(\.id), [card.id])
+    }
+
+    func testMovingCardBetweenListsIsAtomic() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let store = try LocalStore(url: directory.appendingPathComponent("test.sqlite3"))
+        try await store.seedStarterDictionaryIfNeeded()
+        let houseResults = try await store.searchDictionary("Haus")
+        let house = try XCTUnwrap(houseResults.first)
+        let travel = try await store.createWordList(name: "Travel")
+        let card = try await store.addCard(from: house)
+
+        do {
+            try await store.moveCard(card.id, fromList: WordList.defaultID, toList: Int64.max)
+            XCTFail("Moving to a missing list should fail")
+        } catch {
+            // Expected: the foreign-key failure must roll back the entire move.
+        }
+        let defaultCardsAfterFailure = try await store.cards()
+        let travelCardsAfterFailure = try await store.cards(listID: travel.id)
+        XCTAssertEqual(defaultCardsAfterFailure.map(\.id), [card.id])
+        XCTAssertEqual(travelCardsAfterFailure, [])
+
+        try await store.moveCard(card.id, fromList: WordList.defaultID, toList: travel.id)
+        let defaultCardsAfterMove = try await store.cards()
+        let travelCardsAfterMove = try await store.cards(listID: travel.id)
+        XCTAssertEqual(defaultCardsAfterMove, [])
+        XCTAssertEqual(travelCardsAfterMove.map(\.id), [card.id])
     }
 
     func testReviewCardsIncludesCardsThatAreNotDue() async throws {
@@ -463,6 +565,30 @@ private func createLectorFixture(at url: URL) throws {
     }
 }
 
+private func createVersionOneClassificationFixture(at url: URL) throws {
+    try executeSQLite(at: url, sql: """
+        PRAGMA user_version = 1;
+        CREATE TABLE dictionary_entries (
+          id INTEGER PRIMARY KEY,
+          raw_german TEXT NOT NULL,
+          raw_english TEXT NOT NULL,
+          kind TEXT NOT NULL
+        );
+        CREATE TABLE personal_cards (
+          id INTEGER PRIMARY KEY,
+          dictionary_entry_id INTEGER,
+          kind TEXT NOT NULL,
+          notes TEXT NOT NULL
+        );
+        INSERT INTO dictionary_entries (id, raw_german, raw_english, kind) VALUES
+          (1, 'sein', 'his [determiner]', 'other'),
+          (2, 'Hallo', 'hello', 'other');
+        INSERT INTO personal_cards (id, dictionary_entry_id, kind, notes) VALUES
+          (1, 1, 'other', 'keep me'),
+          (2, 2, 'other', 'also keep me');
+        """)
+}
+
 private func executeSQLite(at url: URL, sql: String) throws {
     var database: OpaquePointer?
     guard sqlite3_open(url.path, &database) == SQLITE_OK else {
@@ -494,4 +620,27 @@ private func readSchemaVersion(at url: URL) throws -> Int {
         throw NSError(domain: "LocalStoreTests", code: 7)
     }
     return Int(sqlite3_column_int(statement, 0))
+}
+
+private func readTextValues(at url: URL, sql: String) throws -> [String] {
+    var database: OpaquePointer?
+    guard sqlite3_open_v2(url.path, &database, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else {
+        sqlite3_close(database)
+        throw NSError(domain: "LocalStoreTests", code: 8)
+    }
+    defer { sqlite3_close(database) }
+    var statement: OpaquePointer?
+    guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK else {
+        throw NSError(domain: "LocalStoreTests", code: 9)
+    }
+    defer { sqlite3_finalize(statement) }
+    var values: [String] = []
+    while true {
+        let step = sqlite3_step(statement)
+        if step == SQLITE_DONE { return values }
+        guard step == SQLITE_ROW, let value = sqlite3_column_text(statement, 0) else {
+            throw NSError(domain: "LocalStoreTests", code: 10)
+        }
+        values.append(String(cString: value))
+    }
 }

@@ -5,6 +5,14 @@ public enum WordKind: String, Codable, CaseIterable, Sendable {
     case verb
     case adjective
     case adverb
+    case pronoun
+    case determiner
+    case preposition
+    case conjunction
+    case presentParticiple = "present_participle"
+    case pastParticiple = "past_participle"
+    case prefix
+    case suffix
     case phrase
     case other
 
@@ -14,6 +22,14 @@ public enum WordKind: String, Codable, CaseIterable, Sendable {
         case .verb: "Verb"
         case .adjective: "Adjective"
         case .adverb: "Adverb"
+        case .pronoun: "Pronoun"
+        case .determiner: "Determiner"
+        case .preposition: "Preposition"
+        case .conjunction: "Conjunction"
+        case .presentParticiple: "Present participle"
+        case .pastParticiple: "Past participle"
+        case .prefix: "Prefix"
+        case .suffix: "Suffix"
         case .phrase: "Phrase"
         case .other: "Word"
         }

@@ -159,22 +159,54 @@ final class Lang4SelfUITests: XCTestCase {
         XCTAssertTrue(app.buttons["dictionary.clear-search"].waitForNonExistence(timeout: 3))
     }
 
-    func testSpeakRecordingControlAndConfirmationAreKeyboardOperable() {
+    func testSpeakRecordingControlAndMultipleAddsAreKeyboardOperable() {
         openRoute("2", route: "speak")
         let recordButton = app.buttons["speak.record"]
         XCTAssertTrue(recordButton.waitForExistence(timeout: 3))
 
         waitForUIToSettle()
         app.typeKey(.space, modifierFlags: [])
-        XCTAssertTrue(app.buttons["speak.confirm"].waitForExistence(timeout: 3))
+        let addButton = app.buttons["speak.add-selected"]
+        XCTAssertTrue(addButton.waitForExistence(timeout: 3))
+        let detail = element("entry.detail")
+        XCTAssertTrue(detail.waitForExistence(timeout: 3))
+        XCTAssertGreaterThan(addButton.frame.midX, detail.frame.midX)
+        XCTAssertLessThan(addButton.frame.midY, detail.frame.midY)
         let results = element("speak.results")
         XCTAssertTrue(results.waitForExistence(timeout: 3))
         assertFocused(results)
         XCTAssertTrue(app.staticTexts["Hund"].waitForExistence(timeout: 3))
         XCTAssertTrue(app.staticTexts["Hunde"].waitForExistence(timeout: 3))
         XCTAssertTrue(app.staticTexts["Part of speech: Noun"].firstMatch.exists)
+
+        results.staticTexts["Hund"].firstMatch.click()
         app.typeKey(.return, modifierFlags: [])
         XCTAssertTrue(app.buttons["banner.dismiss"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.staticTexts["Added “Hund” to My words"].exists)
+        assertFocused(results)
+        XCTAssertTrue(app.buttons["banner.dismiss"].waitForNonExistence(timeout: 4))
+
+        let addedListMenu = element("speak.add-selected.list")
+        XCTAssertTrue(addedListMenu.waitForExistence(timeout: 3))
+        XCTAssertFalse(addButton.exists)
+        XCTAssertLessThan(addedListMenu.frame.width, 220, "The list control should not crowd the word")
+        XCTAssertLessThan(element("entry.word").frame.height, 60, "The word heading should stay on one line")
+
+        app.typeKey(.rightArrow, modifierFlags: [])
+        XCTAssertTrue(element("entry.list-selection").waitForExistence(timeout: 3))
+        app.typeKey(.downArrow, modifierFlags: [])
+        app.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(app.buttons["banner.dismiss"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.staticTexts["Moved “Hund” to Travel"].exists)
+        assertFocused(results)
+        XCTAssertTrue(app.buttons["banner.dismiss"].waitForNonExistence(timeout: 4))
+
+        app.typeKey(.downArrow, modifierFlags: [])
+        XCTAssertTrue(addButton.waitForExistence(timeout: 3), "Another result should remain addable")
+        app.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(app.buttons["banner.dismiss"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.staticTexts["Added “Hunde” to Travel"].exists)
+        app.buttons["banner.dismiss"].click()
 
         waitForUIToSettle()
         let idleFrame = recordButton.frame
@@ -186,23 +218,71 @@ final class Lang4SelfUITests: XCTestCase {
         XCTAssertEqual(recordButton.frame.midX, idleFrame.midX, accuracy: 1)
 
         recordButton.click()
-        XCTAssertTrue(app.buttons["speak.confirm"].waitForExistence(timeout: 3))
+        XCTAssertTrue(element("speak.add-selected.list").waitForExistence(timeout: 3))
     }
 
-    func testFirstSpaceReleaseCompletesPermissionSetupBeforeRecording() {
+    func testSpeakHidesListSwitchWhenThereIsNoAlternativeList() {
+        openRoute("4", route: "library")
+        element("library.list-picker").click()
+        app.menuItems["Travel"].click()
+        element("library.list-actions").click()
+        app.menuItems["Delete List…"].click()
+        app.sheets.firstMatch.buttons["Delete List"].click()
+
+        openRoute("2", route: "speak")
+        app.typeKey(.space, modifierFlags: [])
+        let results = element("speak.results")
+        XCTAssertTrue(results.waitForExistence(timeout: 3))
+        app.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(app.buttons["banner.dismiss"].waitForExistence(timeout: 3))
+
+        let addedListStatus = element("speak.add-selected.list")
+        XCTAssertTrue(addedListStatus.waitForExistence(timeout: 3))
+        XCTAssertFalse(app.buttons["speak.add-selected.list"].exists)
+
+        app.typeKey(.rightArrow, modifierFlags: [])
+        XCTAssertFalse(element("entry.list-selection").waitForExistence(timeout: 1))
+        assertFocused(results)
+    }
+
+    func testSpaceOnlyOpensPermissionInfo() {
         app.terminate()
         app.launchArguments.append("--ui-testing-speech-permission-setup")
         app.launch()
         XCTAssertTrue(app.textFields["dictionary.search"].waitForExistence(timeout: 8))
 
-        openRoute("2", route: "speak")
+        openRoute("6", route: "settings")
         app.typeKey(.space, modifierFlags: [])
-        XCTAssertTrue(app.staticTexts["Checking local speech access…"].waitForExistence(timeout: 2))
-        XCTAssertTrue(app.staticTexts["Hold Space to speak"].waitForExistence(timeout: 2))
-        XCTAssertFalse(app.buttons["speak.confirm"].exists)
+        XCTAssertTrue(app.buttons["speak.permission-setup"].waitForExistence(timeout: 3))
+        XCTAssertFalse(app.buttons["speak.record"].exists)
+        XCTAssertFalse(app.buttons["speak.add-selected"].exists)
 
-        app.typeKey(.space, modifierFlags: [])
-        XCTAssertTrue(app.buttons["speak.confirm"].waitForExistence(timeout: 3))
+        waitForUIToSettle(1.25)
+        XCTAssertTrue(app.buttons["speak.permission-setup"].exists)
+        XCTAssertFalse(app.buttons["speak.record"].exists)
+    }
+
+    func testPermissionSetupReturnDoesNotStartRecording() {
+        app.terminate()
+        app.launchArguments.append("--ui-testing-speech-permission-setup")
+        app.launch()
+        XCTAssertTrue(app.textFields["dictionary.search"].waitForExistence(timeout: 8))
+
+        app.typeKey("2", modifierFlags: .command)
+        let setupButton = app.buttons["speak.permission-setup"]
+        XCTAssertTrue(setupButton.waitForExistence(timeout: 3))
+        XCTAssertLessThan(setupButton.frame.height, 45, "Permission button title should stay on one line")
+        XCTAssertFalse(app.buttons["speak.record"].exists)
+
+        app.typeKey(.return, modifierFlags: [])
+        XCTAssertFalse(app.buttons["speak.add-selected"].exists)
+        let recordButton = app.buttons["speak.record"]
+        XCTAssertTrue(recordButton.waitForExistence(timeout: 3))
+        XCTAssertEqual(recordButton.label, "Start recording")
+        XCTAssertFalse(app.buttons["speak.add-selected"].exists)
+
+        recordButton.click()
+        XCTAssertEqual(recordButton.label, "Stop recording")
     }
 
     func testSpaceOpensSpeakAndRecordsFromAnotherPage() {
@@ -211,7 +291,7 @@ final class Lang4SelfUITests: XCTestCase {
         app.typeKey(.space, modifierFlags: [])
 
         XCTAssertTrue(app.buttons["speak.record"].waitForExistence(timeout: 3))
-        XCTAssertTrue(app.buttons["speak.confirm"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.buttons["speak.add-selected"].waitForExistence(timeout: 3))
         let results = element("speak.results")
         XCTAssertTrue(results.waitForExistence(timeout: 3))
         assertFocused(results)
@@ -475,8 +555,11 @@ final class Lang4SelfUITests: XCTestCase {
         XCTAssertGreaterThanOrEqual(app.sliders.count, 2)
         XCTAssertTrue(app.buttons["settings.reset-model-defaults"].exists)
 
-        for shortcut in ["⌘1 … ⌘6", "⌘,", "⌘F", "⌘/ or ⌘?", "⌘Return", "⌘N", "1 … 4", "Delete", "⌘Q", "⌘Z / ⇧⌘Z"] {
-            XCTAssertTrue(app.staticTexts[shortcut].exists, "Settings is missing \(shortcut)")
+        for shortcut in ["global.routes", "global.settings", "global.find", "global.help", "dictionary.add", "lists.new", "review.rate", "lists.delete", "macos.quit", "macos.undo"] {
+            XCTAssertTrue(element("shortcut.\(shortcut)").exists, "Settings is missing \(shortcut)")
+        }
+        for oldTextShortcut in ["⌘1 … ⌘6", "⌘F", "⌘Return", "1 … 4", "Delete"] {
+            XCTAssertFalse(app.staticTexts[oldTextShortcut].exists, "Shortcut is still rendered as text: \(oldTextShortcut)")
         }
 
         app.buttons["settings.import-dictionary"].click()

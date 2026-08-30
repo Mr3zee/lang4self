@@ -244,13 +244,17 @@ public actor LocalStore {
     ) -> Int {
         let german = DictCCParser.normalized(entry.german)
         guard let exactIndex = lookupTerms.firstIndex(of: german) else { return 10 }
-        let isBaseForm = entry.kind == .verb
-            || (entry.kind == .noun && entry.gender != .plural && entry.gender != .unknown)
-        if exactIndex > 0, isBaseForm { return 0 }
-        if german == literalTerm, entry.gender != .plural { return 0 }
-        if isBaseForm { return 1 }
-        if german == literalTerm { return 2 }
-        return 3
+        let isSingularNoun = entry.kind == .noun
+            && entry.gender != .plural
+            && entry.gender != .unknown
+        if exactIndex > 0, entry.kind == .verb { return 0 }
+        if exactIndex > 0, isSingularNoun { return 1 }
+        if german == literalTerm, entry.gender != .plural {
+            return entry.kind == .other ? 2 : 0
+        }
+        if entry.kind == .verb || isSingularNoun { return 2 }
+        if german == literalTerm { return 3 }
+        return 4
     }
 
     @discardableResult
@@ -610,6 +614,30 @@ public actor LocalStore {
             let shouldDelete = try readScalarInt(orphan) != 0
             sqlite3_finalize(orphan)
             if shouldDelete { try deleteCard(id: cardID) }
+            try Self.execute(database, "COMMIT")
+        } catch {
+            try? Self.execute(database, "ROLLBACK")
+            throw error
+        }
+    }
+
+    public func moveCard(
+        _ cardID: Int64,
+        fromList sourceListID: Int64,
+        toList destinationListID: Int64
+    ) throws {
+        guard sourceListID != destinationListID else { return }
+        try Self.execute(database, "BEGIN IMMEDIATE")
+        do {
+            try addCard(cardID, toList: destinationListID)
+
+            let statement = try prepare("DELETE FROM card_lists WHERE card_id = ? AND list_id = ?")
+            sqlite3_bind_int64(statement, 1, cardID)
+            sqlite3_bind_int64(statement, 2, sourceListID)
+            let step = sqlite3_step(statement)
+            sqlite3_finalize(statement)
+            guard step == SQLITE_DONE else { throw sqliteError() }
+
             try Self.execute(database, "COMMIT")
         } catch {
             try? Self.execute(database, "ROLLBACK")
@@ -1164,6 +1192,14 @@ private func wordKind(forLectorPartOfSpeech value: String) -> WordKind {
     case "verb": .verb
     case "adj": .adjective
     case "adv": .adverb
+    case "pron", "pronoun": .pronoun
+    case "det", "determiner": .determiner
+    case "prep", "preposition": .preposition
+    case "conj", "conjunction": .conjunction
+    case "pres-p", "present_participle": .presentParticiple
+    case "past-p", "past_participle": .pastParticiple
+    case "prefix": .prefix
+    case "suffix": .suffix
     case "phrase", "prep_phrase", "proverb": .phrase
     default: .other
     }

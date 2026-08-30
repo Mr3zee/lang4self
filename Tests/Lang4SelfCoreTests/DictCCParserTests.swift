@@ -44,6 +44,42 @@ final class DictCCParserTests: XCTestCase {
         XCTAssertEqual(entry.meanings.first?.language, .russian)
     }
 
+    func testParsesEveryDictCCClassification() throws {
+        let classifications: [(String, WordKind)] = [
+            ("noun", .noun),
+            ("verb", .verb),
+            ("adj", .adjective),
+            ("adv", .adverb),
+            ("pron", .pronoun),
+            ("prep", .preposition),
+            ("conj", .conjunction),
+            ("pres-p", .presentParticiple),
+            ("past-p", .pastParticiple),
+            ("prefix", .prefix),
+            ("suffix", .suffix)
+        ]
+
+        for (classification, expectedKind) in classifications {
+            let entry = try XCTUnwrap(DictCCParser.parse(line: "Wort\tword\t\(classification)\t"))
+            XCTAssertEqual(entry.kind, expectedKind, classification)
+        }
+    }
+
+    func testUsesFirstKindForMixedDatasetClassifications() throws {
+        let adjective = try XCTUnwrap(DictCCParser.parse(line: "echt\treal\tadj adv\t"))
+        let participle = try XCTUnwrap(DictCCParser.parse(line: "gemacht\tmade\tpast-p adj\t"))
+
+        XCTAssertEqual(adjective.kind, .adjective)
+        XCTAssertEqual(participle.kind, .pastParticiple)
+    }
+
+    func testDetectsInlineDeterminerClassification() throws {
+        let entry = try XCTUnwrap(DictCCParser.parse(line: "sein\this [determiner]\t"))
+
+        XCTAssertEqual(entry.kind, .determiner)
+        XCTAssertEqual(entry.english, "his")
+    }
+
     func testNounInfoSeparatesPluralFormsFromUsageNotes() throws {
         let dog = try XCTUnwrap(DictCCParser.parse(line: "Hund {m} [Hunde]\tdog"))
         let mother = try XCTUnwrap(DictCCParser.parse(line: "Mutter {f} [Mütter]\tmother"))

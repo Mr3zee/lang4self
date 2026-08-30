@@ -41,8 +41,13 @@ struct DictionaryView: View {
                 Divider()
 
                 if state.searchQuery.isEmpty {
-                    PlaceholderView(symbol: "text.magnifyingglass", title: "Search locally", detail: "Type a German, English, or Russian word or phrase. Press ⌘F from anywhere.")
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    PlaceholderView(
+                        symbol: "text.magnifyingglass",
+                        title: "Search locally",
+                        detail: "Type a German, English, or Russian word or phrase. Find from anywhere:",
+                        shortcut: .commandF
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else if state.isSearchingDictionary {
                     VStack(spacing: 12) {
                         ProgressView()
@@ -59,7 +64,7 @@ struct DictionaryView: View {
                         EntryRow(entry: entry)
                             .tag(entry)
                             .contextMenu {
-                                Button(addLabel) { state.addToPersonalDictionary(entry) }
+                                Button(contextAddLabel) { state.addToPersonalDictionary(entry) }
                             }
                     }
                     .listStyle(.inset)
@@ -70,9 +75,14 @@ struct DictionaryView: View {
             .frame(minWidth: 285, idealWidth: 340)
 
             if let entry = state.selectedEntry {
-                EntryDetailView(entry: entry, addLabel: addLabel) {
-                    state.addToPersonalDictionary(entry)
-                }
+                EntryDetailView(
+                    entry: entry,
+                    addLabel: addButtonLabel(for: entry),
+                    wordLists: state.wordLists,
+                    addedListID: state.addedListID(for: entry),
+                    switchAddedListAction: { await state.switchListForAddedEntry(entry, to: $0) },
+                    addAction: { state.addToPersonalDictionary(entry) }
+                )
             } else {
                 PlaceholderView(symbol: "character.book.closed", title: "Lang4Self", detail: "Your offline German dictionary")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -90,8 +100,12 @@ struct DictionaryView: View {
         }
     }
 
-    private var addLabel: String {
+    private var contextAddLabel: String {
         "Add to \(state.selectedWordList?.name ?? "My words")"
+    }
+
+    private func addButtonLabel(for entry: DictionaryEntry) -> String {
+        entry.kind == .phrase ? "Add phrase" : "Add word"
     }
 
     private func focusFirstResult() {

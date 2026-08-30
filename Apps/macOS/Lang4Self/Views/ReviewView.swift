@@ -115,9 +115,6 @@ struct ReviewView: View {
             }
             .disabled(state.stats.totalCards == 0)
             .accessibilityIdentifier("review.scope")
-            Text("Space reveal · 1–4 rate")
-                .font(.caption)
-                .foregroundStyle(.secondary)
         }
         .padding(.horizontal, 22)
         .padding(.vertical, 12)
@@ -145,7 +142,9 @@ struct ReviewView: View {
                 } label: {
                     VStack(spacing: 3) {
                         Text(rating.label).fontWeight(.semibold)
-                        Text("\(rating.rawValue)").font(.caption2).foregroundStyle(.secondary)
+                        Image(systemName: "\(rating.rawValue).square")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
                     }
                     .frame(minWidth: 82)
                 }
@@ -155,6 +154,7 @@ struct ReviewView: View {
                 .focusable()
                 .focused($focusedAction, equals: .rating(rating.rawValue))
                 .accessibilityIdentifier("review.rating.\(rating.rawValue)")
+                .accessibilityLabel("\(rating.label), shortcut \(rating.rawValue)")
             }
         }
         .padding(.bottom, 12)

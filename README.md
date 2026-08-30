@@ -95,7 +95,7 @@ Build the app bundle or install a local release:
 ./scripts/release.sh
 ```
 
-The release script installs `Lang4Self.app` in `~/Applications`, registers it for Spotlight, and installs the CLI in `~/.local/bin`. `./scripts/install.sh` is an alias for the same command.
+The release script installs `Lang4Self.app` in `~/Applications`, refreshes its Spotlight and Launch Services metadata, and installs the CLI in `~/.local/bin`. If Raycast is running, the script restarts it in the background so its application icon cache is refreshed. `./scripts/install.sh` is an alias for the same command.
 
 CLI examples:
 

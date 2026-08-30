@@ -281,9 +281,12 @@ private struct SentenceInspector: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Spacer()
-                    Text("←/→ select word")
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
+                    HStack(spacing: 4) {
+                        KeyboardShortcutHint(.init(chords: [.init(.left), .init(.right)]))
+                        Text("select word")
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
                     if let savedSentence {
                         Button("Delete Sentence", role: .destructive) {
                             state.deleteSentence(savedSentence)

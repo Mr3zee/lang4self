@@ -30,10 +30,10 @@ final class SpeechRecognizer: NSObject, ObservableObject {
     private var simulatesUndeterminedPermissions: Bool
 
     var isListening: Bool { phase == .listening }
-    var needsPermissionSetup: Bool {
-        if isUITesting { return simulatesUndeterminedPermissions }
-        return SFSpeechRecognizer.authorizationStatus() == .notDetermined
-            || AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined
+    var hasRecordingPermission: Bool {
+        if isUITesting { return !simulatesUndeterminedPermissions }
+        return SFSpeechRecognizer.authorizationStatus() == .authorized
+            && AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
     }
 
     init(isUITesting: Bool, simulatesUndeterminedPermissions: Bool) {
@@ -43,6 +43,9 @@ final class SpeechRecognizer: NSObject, ObservableObject {
     }
 
     func start() {
+        // Permission setup is a separate user action. Starting a recording must
+        // never display permission prompts or continue into setup implicitly.
+        guard hasRecordingPermission else { return }
         guard phase != .requestingPermission, phase != .listening else { return }
         if isUITesting {
             transcription = "Der Hund"
@@ -50,18 +53,7 @@ final class SpeechRecognizer: NSObject, ObservableObject {
             phase = .listening
             return
         }
-        let generation = UUID()
-        startGeneration = generation
-        Task {
-            phase = .requestingPermission
-            guard await permissionsGranted() else {
-                guard startGeneration == generation else { return }
-                phase = .unavailable("Microphone and Speech Recognition access are required. Enable both in System Settings → Privacy & Security.")
-                return
-            }
-            guard startGeneration == generation else { return }
-            beginRecognition()
-        }
+        beginRecognition()
     }
 
     func rerecord() {
@@ -245,11 +237,10 @@ extension AppState: SpeakShortcutRouting {}
 @MainActor
 protocol SpeakShortcutRecording: AnyObject {
     var phase: SpeechRecognizer.Phase { get }
-    var needsPermissionSetup: Bool { get }
+    var hasRecordingPermission: Bool { get }
     func start()
     func rerecord()
     func stop()
-    func requestPermissions()
 }
 
 extension SpeechRecognizer: SpeakShortcutRecording {}
@@ -257,7 +248,6 @@ extension SpeechRecognizer: SpeakShortcutRecording {}
 @MainActor
 final class SpeakShortcutController: ObservableObject {
     @Published private(set) var isSpaceHeld = false
-    @Published private(set) var isAwaitingPermissionSetup = false
 
     private let router: any SpeakShortcutRouting
     private let speech: any SpeakShortcutRecording
@@ -290,25 +280,19 @@ final class SpeakShortcutController: ObservableObject {
     }
 
     func releaseSpaceHold() {
-        endSpaceHold(requestPermissions: true)
+        endSpaceHold()
     }
 
     func cancelSpaceHold() {
-        endSpaceHold(requestPermissions: false)
+        endSpaceHold()
     }
 
-    private func endSpaceHold(requestPermissions: Bool) {
+    private func endSpaceHold() {
         isSpaceDown = false
         pendingHold = nil
         guard isSpaceHeld else { return }
         isSpaceHeld = false
-        let needsSetup = isAwaitingPermissionSetup
-        isAwaitingPermissionSetup = false
-        if needsSetup, requestPermissions {
-            speech.requestPermissions()
-        } else {
-            speech.stop()
-        }
+        speech.stop()
     }
 
     private func handle(_ event: NSEvent) -> NSEvent? {
@@ -375,11 +359,9 @@ final class SpeakShortcutController: ObservableObject {
         isSpaceHeld = true
         router.route = .speak
 
-        if speech.needsPermissionSetup {
-            // Never show a system permission dialog while a key is physically
-            // held: the app loses activation and key repeats beep in the dialog.
-            // Ask after key-up, then the next hold starts recording normally.
-            isAwaitingPermissionSetup = true
+        if !speech.hasRecordingPermission {
+            // Space only opens the permission information page. The explicit
+            // Return action owns permission prompts; this gesture never does.
             return
         }
 

@@ -151,7 +151,7 @@
 		T00000000000000000000001 = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = C00000000000000000000020;
-			buildPhases = (S00000000000000000000001, H00000000000000000000001, R00000000000000000000001,);
+			buildPhases = (S00000000000000000000001, H00000000000000000000001, R00000000000000000000001, I00000000000000000000001,);
 			buildRules = ();
 			dependencies = (D00000000000000000000002,);
 			name = Lang4Self;
@@ -223,6 +223,24 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		I00000000000000000000001 = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = ();
+			inputFileListPaths = ();
+			inputPaths = ();
+			name = "Refresh App Bundle Metadata";
+			outputFileListPaths = ();
+			outputPaths = ();
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "/usr/bin/touch \"${TARGET_BUILD_DIR}/${FULL_PRODUCT_NAME}\"\n";
+			showEnvVarsInLog = 0;
+		};
+/* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		S00000000000000000000001 = {

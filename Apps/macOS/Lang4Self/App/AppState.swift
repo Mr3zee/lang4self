@@ -37,6 +37,11 @@ enum AppRoute: String, CaseIterable, Identifiable {
 
 @MainActor
 final class AppState: ObservableObject {
+    private struct AddedDictionaryEntryPlacement {
+        let cardID: PersonalCard.ID
+        let listID: WordList.ID
+    }
+
     @Published var route: AppRoute = .dictionary
     @Published var searchQuery = ""
     @Published private(set) var searchResults: [DictionaryEntry] = []
@@ -69,6 +74,7 @@ final class AppState: ObservableObject {
     @Published private(set) var isRefreshingLMStudioModels = false
     @Published private(set) var lmStudioSettings: LMStudioSettings
     @Published var isShowingKeyboardShortcuts = false
+    @Published private var addedDictionaryEntryPlacements: [DictionaryEntry.ID: AddedDictionaryEntryPlacement] = [:]
 
     private let store: any AppDataStore
     private var searchTask: Task<Void, Never>?
@@ -181,11 +187,12 @@ final class AppState: ObservableObject {
         generatedSourceList = WordList(id: WordList.defaultID, name: "My words")
     }
 
-    func search(_ value: String, immediate: Bool = false) {
+    func search(_ value: String, immediate: Bool = false, selectFirstResult: Bool = false) {
         searchQuery = value
         searchTask?.cancel()
         let generation = UUID()
         searchGeneration = generation
+        if selectFirstResult { selectedEntry = nil }
         guard !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             searchResults = []
             selectedEntry = nil
@@ -200,7 +207,7 @@ final class AppState: ObservableObject {
                 let results = try await store.searchDictionary(value)
                 guard !Task.isCancelled, searchGeneration == generation else { return }
                 searchResults = results
-                if selectedEntry == nil || !results.contains(where: { $0.id == selectedEntry?.id }) {
+                if selectFirstResult || selectedEntry == nil || !results.contains(where: { $0.id == selectedEntry?.id }) {
                     selectedEntry = results.first
                 }
                 isSearchingDictionary = false
@@ -217,12 +224,55 @@ final class AppState: ObservableObject {
         let listName = wordLists.first { $0.id == listID }?.name ?? "My words"
         Task {
             do {
-                _ = try await store.addCard(from: entry, listID: listID)
+                let card = try await store.addCard(from: entry, listID: listID)
+                addedDictionaryEntryPlacements[entry.id] = .init(cardID: card.id, listID: listID)
                 await refreshStudyData()
                 if announce { showBanner("Added “\(entry.german)” to \(listName)") }
             } catch {
                 show(error)
             }
+        }
+    }
+
+    func addedListID(for entry: DictionaryEntry) -> WordList.ID? {
+        guard let placement = addedDictionaryEntryPlacements[entry.id],
+              wordLists.contains(where: { $0.id == placement.listID })
+        else { return nil }
+        return placement.listID
+    }
+
+    func switchListForAddedEntry(
+        _ entry: DictionaryEntry,
+        to destinationListID: WordList.ID
+    ) async -> Bool {
+        guard let placement = addedDictionaryEntryPlacements[entry.id],
+              placement.listID != destinationListID,
+              let destination = wordLists.first(where: { $0.id == destinationListID })
+        else { return false }
+
+        do {
+            try await store.moveCard(
+                placement.cardID,
+                fromList: placement.listID,
+                toList: destinationListID
+            )
+            guard addedDictionaryEntryPlacements[entry.id]?.cardID == placement.cardID,
+                  addedDictionaryEntryPlacements[entry.id]?.listID == placement.listID
+            else { return false }
+            addedDictionaryEntryPlacements[entry.id] = .init(
+                cardID: placement.cardID,
+                listID: destinationListID
+            )
+            if selectedListID == destinationListID {
+                await refreshStudyData()
+            } else {
+                selectWordList(destinationListID)
+            }
+            showBanner("Moved “\(entry.german)” to \(destination.name)")
+            return true
+        } catch {
+            show(error)
+            return false
         }
     }
 

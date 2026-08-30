@@ -70,13 +70,21 @@ public enum DictCCParser {
 
     private static func detectKind(in value: String, english: String, declaredKind: String, gender: Gender) -> WordKind {
         if gender != .unknown { return .noun }
-        let declaration = declaredKind.lowercased()
-        if declaration.contains("noun") { return .noun }
-        if declaration.contains("verb") { return .verb }
-        if declaration.contains("adj") || declaration.contains("past-p") || declaration.contains("pres-p") { return .adjective }
-        if declaration.contains("adv") { return .adverb }
+        if let declared = wordKind(for: declaredKind) { return declared }
         let lower = value.lowercased()
         let lowerEnglish = english.lowercased()
+        if lowerEnglish.contains("[determiner]")
+            || lowerEnglish.contains("[possessive]")
+            || lowerEnglish.contains("[article]")
+            || lower.contains("{indefinite article}") {
+            return .determiner
+        }
+        if lowerEnglish.contains("[pronoun]")
+            || lowerEnglish.contains("[relative pronoun]")
+            || lower.contains("[pronomen]")
+            || lower.contains("{pronomen}") {
+            return .pronoun
+        }
         if ["{vi}", "{vt}", "{vr}", "{verb}", "{v.i.}", "{v.t.}"].contains(where: lower.contains)
             || value.contains("|")
             || lowerEnglish.hasPrefix("to ") { return .verb }
@@ -84,6 +92,31 @@ public enum DictCCParser {
         if lower.contains("{adv}") || lower.contains("{adv.}") { return .adverb }
         if cleanedTerm(value).contains(" ") { return .phrase }
         return .other
+    }
+
+    private static func wordKind(for declaration: String) -> WordKind? {
+        for rawToken in declaration.lowercased().split(whereSeparator: { $0.isWhitespace }) {
+            let qualifierFree = rawToken.split(separator: ":").last.map(String.init) ?? String(rawToken)
+            let token = qualifierFree.trimmingCharacters(in: .punctuationCharacters)
+            switch token {
+            case "noun": return .noun
+            case "verb": return .verb
+            case "adj", "adjj": return .adjective
+            case "adv": return .adverb
+            case "pron", "rel-pron": return .pronoun
+            case "prep": return .preposition
+            case "conj": return .conjunction
+            case "pres-p": return .presentParticiple
+            case "past-p": return .pastParticiple
+            case "prefix": return .prefix
+            case "suffix": return .suffix
+            default:
+                if token.hasPrefix("adj") { return .adjective }
+                if token.hasPrefix("pres-p") { return .presentParticiple }
+                if token.hasPrefix("past-p") { return .pastParticiple }
+            }
+        }
+        return nil
     }
 
     private static func extractUsage(from value: String) -> String? {

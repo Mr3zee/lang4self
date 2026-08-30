@@ -7,6 +7,7 @@ struct SpeakView: View {
     @EnvironmentObject private var speech: SpeechRecognizer
     @EnvironmentObject private var speakShortcut: SpeakShortcutController
     @State private var isManualRecording = false
+    @State private var isShowingAddedListSelection = false
     @FocusState private var focusedControl: FocusControl?
     let automaticallyFocusContent: Bool
 
@@ -33,7 +34,7 @@ struct SpeakView: View {
                         .font(.system(size: 34, weight: .bold, design: .rounded))
                         .textSelection(.enabled)
                 } else {
-                    Text(statusDetail)
+                    statusDetail
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
                         .frame(maxWidth: 520)
@@ -53,8 +54,17 @@ struct SpeakView: View {
                     .frame(minWidth: 260, idealWidth: 310)
                     .focused($focusedControl, equals: .results)
                     .accessibilityIdentifier("speak.results")
+                    .onKeyPress(.rightArrow) {
+                        guard let addedListID = state.addedListID(for: entry),
+                              state.wordLists.contains(where: { $0.id != addedListID })
+                        else {
+                            return .ignored
+                        }
+                        isShowingAddedListSelection = true
+                        return .handled
+                    }
 
-                    EntryDetailView(entry: entry)
+                    spokenEntryDetail(entry)
                 }
             } else {
                 PlaceholderView(
@@ -72,7 +82,9 @@ struct SpeakView: View {
             .handled
         }
         .onChange(of: speech.transcription) { _, value in
-            if !value.isEmpty { state.search(value, immediate: true) }
+            if !value.isEmpty {
+                state.search(value, immediate: true, selectFirstResult: true)
+            }
         }
         .onChange(of: speech.phase) { _, phase in
             if phase == .listening, !isRecordingRequested { speech.stop() }
@@ -82,6 +94,7 @@ struct SpeakView: View {
             if phase == .guess {
                 focusResults()
             } else if phase == .idle || phase.isUnavailable {
+                isShowingAddedListSelection = false
                 DispatchQueue.main.async { focusedControl = .record }
             }
         }
@@ -90,7 +103,7 @@ struct SpeakView: View {
         }
         .onAppear {
             if !speech.transcription.isEmpty {
-                state.search(speech.transcription, immediate: true)
+                state.search(speech.transcription, immediate: true, selectFirstResult: true)
             }
             if automaticallyFocusContent {
                 DispatchQueue.main.async { focusedControl = .record }
@@ -107,19 +120,60 @@ struct SpeakView: View {
     @ViewBuilder
     private var controls: some View {
         HStack {
-            holdToRecordControl
+            if speech.hasRecordingPermission {
+                holdToRecordControl
+            } else {
+                permissionSetupControl
+            }
 
             if speech.phase == .requestingPermission || speech.phase == .processing {
                 ProgressView().controlSize(.small)
             }
+        }
+    }
 
-            if speech.phase == .guess {
-                Button(addButtonTitle) { confirm() }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(state.selectedEntry == nil)
-                    .keyboardShortcut(.return, modifiers: [])
-                    .accessibilityIdentifier("speak.confirm")
+    private var permissionSetupControl: some View {
+        Button(action: speech.requestPermissions) {
+            HStack(spacing: 8) {
+                Label("Request speech access", systemImage: "lock.open.fill")
+                    .lineLimit(1)
+                KeyboardShortcutHint(.returnKey)
+                    .accessibilityHidden(true)
             }
+            .fontWeight(.semibold)
+            .fixedSize(horizontal: true, vertical: false)
+            .frame(minWidth: 180)
+        }
+        .buttonStyle(SpeakActionButtonStyle(isListening: false))
+        .controlSize(.large)
+        .disabled(speech.phase == .requestingPermission || speakShortcut.isSpaceHeld)
+        .keyboardShortcut(.return, modifiers: [])
+        .focusable()
+        .focused($focusedControl, equals: .record)
+        .focusEffectDisabled()
+        .accessibilityIdentifier("speak.permission-setup")
+        .accessibilityLabel("Request speech access")
+        .accessibilityHint("Allow microphone and Speech Recognition access without starting a recording")
+    }
+
+    @ViewBuilder
+    private func spokenEntryDetail(_ entry: DictionaryEntry) -> some View {
+        if speech.phase == .guess {
+            EntryDetailView(
+                entry: entry,
+                addLabel: addButtonTitle,
+                addShortcut: .returnKey,
+                addShortcutModifiers: [],
+                addAccessibilityIdentifier: "speak.add-selected",
+                wordLists: state.wordLists,
+                addedListID: state.addedListID(for: entry),
+                isShowingListSelection: $isShowingAddedListSelection,
+                switchAddedListAction: { await state.switchListForAddedEntry(entry, to: $0) },
+                didFinishListSelection: focusResults,
+                addAction: { state.addToPersonalDictionary(entry) }
+            )
+        } else {
+            EntryDetailView(entry: entry)
         }
     }
 
@@ -129,7 +183,7 @@ struct SpeakView: View {
                 .fontWeight(.semibold)
                 .frame(width: 180)
         }
-        .buttonStyle(SpeakRecordButtonStyle(isListening: speech.isListening))
+        .buttonStyle(SpeakActionButtonStyle(isListening: speech.isListening))
         .controlSize(.large)
         .focusable()
         .focused($focusedControl, equals: .record)
@@ -151,27 +205,47 @@ struct SpeakView: View {
     }
 
     private var statusTitle: String {
-        if speakShortcut.isAwaitingPermissionSetup { return "Set up speech access" }
+        if !speech.hasRecordingPermission {
+            return switch speech.phase {
+            case .requestingPermission: "Requesting speech access…"
+            case .unavailable: "Speech setup needed"
+            default: "Speech access needed"
+            }
+        }
         return switch speech.phase {
         case .idle: "Hold Space to speak"
         case .requestingPermission: "Checking local speech access…"
         case .listening: "Listening…"
         case .processing: "Recognizing…"
-        case .guess: "Confirm the best match"
+        case .guess: "Choose words to add"
         case .unavailable: "Speech setup needed"
         }
     }
 
-    private var statusDetail: String {
-        if speakShortcut.isAwaitingPermissionSetup {
-            return "Release Space, allow access in macOS, then hold Space again to record."
+    @ViewBuilder
+    private var statusDetail: some View {
+        if !speech.hasRecordingPermission {
+            if case .unavailable(let message) = speech.phase {
+                Text(message)
+            } else if speech.phase == .requestingPermission {
+                Text("Respond to the macOS permission prompts. Recording will not start yet.")
+            } else {
+                Text("Microphone and Speech Recognition access are required.")
+            }
+        } else if case .unavailable(let message) = speech.phase {
+            Text(message)
+        } else if speech.phase == .guess {
+            HStack(spacing: 5) {
+                Text("Select a match and use")
+                KeyboardShortcutHint(.returnKey)
+                Text("to add it · Choose another match to add more")
+            }
+        } else {
+            Text("Hold Space while speaking · Release to look up")
         }
-        if case .unavailable(let message) = speech.phase { return message }
-        return "Hold Space while speaking · Release to look up · Return confirms"
     }
 
     private var holdControlTitle: String {
-        if speakShortcut.isAwaitingPermissionSetup { return "Release Space to continue" }
         return switch speech.phase {
         case .requestingPermission: speakShortcut.isSpaceHeld ? "Keep holding Space…" : "Cancel recording"
         case .listening: speakShortcut.isSpaceHeld ? "Release Space to finish" : "Stop recording"
@@ -181,7 +255,7 @@ struct SpeakView: View {
     }
 
     private var addButtonTitle: String {
-        state.selectedEntry?.kind == .phrase ? "Add phrase  Return" : "Add word  Return"
+        state.selectedEntry?.kind == .phrase ? "Add phrase" : "Add word"
     }
 
     private var isRecordingRequested: Bool {
@@ -211,16 +285,10 @@ struct SpeakView: View {
     }
 
     private func toggleManualRecording() {
-        guard !speakShortcut.isSpaceHeld else { return }
+        guard speech.hasRecordingPermission, !speakShortcut.isSpaceHeld else { return }
         let wasRecording = isRecordingRequested
         isManualRecording.toggle()
         recordingRequestChanged(wasRecording: wasRecording)
-    }
-
-    private func confirm() {
-        guard !speech.transcription.isEmpty, state.selectedEntry != nil else { return }
-        state.confirmSpokenEntry()
-        speech.reset()
     }
 
     private func focusResults() {
@@ -229,7 +297,7 @@ struct SpeakView: View {
     }
 }
 
-private struct SpeakRecordButtonStyle: ButtonStyle {
+private struct SpeakActionButtonStyle: ButtonStyle {
     let isListening: Bool
 
     func makeBody(configuration: Configuration) -> some View {

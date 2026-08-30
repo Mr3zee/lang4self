@@ -28,6 +28,7 @@ public protocol WordLibraryStoring: Sendable {
     func deleteWordList(id: Int64) async throws
     func addCard(_ cardID: Int64, toList listID: Int64) async throws
     func removeCard(_ cardID: Int64, fromList listID: Int64) async throws
+    func moveCard(_ cardID: Int64, fromList sourceListID: Int64, toList destinationListID: Int64) async throws
     func updateCard(_ card: PersonalCard) async throws
     func personalCard(id: PersonalCard.ID) async throws -> PersonalCard?
 }

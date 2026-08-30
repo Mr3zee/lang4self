@@ -1,7 +1,7 @@
 import SQLite3
 
 enum LocalStoreSchema {
-    static let latestSchemaVersion = 1
+    static let latestSchemaVersion = 2
 
     static func configure(_ database: OpaquePointer) throws {
         let installedVersion = try schemaVersion(in: database)
@@ -117,6 +117,26 @@ enum LocalStoreSchema {
                 try execute(database, "INSERT OR IGNORE INTO card_lists (card_id, list_id, added_at) SELECT id, \(WordList.defaultID), created_at FROM personal_cards WHERE NOT EXISTS (SELECT 1 FROM card_lists)")
                 try createDictionaryTriggers(database)
                 migratedVersion = 1
+            }
+            if migratedVersion < 2 {
+                try execute(database, """
+                    UPDATE dictionary_entries
+                    SET kind = 'determiner'
+                    WHERE kind = 'other'
+                      AND (
+                        lower(raw_english) LIKE '%[determiner]%'
+                        OR lower(raw_english) LIKE '%[possessive]%'
+                        OR lower(raw_english) LIKE '%[article]%'
+                        OR lower(raw_german) LIKE '%{indefinite article}%'
+                      );
+                    UPDATE personal_cards
+                    SET kind = 'determiner'
+                    WHERE kind = 'other'
+                      AND dictionary_entry_id IN (
+                        SELECT id FROM dictionary_entries WHERE kind = 'determiner'
+                      );
+                    """)
+                migratedVersion = 2
             }
             guard migratedVersion == latestSchemaVersion else {
                 throw LocalStoreError.sqlite("Missing migration to schema version \(latestSchemaVersion)")
