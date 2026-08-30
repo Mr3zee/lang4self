@@ -43,6 +43,59 @@ struct TranslationLanguageBadge: View {
     }
 }
 
+enum TranslationPresentation {
+    static func items(from value: String) -> [String] {
+        parts(from: value).reduce(into: []) { result, part in
+            if !result.contains(part) { result.append(part) }
+        }
+    }
+
+    static func expandedMeanings(_ meanings: [DictionaryMeaning]) -> [DictionaryMeaning] {
+        meanings.flatMap(expandedMeaning)
+    }
+
+    static func summary(
+        of meanings: [DictionaryMeaning],
+        fallback: String = ""
+    ) -> String {
+        let translations = expandedMeanings(meanings).map(\.translation)
+        let values = translations.isEmpty ? items(from: fallback) : translations
+        return values.reduce(into: []) { result, value in
+            if !result.contains(value) { result.append(value) }
+        }
+        .joined(separator: ", ")
+    }
+
+    private static func expandedMeaning(_ meaning: DictionaryMeaning) -> [DictionaryMeaning] {
+        let translations = parts(from: meaning.translation)
+        guard translations.count > 1 else { return [meaning] }
+
+        let rawTranslations = parts(from: meaning.rawTranslation)
+        return translations.enumerated().reduce(into: []) { result, item in
+            let (index, translation) = item
+            guard !result.contains(where: { $0.translation == translation }) else { return }
+            result.append(DictionaryMeaning(
+                english: translation,
+                rawEnglish: rawTranslations.indices.contains(index) ? rawTranslations[index] : translation,
+                rawGerman: meaning.rawGerman,
+                language: meaning.language,
+                gender: meaning.gender,
+                usage: meaning.usage,
+                explanation: meaning.explanation,
+                grammar: meaning.grammar,
+                subject: meaning.subject
+            ))
+        }
+    }
+
+    private static func parts(from value: String) -> [String] {
+        value.split(separator: ";", omittingEmptySubsequences: true).compactMap { part in
+            let trimmed = part.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+    }
+}
+
 struct PartOfSpeechBadge: View {
     let kind: WordKind
 
@@ -117,7 +170,7 @@ struct EntryRow: View {
     @State private var expandedLanguages: Set<TranslationLanguage> = []
 
     private func meanings(for language: TranslationLanguage) -> [DictionaryMeaning] {
-        entry.meanings.filter { $0.language == language }
+        TranslationPresentation.expandedMeanings(entry.meanings).filter { $0.language == language }
     }
 
     private func previewLimit(for language: TranslationLanguage) -> Int {
@@ -185,10 +238,11 @@ struct EntryMeaningSections {
     let russian: [DictionaryMeaning]
 
     init(meanings: [DictionaryMeaning]) {
-        let english = meanings.filter { $0.language == .english }
+        let expandedMeanings = TranslationPresentation.expandedMeanings(meanings)
+        let english = expandedMeanings.filter { $0.language == .english }
         englishPreview = Array(english.prefix(Self.englishPreviewLimit))
         additionalEnglish = Array(english.dropFirst(Self.englishPreviewLimit))
-        russian = meanings.filter { $0.language == .russian }
+        russian = expandedMeanings.filter { $0.language == .russian }
     }
 }
 
@@ -204,6 +258,7 @@ struct EntryDetailView: View {
     @State private var isShowingInternalListSelection = false
     @State private var isShowingAdditionalEnglishMeanings = false
     @State private var isShowingRussianMeanings = false
+    @State private var isShowingAllForms = false
     let entry: DictionaryEntry
     var addLabel = "Add to My words"
     var addShortcut: ShortcutPresentation?
@@ -318,6 +373,14 @@ struct EntryDetailView: View {
                     meanings
                     HStack {
                         GenderBadge(gender: entry.gender)
+                        if let ipa = entry.ipa {
+                            Text(ipa)
+                                .font(.title3)
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                                .accessibilityLabel("Pronunciation: \(ipa)")
+                                .accessibilityIdentifier("entry.ipa")
+                        }
                     }
                 }
 
@@ -327,11 +390,15 @@ struct EntryDetailView: View {
                     infoTable
                 }
 
+                importedForms
+
                 if info.separablePrefix != nil {
                     Label("The middle dot marks a prefix that separates in a main clause.", systemImage: "arrow.left.and.right")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 }
+
+                referenceDetails
 
                 if info.isEstimated {
                     Label(generatedFormsDescription, systemImage: "info.circle")
@@ -352,6 +419,7 @@ struct EntryDetailView: View {
         .onChange(of: entry) { _, _ in
             isShowingAdditionalEnglishMeanings = false
             isShowingRussianMeanings = false
+            isShowingAllForms = false
         }
     }
 
@@ -508,8 +576,60 @@ struct EntryDetailView: View {
                             .foregroundStyle(.secondary)
                             .textSelection(.enabled)
                     }
+                    if let metadata = meaningMetadata(meaning) {
+                        Text(metadata)
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                            .textSelection(.enabled)
+                            .accessibilityIdentifier("entry.meaning.metadata")
+                    }
                 }
             }
+        }
+    }
+
+    private func meaningMetadata(_ meaning: DictionaryMeaning) -> String? {
+        var parts: [String] = []
+        if let grammar = meaning.grammar { parts.append("Grammar: \(grammar)") }
+        if let subject = meaning.subject { parts.append("Subject: \(subject)") }
+        if !meaning.germanMetadata.isEmpty {
+            parts.append("German: \(meaning.germanMetadata.joined(separator: ", "))")
+        }
+        if !meaning.translationMetadata.isEmpty {
+            parts.append("Translation: \(meaning.translationMetadata.joined(separator: ", "))")
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
+    @ViewBuilder
+    private var referenceDetails: some View {
+        if let etymology = entry.etymology {
+            VStack(alignment: .leading, spacing: 7) {
+                Text("ETYMOLOGY")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(.tertiary)
+                Text(etymology)
+                    .font(.body)
+                    .textSelection(.enabled)
+                    .accessibilityIdentifier("entry.etymology")
+            }
+        }
+        if !entry.relatedForms.isEmpty {
+            VStack(alignment: .leading, spacing: 7) {
+                Text("RELATED FORMS")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(.tertiary)
+                ForEach(entry.relatedForms) { form in
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(form.relation.capitalized)
+                            .foregroundStyle(.secondary)
+                        Text(form.word)
+                            .fontWeight(.medium)
+                            .textSelection(.enabled)
+                    }
+                }
+            }
+            .accessibilityIdentifier("entry.related-forms")
         }
     }
 
@@ -558,6 +678,33 @@ struct EntryDetailView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(Color.accentColor.opacity(Double(index + 1) * 0.06), in: RoundedRectangle(cornerRadius: 10))
             }
+        }
+    }
+
+    @ViewBuilder
+    private var importedForms: some View {
+        if !entry.forms.isEmpty {
+            DisclosureGroup(isExpanded: $isShowingAllForms) {
+                LazyVStack(alignment: .leading, spacing: 7) {
+                    ForEach(entry.forms) { form in
+                        HStack(alignment: .firstTextBaseline, spacing: 12) {
+                            Text(form.form)
+                                .fontWeight(.medium)
+                                .textSelection(.enabled)
+                                .frame(minWidth: 120, alignment: .leading)
+                            Text(form.tags.sorted().joined(separator: " · "))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                        }
+                    }
+                }
+                .padding(.top, 8)
+            } label: {
+                Text("All imported forms (\(entry.forms.count))")
+                    .font(.headline)
+            }
+            .accessibilityIdentifier("entry.imported-forms")
         }
     }
 }
@@ -845,7 +992,10 @@ struct AppShortcut: Identifiable {
         .init(id: "dictionary.add", group: .dictionary, shortcut: .init(chords: [.init(.command, .returnKey)]), action: "Add the selected dictionary entry"),
         .init(id: "dictionary.clear", group: .dictionary, shortcut: .init(chords: [.init(.escape)]), action: "Clear the focused search field"),
         .init(id: "dictionary.voice-search", group: .dictionary, shortcut: .init(chords: [.init(.space)], hold: true), action: "Search spoken German when focus is outside the text field"),
+        .init(id: "dictionary.voice-alternatives", group: .dictionary, shortcut: .init(chords: [.init(.left), .init(.right)]), action: "Cycle through voice recognition results"),
         .init(id: "review.reveal", group: .review, shortcut: .init(chords: [.init(.space)]), action: "Reveal the current answer or restart after completion"),
+        .init(id: "review.translation", group: .review, shortcut: .init(chords: [.init(.left), .init(.right)]), action: "Move between translations in the current language"),
+        .init(id: "review.language", group: .review, shortcut: .init(chords: [.init(.up), .init(.down)]), action: "Move between translation languages"),
         .init(id: "review.rate", group: .review, shortcut: .init(chords: [.init(.digit(1)), .init(.digit(4))], separator: .range), action: "Rate Again, Hard, Good, or Easy after revealing"),
         .init(id: "lists.navigate", group: .lists, shortcut: .init(chords: [.init(.up), .init(.down)]), action: "Move through results, cards, and sentences"),
         .init(id: "lists.words", group: .lists, shortcut: .init(chords: [.init(.left), .init(.right)]), action: "Move between the sentence list and its words, or through words"),

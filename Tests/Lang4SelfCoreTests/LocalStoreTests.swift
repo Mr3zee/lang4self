@@ -242,6 +242,113 @@ final class LocalStoreTests: XCTestCase {
         XCTAssertNil(sentences.first?.analysis)
     }
 
+    func testMigratesVersionSixAndPreservesStoredDataWhileAddingDictionaryDetails() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let databaseURL = directory.appendingPathComponent("version-six.sqlite3")
+        try executeSQLite(at: databaseURL, sql: """
+            PRAGMA user_version = 6;
+            CREATE TABLE dictionary_entries (
+              id INTEGER PRIMARY KEY, german TEXT NOT NULL, english TEXT NOT NULL,
+              normalized_german TEXT NOT NULL, normalized_english TEXT NOT NULL,
+              raw_german TEXT NOT NULL, raw_english TEXT NOT NULL, kind TEXT NOT NULL,
+              gender TEXT NOT NULL, usage TEXT, source TEXT NOT NULL,
+              translation_language TEXT NOT NULL DEFAULT 'en', explanation TEXT
+            );
+            CREATE TABLE personal_cards (
+              id INTEGER PRIMARY KEY, dictionary_entry_id INTEGER, german TEXT NOT NULL,
+              english TEXT NOT NULL, raw_german TEXT NOT NULL, kind TEXT NOT NULL,
+              gender TEXT NOT NULL, notes TEXT NOT NULL DEFAULT '', tags TEXT NOT NULL DEFAULT '',
+              created_at REAL NOT NULL, due_at REAL NOT NULL, last_reviewed_at REAL,
+              interval_days REAL NOT NULL DEFAULT 0, ease_factor REAL NOT NULL DEFAULT 2.5,
+              repetitions INTEGER NOT NULL DEFAULT 0, lapses INTEGER NOT NULL DEFAULT 0,
+              is_starred INTEGER NOT NULL DEFAULT 0, is_suspended INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE dictionary_inflections (
+              id INTEGER PRIMARY KEY, lemma_key TEXT NOT NULL, form TEXT NOT NULL,
+              tags TEXT NOT NULL, source TEXT NOT NULL,
+              UNIQUE(lemma_key, form, tags, source)
+            );
+            INSERT INTO dictionary_entries VALUES
+              (1, 'Haus', 'house', 'haus', 'house', 'Haus {n}', 'house', 'noun', 'neuter', NULL, 'dict.cc', 'en', NULL);
+            INSERT INTO personal_cards
+              (id, dictionary_entry_id, german, english, raw_german, kind, gender, notes,
+               created_at, due_at)
+            VALUES (1, 1, 'Haus', 'house', 'Haus {n}', 'noun', 'neuter', 'keep me', 1, 1);
+            INSERT INTO dictionary_inflections (lemma_key, form, tags, source)
+            VALUES ('haus', 'häuser', 'noun,plural', 'Wiktionary via Lector');
+            """)
+
+        _ = try LocalStore(url: databaseURL)
+
+        XCTAssertEqual(try readSchemaVersion(at: databaseURL), LocalStore.latestSchemaVersion)
+        XCTAssertEqual(
+            try readTextValues(at: databaseURL, sql: "SELECT notes FROM personal_cards"),
+            ["keep me"]
+        )
+        XCTAssertEqual(
+            try readTextValues(at: databaseURL, sql: "SELECT kind FROM dictionary_inflections"),
+            ["noun"]
+        )
+        for column in ["grammar", "subject"] {
+            XCTAssertTrue(try readTextValues(
+                at: databaseURL,
+                sql: "SELECT name FROM pragma_table_info('dictionary_entries')"
+            ).contains(column))
+        }
+        XCTAssertTrue(try readTextValues(
+            at: databaseURL,
+            sql: "SELECT name FROM pragma_table_info('personal_cards')"
+        ).contains("meanings_json"))
+        XCTAssertEqual(
+            try readTextValues(
+                at: databaseURL,
+                sql: "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'dictionary_%forms' ORDER BY name"
+            ),
+            ["dictionary_related_forms"]
+        )
+    }
+
+    func testVersionSevenMigrationRollsBackAllSchemaAndDataChanges() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let databaseURL = directory.appendingPathComponent("version-six.sqlite3")
+        try executeSQLite(at: databaseURL, sql: """
+            PRAGMA user_version = 6;
+            CREATE TABLE dictionary_entries (id INTEGER PRIMARY KEY);
+            CREATE TABLE personal_cards (id INTEGER PRIMARY KEY);
+            CREATE TABLE dictionary_inflections (
+              id INTEGER PRIMARY KEY, lemma_key TEXT NOT NULL, form TEXT NOT NULL,
+              tags TEXT NOT NULL, source TEXT NOT NULL
+            );
+            INSERT INTO dictionary_inflections (lemma_key, form, tags, source)
+            VALUES ('haus', 'häuser', 'noun,plural', 'Wiktionary via Lector');
+            CREATE TRIGGER reject_inflection_kind_migration
+            BEFORE UPDATE ON dictionary_inflections
+            BEGIN
+              SELECT RAISE(ABORT, 'forced version seven migration failure');
+            END;
+            """)
+
+        XCTAssertThrowsError(try LocalStore(url: databaseURL))
+
+        XCTAssertEqual(try readSchemaVersion(at: databaseURL), 6)
+        XCTAssertFalse(try readTextValues(
+            at: databaseURL,
+            sql: "SELECT name FROM pragma_table_info('dictionary_entries')"
+        ).contains("grammar"))
+        XCTAssertFalse(try readTextValues(
+            at: databaseURL,
+            sql: "SELECT name FROM pragma_table_info('personal_cards')"
+        ).contains("meanings_json"))
+        XCTAssertFalse(try readTextValues(
+            at: databaseURL,
+            sql: "SELECT name FROM pragma_table_info('dictionary_inflections')"
+        ).contains("kind"))
+    }
+
     func testSearchCardsAndReviewPersistLocally() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -379,6 +486,27 @@ final class LocalStoreTests: XCTestCase {
         let results = try await store.searchDictionary("cat")
         XCTAssertEqual(results.first?.german, "Katze")
         XCTAssertEqual(results.first?.gender, .feminine)
+    }
+
+    func testImportCombinesMetadataFromDuplicateDictCCRows() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixture = directory.appendingPathComponent("dict.txt")
+        try """
+        Bank {f}\tbank\tnoun common\tfinance
+        Bank {f}\tbank\tnoun archaic\thistory
+        """.write(to: fixture, atomically: true, encoding: .utf8)
+
+        let store = try LocalStore(url: directory.appendingPathComponent("test.sqlite3"))
+        let imported = try await store.importDictionary(from: fixture)
+        XCTAssertEqual(imported, 2)
+
+        let results = try await store.searchDictionary("Bank")
+        let bank = try XCTUnwrap(results.first)
+        let meaning = try XCTUnwrap(bank.meanings.first)
+        XCTAssertEqual(meaning.grammar, "noun common · noun archaic")
+        XCTAssertEqual(meaning.subject, "finance · history")
     }
 
     func testBulkImportSearchesEszettUsingNormalizedSpelling() async throws {
@@ -578,6 +706,32 @@ final class LocalStoreTests: XCTestCase {
         XCTAssertEqual(nounFromEnglishSearch.meanings.map(\.english), ["bank", "bench"])
     }
 
+    func testLoadsAGroupedMultilingualDictionaryEntryByID() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let english = directory.appendingPathComponent("dict-en.txt")
+        let russian = directory.appendingPathComponent("dict-ru.txt")
+        try "# DE-EN vocabulary database\nMädchen {n}\tgirl\nMädchen {n}\tmaiden\n"
+            .write(to: english, atomically: true, encoding: .utf8)
+        try "# DE-RU vocabulary database\nMädchen {n}\tдевочка\n"
+            .write(to: russian, atomically: true, encoding: .utf8)
+
+        let store = try LocalStore(url: directory.appendingPathComponent("test.sqlite3"))
+        _ = try await store.importDictionary(from: english)
+        _ = try await store.importDictionary(from: russian)
+        let searchResults = try await store.searchDictionary("Mädchen")
+        let searchEntry = try XCTUnwrap(searchResults.first)
+        let storedEntry = try await store.dictionaryEntry(id: searchEntry.id)
+        let loadedEntry = try XCTUnwrap(storedEntry)
+
+        XCTAssertEqual(loadedEntry.id, searchEntry.id)
+        XCTAssertEqual(loadedEntry.meanings.map(\.translation), ["girl", "maiden", "девочка"])
+        XCTAssertEqual(loadedEntry.meanings.map(\.language), [.english, .english, .russian])
+        let missingEntry = try await store.dictionaryEntry(id: 999_999)
+        XCTAssertNil(missingEntry)
+    }
+
     func testInflectedVerbSearchPrefersTheBaseVerbOverLiteralHomonyms() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -635,6 +789,80 @@ final class LocalStoreTests: XCTestCase {
         XCTAssertEqual(house.meanings.map(\.language), [.english, .russian])
         XCTAssertEqual(house.meanings.map(\.translation), ["house", "дом"])
         XCTAssertEqual(house.kind, .noun)
+    }
+
+    func testSavedCardKeepsTranslationLanguagesAndDictCCMetadata() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let english = directory.appendingPathComponent("english.txt")
+        let russian = directory.appendingPathComponent("russian.txt")
+        let databaseURL = directory.appendingPathComponent("test.sqlite3")
+        try "# DE-EN vocabulary database\nHaus {n} [building]\thouse <building>\tnoun common\tarchitecture\n"
+            .write(to: english, atomically: true, encoding: .utf8)
+        try "# DE-RU vocabulary database\nHaus {n}\tдом {м}\tnoun\tarchitecture\n"
+            .write(to: russian, atomically: true, encoding: .utf8)
+
+        let store = try LocalStore(url: databaseURL)
+        _ = try await store.importDictionary(from: english)
+        _ = try await store.importDictionary(from: russian)
+        let entryResults = try await store.searchDictionary("Haus")
+        let entry = try XCTUnwrap(entryResults.first)
+        let saved = try await store.addCard(from: entry)
+        var updated = saved
+        updated.notes = "remember this"
+        try await store.updateCard(updated)
+        let storedCard = try await store.personalCard(id: saved.id)
+        let reloaded = try XCTUnwrap(storedCard)
+
+        XCTAssertEqual(reloaded.resolvedMeanings.map(\.language), [.english, .russian])
+        XCTAssertEqual(reloaded.resolvedMeanings.map(\.translation), ["house", "дом"])
+        XCTAssertEqual(reloaded.resolvedMeanings.first?.grammar, "noun common")
+        XCTAssertEqual(reloaded.resolvedMeanings.first?.subject, "architecture")
+        XCTAssertEqual(reloaded.notes, "remember this")
+    }
+
+    func testImportsRichLectorDetailsAndBroadMorphologyWithoutAddingHeadwords() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let dictionary = directory.appendingPathComponent("dict.txt")
+        let lector = directory.appendingPathComponent("dictionary-de.db")
+        try "Haus {n}\thouse\tnoun\t\nlaufen\tto run\tverb\t\nhoch\thigh\tadj\t\nzwei\ttwo\tnum\t\n"
+            .write(to: dictionary, atomically: true, encoding: .utf8)
+        try createRichLectorFixture(at: lector)
+
+        let store = try LocalStore(url: directory.appendingPathComponent("test.sqlite3"))
+        _ = try await store.importDictionary(from: dictionary)
+        _ = try await store.importExplanations(from: lector)
+
+        let houseResults = try await store.searchDictionary("Haus")
+        let house = try XCTUnwrap(houseResults.first)
+        XCTAssertEqual(house.ipa, "[haʊ̯s]")
+        XCTAssertEqual(house.etymology, "From Middle High German hūs.")
+        XCTAssertEqual(Set(house.relatedForms.map(\.word)), ["Häuschen", "häuslich"])
+        XCTAssertTrue(house.forms.contains { $0.form == "hauses" && $0.tags.contains("genitive") })
+        let genitiveResults = try await store.searchDictionary("hauses")
+        XCTAssertEqual(genitiveResults.first?.german, "Haus")
+
+        let laufenResults = try await store.searchDictionary("laufen")
+        let laufen = try XCTUnwrap(laufenResults.first)
+        XCTAssertTrue(laufen.forms.contains { $0.form == "liefe" && $0.tags.contains("subjunctive") })
+        XCTAssertTrue(laufen.forms.contains { $0.form == "lauf" && $0.tags.contains("imperative") })
+        let subjunctiveResults = try await store.searchDictionary("liefe")
+        XCTAssertEqual(subjunctiveResults.first?.german, "laufen")
+
+        let hochResults = try await store.searchDictionary("hoch")
+        let hoch = try XCTUnwrap(hochResults.first)
+        XCTAssertTrue(hoch.forms.contains { $0.form == "hohem" && $0.tags.contains("dative") })
+        let declinedResults = try await store.searchDictionary("hohem")
+        XCTAssertEqual(declinedResults.first?.german, "hoch")
+        let numeralResults = try await store.searchDictionary("zweien")
+        XCTAssertEqual(numeralResults.first?.german, "zwei")
+        XCTAssertTrue(numeralResults.first?.forms.contains { $0.form == "zweien" } == true)
+        XCTAssertFalse(house.forms.contains { $0.form == "de-ndecl" })
+        let relatedHeadwordResults = try await store.searchDictionary("Häuschen")
+        XCTAssertTrue(relatedHeadwordResults.isEmpty)
     }
 
     func testImportsLectorExplanationsAndHidesTranslationDuplicates() async throws {
@@ -1342,6 +1570,64 @@ private func createLectorMorphologyFixture(at url: URL) throws {
           ('aufsteht', 'aufstehen', 'present,singular,third-person,subordinate-clause'),
           ('aufstand', 'aufstehen', 'first-person,indicative,preterite,singular,subordinate-clause'),
           ('aufgestanden', 'aufstehen', 'participle,past');
+        """)
+}
+
+private func createRichLectorFixture(at url: URL) throws {
+    try executeSQLite(at: url, sql: """
+        CREATE TABLE entries (
+          word TEXT PRIMARY KEY,
+          rank INTEGER,
+          ipa TEXT,
+          etymology TEXT
+        );
+        CREATE TABLE senses (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          word TEXT NOT NULL,
+          pos TEXT,
+          gloss TEXT NOT NULL,
+          sort_order INTEGER DEFAULT 0
+        );
+        CREATE TABLE inflections (
+          inflected_form TEXT NOT NULL,
+          lemma TEXT NOT NULL,
+          type TEXT
+        );
+        CREATE TABLE related_forms (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          word TEXT NOT NULL,
+          related_word TEXT NOT NULL,
+          relation TEXT NOT NULL
+        );
+        INSERT INTO entries (word, ipa, etymology) VALUES
+          ('haus', '[haʊ̯s]', 'From Middle High German hūs.'),
+          ('laufen', '[ˈlaʊ̯fn̩]', 'From Middle High German loufen.'),
+          ('hoch', '[hoːx]', 'From Old High German hōh.'),
+          ('zwei', '[t͡svaɪ̯]', NULL),
+          ('häuschen', NULL, NULL),
+          ('häuslich', NULL, NULL);
+        INSERT INTO senses (word, pos, gloss) VALUES
+          ('haus', 'noun', 'house'),
+          ('laufen', 'verb', 'to run'),
+          ('hoch', 'adj', 'high'),
+          ('zwei', 'num', 'two'),
+          ('häuschen', 'noun', 'small house'),
+          ('häuslich', 'adj', 'domestic');
+        INSERT INTO inflections (inflected_form, lemma, type) VALUES
+          ('häuser', 'haus', 'nominative,plural'),
+          ('hauses', 'haus', 'genitive,singular'),
+          ('hause', 'haus', 'dative,singular'),
+          ('liefe', 'laufen', 'first-person,singular,subjunctive,preterite'),
+          ('lauf', 'laufen', 'imperative,singular'),
+          ('gelaufen', 'laufen', 'participle,past'),
+          ('hohem', 'hoch', 'dative,masculine,singular,strong'),
+          ('höher', 'hoch', 'comparative'),
+          ('zweien', 'zwei', 'dative'),
+          ('de-ndecl', 'haus', 'inflection-template'),
+          ('strong', 'hoch', 'table-tags');
+        INSERT INTO related_forms (word, related_word, relation) VALUES
+          ('haus', 'Häuschen', 'diminutive'),
+          ('haus', 'häuslich', 'derived');
         """)
 }
 

@@ -1,7 +1,7 @@
 import SQLite3
 
 enum LocalStoreSchema {
-    static let latestSchemaVersion = 6
+    static let latestSchemaVersion = 7
 
     static func configure(_ database: OpaquePointer) throws {
         let installedVersion = try schemaVersion(in: database)
@@ -185,6 +185,65 @@ enum LocalStoreSchema {
                 }
                 migratedVersion = 6
             }
+            if migratedVersion < 7 {
+                if try tableExists("dictionary_entries", in: database),
+                   try !table("dictionary_entries", hasColumn: "grammar", in: database) {
+                    try execute(database, "ALTER TABLE dictionary_entries ADD COLUMN grammar TEXT")
+                }
+                if try tableExists("dictionary_entries", in: database),
+                   try !table("dictionary_entries", hasColumn: "subject", in: database) {
+                    try execute(database, "ALTER TABLE dictionary_entries ADD COLUMN subject TEXT")
+                }
+                if try tableExists("personal_cards", in: database),
+                   try !table("personal_cards", hasColumn: "meanings_json", in: database) {
+                    try execute(database, "ALTER TABLE personal_cards ADD COLUMN meanings_json TEXT")
+                }
+                if try tableExists("dictionary_inflections", in: database) {
+                    if try !table("dictionary_inflections", hasColumn: "kind", in: database) {
+                        try execute(database, "ALTER TABLE dictionary_inflections ADD COLUMN kind TEXT NOT NULL DEFAULT 'other'")
+                    }
+                    try execute(database, """
+                        UPDATE dictionary_inflections
+                        SET kind = CASE
+                          WHEN instr(',' || tags || ',', ',noun,') > 0 THEN 'noun'
+                          WHEN instr(',' || tags || ',', ',comparative,') > 0
+                            OR instr(',' || tags || ',', ',superlative,') > 0 THEN 'adjective'
+                          WHEN tags = 'auxiliary' OR tags = 'past'
+                            OR instr(',' || tags || ',', ',present,') > 0
+                            OR instr(',' || tags || ',', ',preterite,') > 0
+                            OR instr(',' || tags || ',', ',participle,') > 0 THEN 'verb'
+                          ELSE kind
+                        END
+                        WHERE kind = 'other';
+                        CREATE INDEX IF NOT EXISTS dictionary_inflections_form_kind
+                          ON dictionary_inflections(form, kind, lemma_key);
+                        """)
+                }
+                try execute(database, """
+                    CREATE TABLE IF NOT EXISTS dictionary_reference_entries (
+                      id INTEGER PRIMARY KEY,
+                      german_key TEXT NOT NULL,
+                      word TEXT NOT NULL,
+                      ipa TEXT,
+                      etymology TEXT,
+                      source TEXT NOT NULL,
+                      UNIQUE(word, source)
+                    );
+                    CREATE INDEX IF NOT EXISTS dictionary_reference_entries_key
+                      ON dictionary_reference_entries(german_key);
+                    CREATE TABLE IF NOT EXISTS dictionary_related_forms (
+                      id INTEGER PRIMARY KEY,
+                      german_key TEXT NOT NULL,
+                      related_word TEXT NOT NULL,
+                      relation TEXT NOT NULL,
+                      source TEXT NOT NULL,
+                      UNIQUE(german_key, related_word, relation, source)
+                    );
+                    CREATE INDEX IF NOT EXISTS dictionary_related_forms_key
+                      ON dictionary_related_forms(german_key);
+                    """)
+                migratedVersion = 7
+            }
             guard migratedVersion == latestSchemaVersion else {
                 throw LocalStoreError.sqlite("Missing migration to schema version \(latestSchemaVersion)")
             }
@@ -233,6 +292,32 @@ enum LocalStoreSchema {
             guard let value = sqlite3_column_text(statement, 1) else { continue }
             if String(cString: value) == column { return true }
         }
+    }
+
+    private static func tableExists(_ table: String, in database: OpaquePointer?) throws -> Bool {
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(
+            database,
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
+            -1,
+            &statement,
+            nil
+        ) == SQLITE_OK else {
+            throw sqliteError(database)
+        }
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_bind_text(
+            statement,
+            1,
+            table,
+            -1,
+            unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+        ) == SQLITE_OK else {
+            throw sqliteError(database)
+        }
+        let step = sqlite3_step(statement)
+        guard step == SQLITE_ROW || step == SQLITE_DONE else { throw sqliteError(database) }
+        return step == SQLITE_ROW
     }
 
     private static func schemaVersion(in database: OpaquePointer?) throws -> Int {

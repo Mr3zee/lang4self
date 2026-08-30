@@ -26,12 +26,17 @@ struct RootView: View {
                 .accessibilityIdentifier("sidebar.\(route.rawValue)")
             }
             .focused($sidebarFocused)
+            .accessibilityIdentifier("sidebar.routes")
             .onKeyPress(.upArrow) {
                 moveSidebarSelection(by: -1)
                 return .handled
             }
             .onKeyPress(.downArrow) {
                 moveSidebarSelection(by: 1)
+                return .handled
+            }
+            .onKeyPress(.return) {
+                focusSelectedPageContent()
                 return .handled
             }
             .navigationSplitViewColumnWidth(min: 170, ideal: 205)
@@ -84,6 +89,15 @@ struct RootView: View {
         .onReceive(NotificationCenter.default.publisher(for: .showKeyboardShortcuts)) { _ in
             state.isShowingKeyboardShortcuts = true
         }
+        .overlay(alignment: .topLeading) {
+            if state.isUITestSession, state.isBootstrapComplete {
+                Color.clear
+                    .frame(width: 1, height: 1)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("Application ready")
+                    .accessibilityIdentifier("app.ready")
+            }
+        }
         .task {
             await state.bootstrap()
         }
@@ -104,6 +118,26 @@ struct RootView: View {
         guard let index = AppRoute.allCases.firstIndex(of: state.route) else { return }
         let count = AppRoute.allCases.count
         state.route = AppRoute.allCases[(index + offset + count) % count]
+    }
+
+    private func focusSelectedPageContent() {
+        let notification: Notification.Name?
+        switch state.route {
+        case .dictionary:
+            notification = .focusDictionaryContent
+        case .library:
+            notification = .focusLibraryContent
+        case .sentences:
+            notification = .focusSentenceContent
+        case .review, .settings:
+            notification = nil
+        }
+
+        if let notification {
+            DispatchQueue.main.async {
+                NotificationCenter.default.post(name: notification, object: nil)
+            }
+        }
     }
 }
 

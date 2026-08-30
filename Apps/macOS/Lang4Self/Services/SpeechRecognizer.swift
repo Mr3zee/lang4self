@@ -5,6 +5,12 @@ import Speech
 
 @MainActor
 final class SpeechRecognizer: NSObject, ObservableObject {
+    struct Alternative: Identifiable, Equatable {
+        var id: String { transcription.folding(options: [.caseInsensitive], locale: .current) }
+        let transcription: String
+        let confidence: Float
+    }
+
     enum Phase: Equatable {
         case idle
         case requestingPermission
@@ -17,6 +23,8 @@ final class SpeechRecognizer: NSObject, ObservableObject {
     @Published private(set) var phase: Phase = .idle
     @Published private(set) var transcription = ""
     @Published private(set) var confidence: Float = 0
+    @Published private(set) var alternatives: [Alternative] = []
+    @Published private(set) var selectedAlternativeIndex = 0
 
     private let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "de-DE"))
     private let audioEngine = AVAudioEngine()
@@ -30,6 +38,11 @@ final class SpeechRecognizer: NSObject, ObservableObject {
     private var simulatesUndeterminedPermissions: Bool
 
     var isListening: Bool { phase == .listening }
+    var hasMultipleAlternatives: Bool { alternatives.count > 1 }
+    var alternativePosition: String? {
+        guard !alternatives.isEmpty else { return nil }
+        return "\(selectedAlternativeIndex + 1) of \(alternatives.count)"
+    }
     var hasRecordingPermission: Bool {
         if isUITesting { return !simulatesUndeterminedPermissions }
         return SFSpeechRecognizer.authorizationStatus() == .authorized
@@ -48,8 +61,11 @@ final class SpeechRecognizer: NSObject, ObservableObject {
         guard hasRecordingPermission else { return }
         guard phase != .requestingPermission, phase != .listening else { return }
         if isUITesting {
-            transcription = "Der Hund"
-            confidence = 1
+            setAlternatives([
+                .init(transcription: "Der Hund", confidence: 0.96),
+                .init(transcription: "Die Hunde", confidence: 0.78),
+                .init(transcription: "Ein Hund", confidence: 0.61)
+            ])
             phase = .listening
             return
         }
@@ -99,9 +115,15 @@ final class SpeechRecognizer: NSObject, ObservableObject {
 
     func reset() {
         cancel()
-        transcription = ""
-        confidence = 0
+        clearAlternatives()
         phase = .idle
+    }
+
+    func selectAlternative(by offset: Int) {
+        guard alternatives.count > 1 else { return }
+        let count = alternatives.count
+        selectedAlternativeIndex = ((selectedAlternativeIndex + offset) % count + count) % count
+        applySelectedAlternative()
     }
 
     private func permissionsGranted() async -> Bool {
@@ -120,8 +142,7 @@ final class SpeechRecognizer: NSObject, ObservableObject {
 
     private func beginRecognition() {
         cancelAudioOnly()
-        transcription = ""
-        confidence = 0
+        clearAlternatives()
         recognitionFinished = false
 
         guard let recognizer, recognizer.isAvailable, recognizer.supportsOnDeviceRecognition else {
@@ -152,8 +173,7 @@ final class SpeechRecognizer: NSObject, ObservableObject {
             Task { @MainActor in
                 guard let self, self.recognitionGeneration == generation else { return }
                 if let result {
-                    self.transcription = result.bestTranscription.formattedString
-                    self.confidence = result.bestTranscription.segments.last?.confidence ?? 0
+                    self.setAlternatives(Self.alternatives(from: result))
                     if result.isFinal {
                         self.recognitionFinished = true
                         if self.phase == .processing { self.completeRecognition() }
@@ -224,6 +244,50 @@ final class SpeechRecognizer: NSObject, ObservableObject {
         task?.cancel()
         request = nil
         task = nil
+    }
+
+    private func setAlternatives(_ newAlternatives: [Alternative]) {
+        let previousTranscription = transcription
+        alternatives = Array(newAlternatives.prefix(5))
+        selectedAlternativeIndex = alternatives.firstIndex {
+            $0.transcription.compare(previousTranscription, options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame
+        } ?? 0
+        applySelectedAlternative()
+    }
+
+    private func applySelectedAlternative() {
+        guard alternatives.indices.contains(selectedAlternativeIndex) else {
+            transcription = ""
+            confidence = 0
+            return
+        }
+        let alternative = alternatives[selectedAlternativeIndex]
+        transcription = alternative.transcription
+        confidence = alternative.confidence
+    }
+
+    private func clearAlternatives() {
+        alternatives = []
+        selectedAlternativeIndex = 0
+        transcription = ""
+        confidence = 0
+    }
+
+    private static func alternatives(from result: SFSpeechRecognitionResult) -> [Alternative] {
+        var seen = Set<String>()
+        return result.transcriptions.compactMap { transcription in
+            let text = transcription.formattedString.trimmingCharacters(in: .whitespacesAndNewlines)
+            let key = text.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            guard !text.isEmpty, seen.insert(key).inserted else { return nil }
+            let confidence: Float
+            if transcription.segments.isEmpty {
+                confidence = 0
+            } else {
+                confidence = transcription.segments.reduce(0) { $0 + $1.confidence }
+                    / Float(transcription.segments.count)
+            }
+            return Alternative(transcription: text, confidence: confidence)
+        }
     }
 }
 

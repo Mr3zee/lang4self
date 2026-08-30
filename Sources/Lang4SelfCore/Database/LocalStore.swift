@@ -216,6 +216,21 @@ public actor LocalStore {
         return groups
     }
 
+    public func dictionaryEntry(id: DictionaryEntry.ID) throws -> DictionaryEntry? {
+        let statement = try prepare("""
+            SELECT id, german, english, raw_german, raw_english,
+                   kind, gender, usage, source, translation_language,
+                   explanation, grammar, subject
+            FROM dictionary_entries
+            WHERE id = ?
+            """)
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_int64(statement, 1, id)
+        guard let representative = try readEntries(statement).first else { return nil }
+        let groups = try dictionaryGroups(representedBy: representative)
+        return groups.first(where: { $0.id == id }) ?? groups.first
+    }
+
     private func dictionaryInflectionSearchLinks(
         for query: String
     ) throws -> [DictionaryInflectionSearchLink] {
@@ -230,10 +245,10 @@ public actor LocalStore {
         }
 
         let statement = try prepare("""
-            SELECT DISTINCT lemma_key, tags
+            SELECT DISTINCT lemma_key, kind
             FROM dictionary_inflections
-            WHERE form = ?
-            ORDER BY lemma_key, tags
+            WHERE form = ? AND tags != 'auxiliary'
+            ORDER BY lemma_key, kind
             """)
         defer { sqlite3_finalize(statement) }
         var result: [DictionaryInflectionSearchLink] = []
@@ -245,8 +260,7 @@ public actor LocalStore {
                 let step = sqlite3_step(statement)
                 if step == SQLITE_DONE { break }
                 guard step == SQLITE_ROW else { throw sqliteError() }
-                let tags = lectorTags(text(statement, 1))
-                guard let kind = searchKind(forInflectionTags: tags) else { continue }
+                let kind = WordKind(rawValue: text(statement, 1)) ?? .other
                 let lemmaKey = text(statement, 0)
                 let link = DictionaryInflectionSearchLink(
                     lemmaKey: lemmaKey,
@@ -269,7 +283,7 @@ public actor LocalStore {
         let sql = """
             SELECT d.id, d.german, d.english, d.raw_german, d.raw_english,
                    d.kind, d.gender, d.usage, d.source, d.translation_language,
-                   d.explanation
+                   d.explanation, d.grammar, d.subject
             FROM dictionary_fts
             JOIN dictionary_entries d ON d.id = dictionary_fts.rowid
             WHERE dictionary_fts MATCH ?
@@ -342,7 +356,7 @@ public actor LocalStore {
             // Building FTS once after the bulk insert is substantially faster than
             // updating its index more than a million times through the trigger.
             try Self.execute(database, "DROP TRIGGER IF EXISTS dictionary_ai; DROP TRIGGER IF EXISTS dictionary_ad; DROP TRIGGER IF EXISTS dictionary_au;")
-            let insertStatement = try prepare(dictionaryInsertSQL)
+            let insertStatement = try prepare(dictionaryImportSQL)
             defer { sqlite3_finalize(insertStatement) }
             var buffer = Data()
             var bytesRead: Int64 = 0
@@ -439,48 +453,17 @@ public actor LocalStore {
         var sourceInflectionStatement: OpaquePointer?
         if try Self.sourceTableExists("inflections", in: sourceDatabase) {
             let inflectionSQL = """
-                SELECT i.inflected_form, i.lemma, i.type,
-                       EXISTS (
-                         SELECT 1 FROM senses AS noun_sense
-                         WHERE noun_sense.word = i.lemma AND lower(noun_sense.pos) = 'noun'
-                       )
-                       AND EXISTS (
-                         SELECT 1 FROM senses AS noun_form_sense
-                         WHERE noun_form_sense.word = i.inflected_form
-                           AND lower(noun_form_sense.pos) = 'noun'
-                       ) AS is_noun_relation
+                SELECT i.inflected_form, i.lemma, i.type, coalesce(k.parts_of_speech, '')
                 FROM inflections AS i
-                WHERE type = 'auxiliary'
-                   OR type = 'past'
-                   OR (
-                        instr(',' || type || ',', ',participle,') > 0
-                    AND instr(',' || type || ',', ',past,') > 0
-                   )
-                   OR (
-                        instr(',' || type || ',', ',present,') > 0
-                    AND (
-                         instr(',' || type || ',', ',first-person,') > 0
-                      OR instr(',' || type || ',', ',second-person,') > 0
-                      OR instr(',' || type || ',', ',third-person,') > 0
-                    )
-                   )
-                   OR (
-                        instr(',' || type || ',', ',preterite,') > 0
-                    AND instr(',' || type || ',', ',first-person,') > 0
-                    AND instr(',' || type || ',', ',singular,') > 0
-                   )
-                   OR (
-                        instr(',' || type || ',', ',plural,') > 0
-                    AND EXISTS (
-                         SELECT 1 FROM senses AS noun_sense
-                         WHERE noun_sense.word = i.lemma AND lower(noun_sense.pos) = 'noun'
-                    )
-                    AND EXISTS (
-                         SELECT 1 FROM senses AS noun_form_sense
-                         WHERE noun_form_sense.word = i.inflected_form
-                           AND lower(noun_form_sense.pos) = 'noun'
-                    )
-                   )
+                LEFT JOIN (
+                  SELECT word, group_concat(DISTINCT lower(pos)) AS parts_of_speech
+                  FROM senses
+                  WHERE pos IS NOT NULL AND trim(pos) != ''
+                  GROUP BY word
+                ) AS k ON k.word = i.lemma
+                WHERE i.type IS NOT NULL AND trim(i.type) != ''
+                  AND instr(',' || i.type || ',', ',inflection-template,') = 0
+                  AND instr(',' || i.type || ',', ',table-tags,') = 0
                 ORDER BY i.lemma, i.type, i.inflected_form
                 """
             guard sqlite3_prepare_v2(
@@ -495,6 +478,46 @@ public actor LocalStore {
         }
         defer { sqlite3_finalize(sourceInflectionStatement) }
 
+        var sourceReferenceStatement: OpaquePointer?
+        if try Self.sourceTableExists("entries", in: sourceDatabase) {
+            let hasIPA = try Self.sourceTable("entries", hasColumn: "ipa", in: sourceDatabase)
+            let hasEtymology = try Self.sourceTable("entries", hasColumn: "etymology", in: sourceDatabase)
+            let referenceSQL = """
+                SELECT word, \(hasIPA ? "ipa" : "NULL"), \(hasEtymology ? "etymology" : "NULL")
+                FROM entries
+                ORDER BY word
+                """
+            guard sqlite3_prepare_v2(
+                sourceDatabase,
+                referenceSQL,
+                -1,
+                &sourceReferenceStatement,
+                nil
+            ) == SQLITE_OK else {
+                throw LocalStoreError.invalidExplanationDatabase
+            }
+        }
+        defer { sqlite3_finalize(sourceReferenceStatement) }
+
+        var sourceRelatedStatement: OpaquePointer?
+        if try Self.sourceTableExists("related_forms", in: sourceDatabase) {
+            let relatedSQL = """
+                SELECT word, related_word, relation
+                FROM related_forms
+                ORDER BY word, relation, related_word
+                """
+            guard sqlite3_prepare_v2(
+                sourceDatabase,
+                relatedSQL,
+                -1,
+                &sourceRelatedStatement,
+                nil
+            ) == SQLITE_OK else {
+                throw LocalStoreError.invalidExplanationDatabase
+            }
+        }
+        defer { sqlite3_finalize(sourceRelatedStatement) }
+
         try Self.execute(database, "BEGIN IMMEDIATE")
         do {
             let sourceName = "Wiktionary via Lector"
@@ -508,6 +531,14 @@ public actor LocalStore {
             defer { sqlite3_finalize(deleteInflections) }
             try stepDone(deleteInflections)
 
+            for table in ["dictionary_reference_entries", "dictionary_related_forms"] {
+                let deleteReference = try prepare("DELETE FROM \(table) WHERE source = ?")
+                bind(sourceName, to: 1, in: deleteReference)
+                let step = sqlite3_step(deleteReference)
+                sqlite3_finalize(deleteReference)
+                guard step == SQLITE_DONE else { throw sqliteError() }
+            }
+
             let insertStatement = try prepare("""
                 INSERT OR IGNORE INTO dictionary_explanations
                   (german_key, kind, explanation, source, sort_order)
@@ -517,12 +548,17 @@ public actor LocalStore {
 
             let insertInflection = try prepare("""
                 INSERT OR IGNORE INTO dictionary_inflections
-                  (lemma_key, form, tags, source)
-                VALUES (?, ?, ?, ?)
+                  (lemma_key, form, tags, source, kind)
+                VALUES (?, ?, ?, ?, ?)
                 """)
             defer { sqlite3_finalize(insertInflection) }
 
-            func storeInflection(lemma: String, form: String, tags: Set<String>) throws {
+            func storeInflection(
+                lemma: String,
+                form: String,
+                tags: Set<String>,
+                kind: WordKind
+            ) throws {
                 let lemmaKey = dictionaryGroupingTerm(lemma)
                 let cleanForm = form.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !lemmaKey.isEmpty, !cleanForm.isEmpty, !tags.isEmpty else { return }
@@ -532,6 +568,7 @@ public actor LocalStore {
                 bind(cleanForm, to: 2, in: insertInflection)
                 bind(tags.sorted().joined(separator: ","), to: 3, in: insertInflection)
                 bind(sourceName, to: 4, in: insertInflection)
+                bind(kind.rawValue, to: 5, in: insertInflection)
                 try stepDone(insertInflection)
             }
 
@@ -560,7 +597,12 @@ public actor LocalStore {
                 sqlite3_bind_int(insertStatement, 5, position)
                 try stepDone(insertStatement)
                 if let degree = lectorDegreeInflection(word: sourceWord, gloss: gloss) {
-                    try storeInflection(lemma: degree.lemma, form: sourceWord, tags: [degree.tag])
+                    try storeInflection(
+                        lemma: degree.lemma,
+                        form: sourceWord,
+                        tags: [degree.tag],
+                        kind: .adjective
+                    )
                 }
                 imported += 1
                 if imported % 5_000 == 0 {
@@ -577,18 +619,72 @@ public actor LocalStore {
                           let typeValue = sqlite3_column_text(sourceInflectionStatement, 2) else {
                         throw LocalStoreError.invalidExplanationDatabase
                     }
-                    var tags = lectorTags(String(cString: typeValue))
-                    let isNounPlural = shouldImportLectorNounPlural(
-                        tags,
-                        isNounRelation: sqlite3_column_int(sourceInflectionStatement, 3) != 0
-                    )
-                    guard isNounPlural || shouldImportLectorVerbInflection(tags) else { continue }
-                    if isNounPlural { tags.insert("noun") }
+                    let tags = lectorTags(String(cString: typeValue))
+                    let partsOfSpeech = sqlite3_column_text(sourceInflectionStatement, 3)
+                        .map { String(cString: $0) } ?? ""
+                    let kind = lectorInflectionKind(tags: tags, partsOfSpeech: partsOfSpeech)
                     try storeInflection(
                         lemma: String(cString: lemmaValue),
                         form: String(cString: formValue),
-                        tags: tags
+                        tags: tags,
+                        kind: kind
                     )
+                }
+            }
+            let insertReference = try prepare("""
+                INSERT OR IGNORE INTO dictionary_reference_entries
+                  (german_key, word, ipa, etymology, source)
+                VALUES (?, ?, ?, ?, ?)
+                """)
+            defer { sqlite3_finalize(insertReference) }
+            if let sourceReferenceStatement {
+                while true {
+                    let step = sqlite3_step(sourceReferenceStatement)
+                    if step == SQLITE_DONE { break }
+                    guard step == SQLITE_ROW,
+                          let wordValue = sqlite3_column_text(sourceReferenceStatement, 0) else {
+                        throw LocalStoreError.invalidExplanationDatabase
+                    }
+                    let word = String(cString: wordValue).trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !word.isEmpty else { continue }
+                    sqlite3_reset(insertReference)
+                    sqlite3_clear_bindings(insertReference)
+                    bind(dictionaryGroupingTerm(word), to: 1, in: insertReference)
+                    bind(word, to: 2, in: insertReference)
+                    bindNullableSourceText(sourceReferenceStatement, column: 1, to: 3, in: insertReference)
+                    bindNullableSourceText(sourceReferenceStatement, column: 2, to: 4, in: insertReference)
+                    bind(sourceName, to: 5, in: insertReference)
+                    try stepDone(insertReference)
+                }
+            }
+
+            let insertRelated = try prepare("""
+                INSERT OR IGNORE INTO dictionary_related_forms
+                  (german_key, related_word, relation, source)
+                VALUES (?, ?, ?, ?)
+                """)
+            defer { sqlite3_finalize(insertRelated) }
+            if let sourceRelatedStatement {
+                while true {
+                    let step = sqlite3_step(sourceRelatedStatement)
+                    if step == SQLITE_DONE { break }
+                    guard step == SQLITE_ROW,
+                          let wordValue = sqlite3_column_text(sourceRelatedStatement, 0),
+                          let relatedValue = sqlite3_column_text(sourceRelatedStatement, 1),
+                          let relationValue = sqlite3_column_text(sourceRelatedStatement, 2) else {
+                        throw LocalStoreError.invalidExplanationDatabase
+                    }
+                    let word = String(cString: wordValue).trimmingCharacters(in: .whitespacesAndNewlines)
+                    let related = String(cString: relatedValue).trimmingCharacters(in: .whitespacesAndNewlines)
+                    let relation = String(cString: relationValue).trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !word.isEmpty, !related.isEmpty, !relation.isEmpty else { continue }
+                    sqlite3_reset(insertRelated)
+                    sqlite3_clear_bindings(insertRelated)
+                    bind(dictionaryGroupingTerm(word), to: 1, in: insertRelated)
+                    bind(related, to: 2, in: insertRelated)
+                    bind(relation, to: 3, in: insertRelated)
+                    bind(sourceName, to: 4, in: insertRelated)
+                    try stepDone(insertRelated)
                 }
             }
             let stored: Int
@@ -620,14 +716,19 @@ public actor LocalStore {
         try Self.execute(database, "BEGIN IMMEDIATE")
         do {
             let card: PersonalCard
-            if entry.id != 0, let existing = try self.card(forDictionaryEntryID: entry.id) {
+            if entry.id != 0, var existing = try self.card(forDictionaryEntryID: entry.id) {
+                if existing.meanings == nil {
+                    existing.english = entry.english
+                    existing.meanings = entry.meanings
+                    try updateCard(existing)
+                }
                 card = existing
             } else {
                 let now = self.now().timeIntervalSince1970
                 let sql = """
                     INSERT INTO personal_cards
-                      (dictionary_entry_id, german, english, raw_german, kind, gender, created_at, due_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                      (dictionary_entry_id, german, english, raw_german, kind, gender, created_at, due_at, meanings_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """
                 let statement = try prepare(sql)
                 defer { sqlite3_finalize(statement) }
@@ -640,6 +741,7 @@ public actor LocalStore {
                 bind(entry.gender.rawValue, to: 6, in: statement)
                 sqlite3_bind_double(statement, 7, now)
                 sqlite3_bind_double(statement, 8, now)
+                bind(try meaningsJSON(entry.meanings), to: 9, in: statement)
                 try stepDone(statement)
                 let id = sqlite3_last_insert_rowid(database)
                 guard let inserted = try self.card(id: id) else {
@@ -946,7 +1048,7 @@ public actor LocalStore {
             UPDATE personal_cards SET
               german = ?, english = ?, raw_german = ?, kind = ?, gender = ?, notes = ?, tags = ?,
               due_at = ?, last_reviewed_at = ?, interval_days = ?, ease_factor = ?, repetitions = ?, lapses = ?,
-              is_starred = ?, is_suspended = ?
+              is_starred = ?, is_suspended = ?, meanings_json = ?
             WHERE id = ?
             """
         let statement = try prepare(sql)
@@ -967,7 +1069,12 @@ public actor LocalStore {
         sqlite3_bind_int(statement, 13, Int32(card.lapses))
         sqlite3_bind_int(statement, 14, card.isStarred ? 1 : 0)
         sqlite3_bind_int(statement, 15, card.isSuspended ? 1 : 0)
-        sqlite3_bind_int64(statement, 16, card.id)
+        if let meanings = card.meanings {
+            bind(try meaningsJSON(meanings), to: 16, in: statement)
+        } else {
+            sqlite3_bind_null(statement, 16)
+        }
+        sqlite3_bind_int64(statement, 17, card.id)
         try stepDone(statement)
     }
 
@@ -1202,14 +1309,54 @@ public actor LocalStore {
         } else {
             sqlite3_bind_null(statement, 12)
         }
+        if let grammar = entry.meanings.first?.grammar {
+            bind(grammar, to: 13, in: statement)
+        } else {
+            sqlite3_bind_null(statement, 13)
+        }
+        if let subject = entry.meanings.first?.subject {
+            bind(subject, to: 14, in: statement)
+        } else {
+            sqlite3_bind_null(statement, 14)
+        }
         try stepDone(statement)
     }
 
     private var dictionaryInsertSQL: String {
         """
         INSERT OR IGNORE INTO dictionary_entries
-          (german, english, normalized_german, normalized_english, raw_german, raw_english, kind, gender, usage, source, translation_language, explanation)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          (german, english, normalized_german, normalized_english, raw_german, raw_english, kind, gender, usage, source, translation_language, explanation, grammar, subject)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
+    }
+
+    private var dictionaryImportSQL: String {
+        """
+        INSERT INTO dictionary_entries
+          (german, english, normalized_german, normalized_english, raw_german, raw_english, kind, gender, usage, source, translation_language, explanation, grammar, subject)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(raw_german, raw_english, translation_language) DO UPDATE SET
+          german = excluded.german,
+          english = excluded.english,
+          normalized_german = excluded.normalized_german,
+          normalized_english = excluded.normalized_english,
+          kind = excluded.kind,
+          gender = excluded.gender,
+          usage = excluded.usage,
+          source = excluded.source,
+          explanation = coalesce(excluded.explanation, dictionary_entries.explanation),
+          grammar = CASE
+            WHEN excluded.grammar IS NULL OR excluded.grammar = '' THEN dictionary_entries.grammar
+            WHEN dictionary_entries.grammar IS NULL OR dictionary_entries.grammar = '' THEN excluded.grammar
+            WHEN dictionary_entries.grammar = excluded.grammar THEN dictionary_entries.grammar
+            ELSE dictionary_entries.grammar || ' · ' || excluded.grammar
+          END,
+          subject = CASE
+            WHEN excluded.subject IS NULL OR excluded.subject = '' THEN dictionary_entries.subject
+            WHEN dictionary_entries.subject IS NULL OR dictionary_entries.subject = '' THEN excluded.subject
+            WHEN dictionary_entries.subject = excluded.subject THEN dictionary_entries.subject
+            ELSE dictionary_entries.subject || ' · ' || excluded.subject
+          END
         """
     }
 
@@ -1332,8 +1479,8 @@ public actor LocalStore {
             INSERT INTO personal_cards
               (id, dictionary_entry_id, german, english, raw_german, kind, gender, notes, tags,
                created_at, due_at, last_reviewed_at, interval_days, ease_factor, repetitions,
-               lapses, is_starred, is_suspended)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               lapses, is_starred, is_suspended, meanings_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """)
         defer { sqlite3_finalize(statement) }
         sqlite3_bind_int64(statement, 1, card.id)
@@ -1362,6 +1509,11 @@ public actor LocalStore {
         sqlite3_bind_int(statement, 16, Int32(clamping: card.lapses))
         sqlite3_bind_int(statement, 17, card.isStarred ? 1 : 0)
         sqlite3_bind_int(statement, 18, card.isSuspended ? 1 : 0)
+        if let meanings = card.meanings {
+            bind(try meaningsJSON(meanings), to: 19, in: statement)
+        } else {
+            sqlite3_bind_null(statement, 19)
+        }
         try stepDone(statement)
     }
 
@@ -1395,11 +1547,11 @@ public actor LocalStore {
     }
 
     private var cardColumns: String {
-        "id, dictionary_entry_id, german, english, raw_german, kind, gender, notes, tags, created_at, due_at, last_reviewed_at, interval_days, ease_factor, repetitions, lapses, is_starred, is_suspended"
+        "id, dictionary_entry_id, german, english, raw_german, kind, gender, notes, tags, created_at, due_at, last_reviewed_at, interval_days, ease_factor, repetitions, lapses, is_starred, is_suspended, meanings_json"
     }
 
     private var qualifiedCardColumns: String {
-        "c.id, c.dictionary_entry_id, c.german, c.english, c.raw_german, c.kind, c.gender, c.notes, c.tags, c.created_at, c.due_at, c.last_reviewed_at, c.interval_days, c.ease_factor, c.repetitions, c.lapses, c.is_starred, c.is_suspended"
+        "c.id, c.dictionary_entry_id, c.german, c.english, c.raw_german, c.kind, c.gender, c.notes, c.tags, c.created_at, c.due_at, c.last_reviewed_at, c.interval_days, c.ease_factor, c.repetitions, c.lapses, c.is_starred, c.is_suspended, c.meanings_json"
     }
 
     private func readEntries(_ statement: OpaquePointer?) throws -> [DictionaryEntry] {
@@ -1419,7 +1571,18 @@ public actor LocalStore {
                 usage: nullableText(statement, 7),
                 source: text(statement, 8),
                 explanation: nullableText(statement, 10),
-                translationLanguage: TranslationLanguage(rawValue: text(statement, 9)) ?? .english
+                translationLanguage: TranslationLanguage(rawValue: text(statement, 9)) ?? .english,
+                meanings: [DictionaryMeaning(
+                    english: text(statement, 2),
+                    rawEnglish: text(statement, 4),
+                    rawGerman: text(statement, 3),
+                    language: TranslationLanguage(rawValue: text(statement, 9)) ?? .english,
+                    gender: Gender(rawValue: text(statement, 6)) ?? .unknown,
+                    usage: nullableText(statement, 7),
+                    explanation: nullableText(statement, 10),
+                    grammar: nullableText(statement, 11),
+                    subject: nullableText(statement, 12)
+                )]
             ))
         }
     }
@@ -1434,7 +1597,7 @@ public actor LocalStore {
         let sql = """
             SELECT id, german, english, raw_german, raw_english,
                    kind, gender, usage, source, translation_language,
-                   explanation
+                   explanation, grammar, subject
             FROM dictionary_entries
             WHERE normalized_german = ? AND kind = ?
             ORDER BY id
@@ -1465,10 +1628,13 @@ public actor LocalStore {
             let meaning = DictionaryMeaning(
                 english: entry.english,
                 rawEnglish: entry.rawEnglish,
+                rawGerman: entry.rawGerman,
                 language: entry.meanings.first?.language ?? .english,
                 gender: entry.gender,
                 usage: entry.usage,
-                explanation: entry.meanings.first?.explanation
+                explanation: entry.meanings.first?.explanation,
+                grammar: entry.meanings.first?.grammar,
+                subject: entry.meanings.first?.subject
             )
             return seenMeanings.insert(meaning.id).inserted ? meaning : nil
         }
@@ -1479,6 +1645,7 @@ public actor LocalStore {
         }
         let explanations = try dictionaryExplanations(for: canonical)
         let forms = try dictionaryForms(for: canonical.german, kind: canonical.kind)
+        let reference = try dictionaryReference(for: canonical.german)
         let pluralForms = pluralEntries.reduce(into: [String]()) { forms, entry in
             if !forms.contains(entry.german) { forms.append(entry.german) }
         }
@@ -1487,6 +1654,9 @@ public actor LocalStore {
         }
         let sourcesWithForms = forms.reduce(into: allSources) { result, form in
             if !result.contains(form.source) { result.append(form.source) }
+        }
+        let completeSources = reference.sources.reduce(into: sourcesWithForms) { result, source in
+            if !result.contains(source) { result.append(source) }
         }
 
         return DictionaryEntry(
@@ -1498,11 +1668,14 @@ public actor LocalStore {
             kind: canonical.kind,
             gender: genders.count == 1 ? canonical.gender : .unknown,
             usage: usages.count == 1 ? canonical.usage : nil,
-            source: sourcesWithForms.joined(separator: ", "),
+            source: completeSources.joined(separator: ", "),
             pluralForms: pluralForms,
             meanings: meanings,
             explanations: explanations,
-            forms: forms
+            forms: forms,
+            ipa: reference.ipa,
+            etymology: reference.etymology,
+            relatedForms: reference.relatedForms
         )
     }
 
@@ -1512,7 +1685,7 @@ public actor LocalStore {
             SELECT DISTINCT lemma_key
             FROM dictionary_inflections
             WHERE form = ?
-              AND instr(',' || tags || ',', ',noun,') > 0
+              AND kind = 'noun'
               AND instr(',' || tags || ',', ',plural,') > 0
             ORDER BY lemma_key
             """)
@@ -1530,7 +1703,7 @@ public actor LocalStore {
         let entrySQL = """
             SELECT id, german, english, raw_german, raw_english,
                    kind, gender, usage, source, translation_language,
-                   explanation
+                   explanation, grammar, subject
             FROM dictionary_entries
             WHERE kind = 'noun' AND gender != 'plural' AND normalized_german = ?
             ORDER BY id
@@ -1557,14 +1730,14 @@ public actor LocalStore {
             SELECT DISTINCT candidate.form
             FROM dictionary_inflections AS candidate
             WHERE candidate.lemma_key = ?
-              AND instr(',' || candidate.tags || ',', ',noun,') > 0
+              AND candidate.kind = 'noun'
               AND instr(',' || candidate.tags || ',', ',plural,') > 0
               AND NOT EXISTS (
                 SELECT 1
                 FROM dictionary_inflections AS other
                 WHERE other.form = candidate.form
                   AND other.lemma_key != candidate.lemma_key
-                  AND instr(',' || other.tags || ',', ',noun,') > 0
+                  AND other.kind = 'noun'
                   AND instr(',' || other.tags || ',', ',plural,') > 0
               )
             ORDER BY candidate.form
@@ -1582,7 +1755,7 @@ public actor LocalStore {
         let entrySQL = """
             SELECT id, german, english, raw_german, raw_english,
                    kind, gender, usage, source, translation_language,
-                   explanation
+                   explanation, grammar, subject
             FROM dictionary_entries
             WHERE kind = 'noun' AND gender = 'plural' AND normalized_german = ?
             ORDER BY id
@@ -1620,18 +1793,66 @@ public actor LocalStore {
         }
     }
 
+    private func dictionaryReference(for german: String) throws -> DictionaryReference {
+        let key = dictionaryGroupingTerm(german)
+        let entryStatement = try prepare("""
+            SELECT ipa, etymology, source
+            FROM dictionary_reference_entries
+            WHERE german_key = ?
+            ORDER BY word = ? COLLATE NOCASE DESC, id
+            """)
+        defer { sqlite3_finalize(entryStatement) }
+        bind(key, to: 1, in: entryStatement)
+        bind(german, to: 2, in: entryStatement)
+        var ipa: String?
+        var etymology: String?
+        var sources: [String] = []
+        while true {
+            let step = sqlite3_step(entryStatement)
+            if step == SQLITE_DONE { break }
+            guard step == SQLITE_ROW else { throw sqliteError() }
+            if ipa == nil { ipa = nullableText(entryStatement, 0) }
+            if etymology == nil { etymology = nullableText(entryStatement, 1) }
+            let source = text(entryStatement, 2)
+            if !sources.contains(source) { sources.append(source) }
+        }
+
+        let relatedStatement = try prepare("""
+            SELECT related_word, relation, source
+            FROM dictionary_related_forms
+            WHERE german_key = ?
+            ORDER BY relation, related_word COLLATE NOCASE
+            """)
+        defer { sqlite3_finalize(relatedStatement) }
+        bind(key, to: 1, in: relatedStatement)
+        var relatedForms: [DictionaryRelatedForm] = []
+        while true {
+            let step = sqlite3_step(relatedStatement)
+            if step == SQLITE_DONE { break }
+            guard step == SQLITE_ROW else { throw sqliteError() }
+            let source = text(relatedStatement, 2)
+            relatedForms.append(.init(
+                word: text(relatedStatement, 0),
+                relation: text(relatedStatement, 1),
+                source: source
+            ))
+            if !sources.contains(source) { sources.append(source) }
+        }
+        return .init(ipa: ipa, etymology: etymology, relatedForms: relatedForms, sources: sources)
+    }
+
     private func dictionaryForms(for german: String, kind: WordKind) throws -> [DictionaryForm] {
-        guard kind == .verb || kind == .adjective else { return [] }
         let lemmaKey = dictionaryGroupingTerm(GermanMorphology.inflectionLemma(for: german))
         guard !lemmaKey.isEmpty else { return [] }
         let statement = try prepare("""
             SELECT form, tags, source
             FROM dictionary_inflections
-            WHERE lemma_key = ?
+            WHERE lemma_key = ? AND kind = ?
             ORDER BY tags, form, source
             """)
         defer { sqlite3_finalize(statement) }
         bind(lemmaKey, to: 1, in: statement)
+        bind(kind.rawValue, to: 2, in: statement)
         var result: [DictionaryForm] = []
         while true {
             let step = sqlite3_step(statement)
@@ -1655,6 +1876,9 @@ public actor LocalStore {
             let lastReviewed = sqlite3_column_type(statement, 11) == SQLITE_NULL ? nil : Date(timeIntervalSince1970: sqlite3_column_double(statement, 11))
             let german = text(statement, 2)
             let kind = WordKind(rawValue: text(statement, 5)) ?? .other
+            let meanings = nullableText(statement, 18).flatMap {
+                try? JSONDecoder().decode([DictionaryMeaning].self, from: Data($0.utf8))
+            }
             result.append(.init(
                 id: sqlite3_column_int64(statement, 0),
                 dictionaryEntryID: dictionaryID,
@@ -1674,9 +1898,18 @@ public actor LocalStore {
                 lapses: Int(sqlite3_column_int(statement, 15)),
                 isStarred: sqlite3_column_int(statement, 16) != 0,
                 isSuspended: sqlite3_column_int(statement, 17) != 0,
-                forms: try dictionaryForms(for: german, kind: kind)
+                forms: try dictionaryForms(for: german, kind: kind),
+                meanings: meanings
             ))
         }
+    }
+
+    private func meaningsJSON(_ meanings: [DictionaryMeaning]) throws -> String {
+        let data = try JSONEncoder().encode(meanings)
+        guard let result = String(data: data, encoding: .utf8) else {
+            throw LocalStoreError.sqlite("Could not encode saved translations")
+        }
+        return result
     }
 
     private func readSentences(_ statement: OpaquePointer?) throws -> [SavedSentence] {
@@ -1741,6 +1974,24 @@ public actor LocalStore {
     private func nullableText(_ statement: OpaquePointer?, _ column: Int32) -> String? {
         guard sqlite3_column_type(statement, column) != SQLITE_NULL else { return nil }
         return text(statement, column)
+    }
+
+    private func bindNullableSourceText(
+        _ sourceStatement: OpaquePointer?,
+        column: Int32,
+        to index: Int32,
+        in destinationStatement: OpaquePointer?
+    ) {
+        guard let value = sqlite3_column_text(sourceStatement, column) else {
+            sqlite3_bind_null(destinationStatement, index)
+            return
+        }
+        let string = String(cString: value).trimmingCharacters(in: .whitespacesAndNewlines)
+        if string.isEmpty {
+            sqlite3_bind_null(destinationStatement, index)
+        } else {
+            bind(string, to: index, in: destinationStatement)
+        }
     }
 
     private func escapedLike(_ value: String) -> String {
@@ -1818,6 +2069,25 @@ public actor LocalStore {
         return step == SQLITE_ROW
     }
 
+    private static func sourceTable(
+        _ table: String,
+        hasColumn column: String,
+        in database: OpaquePointer?
+    ) throws -> Bool {
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(database, "PRAGMA table_info(\(table))", -1, &statement, nil) == SQLITE_OK else {
+            throw LocalStoreError.invalidExplanationDatabase
+        }
+        defer { sqlite3_finalize(statement) }
+        while true {
+            let step = sqlite3_step(statement)
+            if step == SQLITE_DONE { return false }
+            guard step == SQLITE_ROW else { throw LocalStoreError.invalidExplanationDatabase }
+            guard let value = sqlite3_column_text(statement, 1) else { continue }
+            if String(cString: value) == column { return true }
+        }
+    }
+
 }
 
 private struct DictionaryGroupKey: Hashable {
@@ -1854,8 +2124,15 @@ private struct DictionaryFormat {
     let language: TranslationLanguage
 }
 
+private struct DictionaryReference {
+    let ipa: String?
+    let etymology: String?
+    let relatedForms: [DictionaryRelatedForm]
+    let sources: [String]
+}
+
 private func wordKind(forLectorPartOfSpeech value: String) -> WordKind {
-    switch value {
+    switch value.lowercased().trimmingCharacters(in: .whitespacesAndNewlines) {
     case "noun": .noun
     case "verb": .verb
     case "adj": .adjective
@@ -1886,40 +2163,23 @@ private func lectorTags(_ value: String) -> Set<String> {
     }.filter { !$0.isEmpty })
 }
 
-private func shouldImportLectorVerbInflection(_ tags: Set<String>) -> Bool {
-    if tags == ["auxiliary"] || tags == ["past"] { return true }
-    if tags.isSuperset(of: ["participle", "past"]) { return true }
-    if tags.contains("present"),
-       !tags.isDisjoint(with: ["first-person", "second-person", "third-person"]) {
-        return true
-    }
-    return tags.contains("preterite")
-        && tags.contains("first-person")
-        && tags.contains("singular")
-}
+private func lectorInflectionKind(tags: Set<String>, partsOfSpeech: String) -> WordKind {
+    if !tags.isDisjoint(with: ["inflection-template", "table-tags"]) { return .other }
+    if !tags.isDisjoint(with: ["comparative", "superlative"]) { return .adjective }
+    let declaredKinds = partsOfSpeech.split(separator: ",").map {
+        wordKind(forLectorPartOfSpeech: String($0))
+    }.filter { $0 != .other }
+    if declaredKinds.count == 1 { return declaredKinds[0] }
 
-private func shouldImportLectorNounPlural(
-    _ tags: Set<String>,
-    isNounRelation: Bool
-) -> Bool {
-    guard isNounRelation, tags.contains("plural") else { return false }
     let verbTags: Set<String> = [
-        "first-person", "second-person", "third-person",
-        "present", "preterite", "future", "past",
-        "indicative", "subjunctive", "imperative", "participle"
+        "auxiliary", "first-person", "second-person", "third-person", "present",
+        "preterite", "future", "past", "indicative", "subjunctive", "imperative",
+        "participle", "infinitive"
     ]
-    return tags.isDisjoint(with: verbTags)
-}
-
-private func searchKind(forInflectionTags tags: Set<String>) -> WordKind? {
-    if !tags.isDisjoint(with: ["comparative", "superlative"]) {
-        return .adjective
-    }
-    if tags.contains("noun") { return nil }
-    if tags != ["auxiliary"], shouldImportLectorVerbInflection(tags) {
-        return .verb
-    }
-    return nil
+    if !tags.isDisjoint(with: verbTags) { return .verb }
+    if tags.contains("noun") || declaredKinds.contains(.noun) { return .noun }
+    if declaredKinds.contains(.adjective) { return .adjective }
+    return declaredKinds.first ?? .other
 }
 
 private func lectorDegreeInflection(word: String, gloss: String) -> (lemma: String, tag: String)? {

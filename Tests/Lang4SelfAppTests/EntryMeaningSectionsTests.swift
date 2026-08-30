@@ -19,6 +19,31 @@ final class EntryMeaningSectionsTests: XCTestCase {
         XCTAssertEqual(sections.russian.map(\.translation), ["первый", "second Russian"])
     }
 
+    func testExpandsSemicolonSeparatedTranslationsIntoListItems() {
+        let sections = EntryMeaningSections(meanings: [
+            meaning("I; me"),
+            meaning("я; меня", language: .russian)
+        ])
+
+        XCTAssertEqual(sections.englishPreview.map(\.translation), ["I", "me"])
+        XCTAssertEqual(sections.russian.map(\.translation), ["я", "меня"])
+    }
+
+    func testTranslationSummaryRemovesSemicolonsAndDuplicates() {
+        let summary = TranslationPresentation.summary(
+            of: [meaning("first; second"), meaning("second")]
+        )
+        let legacySummary = TranslationPresentation.summary(
+            of: [],
+            fallback: "first; second; first"
+        )
+
+        XCTAssertEqual(summary, "first, second")
+        XCTAssertEqual(legacySummary, "first, second")
+        XCTAssertFalse(summary.contains(";"))
+        XCTAssertFalse(legacySummary.contains(";"))
+    }
+
     func testEntryDetailDoesNotRepeatTheWordAndTranslationsInItsInfoTable() {
         let entry = DictionaryEntry(
             german: "ich",

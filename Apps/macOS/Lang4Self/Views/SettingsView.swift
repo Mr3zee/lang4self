@@ -64,7 +64,7 @@ struct SettingsView: View {
                         VStack(alignment: .leading, spacing: 6) {
                             Text("Wiktionary reference data")
                                 .font(.headline)
-                            Text("\(state.explanationCount.formatted()) English explanations, plus verified noun, verb, and adjective forms")
+                            Text("\(state.explanationCount.formatted()) English explanations, plus pronunciation, etymology, related words, and morphology")
                                 .foregroundStyle(.secondary)
                             Text("Derived from Wiktionary through kaikki.org and Lector; licensed CC BY-SA 4.0.")
                                 .font(.callout)
@@ -141,7 +141,7 @@ struct SettingsView: View {
                         GridRow {
                             Text("Context window").foregroundStyle(.secondary)
                             Picker("Context window", selection: lmSetting(\.contextLength)) {
-                                ForEach([8_192, 16_384, 32_768, 65_536, 131_072], id: \.self) { value in
+                                ForEach([8_192, 16_384, 32_768, 65_536, 131_072, 262_144], id: \.self) { value in
                                     Text("\(value.formatted()) tokens").tag(value)
                                 }
                             }
@@ -187,7 +187,7 @@ struct SettingsView: View {
                         GridRow {
                             Text("Max output").foregroundStyle(.secondary)
                             Picker("Maximum output tokens", selection: lmSetting(\.maxOutputTokens)) {
-                                ForEach([1_024, 2_048, 4_096, 8_192], id: \.self) { value in
+                                ForEach([1_024, 2_048, 4_096, 8_192, 16_384], id: \.self) { value in
                                     Text("\(value.formatted()) tokens").tag(value)
                                 }
                             }
@@ -209,7 +209,7 @@ struct SettingsView: View {
                     }
 
                     HStack {
-                        Label("Requests stay on 127.0.0.1", systemImage: "lock.shield")
+                        Label("LM generation requests stay on 127.0.0.1", systemImage: "lock.shield")
                             .foregroundStyle(.green)
                         Spacer()
                         Button("Reset Defaults") {
@@ -220,6 +220,12 @@ struct SettingsView: View {
                     Text("Model, context, and GPU changes reload the dedicated model on the next generation. Temperature and top-p apply without reloading.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                    Label(
+                        "Grammar analysis sends generated German sentences to the public UDPipe service.",
+                        systemImage: "network"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 }
 
                 settingsSection("Keyboard", symbol: "keyboard") {
@@ -231,7 +237,7 @@ struct SettingsView: View {
                         .font(.caption.monospaced())
                         .textSelection(.enabled)
                         .foregroundStyle(.secondary)
-                    Text("Cards, reviews, and the imported dictionary survive restarts in this SQLite database. No account or server is used.")
+                    Text("Cards, reviews, and the imported dictionary survive restarts in this SQLite database. No account or Lang4Self cloud server is used.")
                         .foregroundStyle(.secondary)
                 }
             }

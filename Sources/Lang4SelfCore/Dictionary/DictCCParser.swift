@@ -21,6 +21,9 @@ public enum DictCCParser {
         let declaredKind = columns.count > 2
             ? String(columns[2]).trimmingCharacters(in: .whitespacesAndNewlines)
             : ""
+        let subject = columns.count > 3
+            ? String(columns[3]).trimmingCharacters(in: .whitespacesAndNewlines)
+            : ""
         guard !rawGerman.isEmpty, !rawEnglish.isEmpty else { return nil }
 
         let gender = detectGender(in: rawGerman)
@@ -38,7 +41,16 @@ public enum DictCCParser {
             gender: gender,
             usage: extractUsage(from: rawGerman),
             source: "dict.cc",
-            translationLanguage: translationLanguage
+            meanings: [DictionaryMeaning(
+                english: english,
+                rawEnglish: rawEnglish,
+                rawGerman: rawGerman,
+                language: translationLanguage,
+                gender: gender,
+                usage: extractUsage(from: rawGerman),
+                grammar: declaredKind.isEmpty ? nil : declaredKind,
+                subject: subject.isEmpty ? nil : subject
+            )]
         )
     }
 

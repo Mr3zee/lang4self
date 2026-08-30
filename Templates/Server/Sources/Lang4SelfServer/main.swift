@@ -5,6 +5,6 @@ import Lang4SelfCore
 @main
 enum Lang4SelfServerTemplate {
     static func main() {
-        print("Lang4Self server template is inactive. The macOS app is fully local.")
+        print("Lang4Self server template is inactive and starts no listener.")
     }
 }

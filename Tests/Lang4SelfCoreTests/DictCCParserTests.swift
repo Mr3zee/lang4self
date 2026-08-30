@@ -61,6 +61,18 @@ final class DictCCParserTests: XCTestCase {
         XCTAssertEqual(entry.meanings.first?.language, .russian)
     }
 
+    func testPreservesAllDictCCMetadataColumnsAndInlineAnnotations() throws {
+        let entry = try XCTUnwrap(DictCCParser.parse(
+            line: "Bank {f} [Finanzen]\tbank [financial institution] <econ.>\tnoun archaic\tecon."
+        ))
+        let meaning = try XCTUnwrap(entry.meanings.first)
+
+        XCTAssertEqual(meaning.grammar, "noun archaic")
+        XCTAssertEqual(meaning.subject, "econ.")
+        XCTAssertEqual(meaning.germanMetadata, ["Finanzen", "f"])
+        XCTAssertEqual(meaning.translationMetadata, ["financial institution", "econ."])
+    }
+
     func testParsesEveryDictCCClassification() throws {
         let classifications: [(String, WordKind)] = [
             ("noun", .noun),

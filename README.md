@@ -4,14 +4,14 @@
 
 <h1 align="center">Lang4Self</h1>
 
-<p align="center">A keyboard-first, fully local German-learning app for macOS 14+.</p>
+<p align="center">A keyboard-first, local-first German-learning app for macOS 14+.</p>
 
 <p align="center">
   <a href="https://github.com/Mr3zee/lang4self/actions/workflows/ci.yml"><img src="https://github.com/Mr3zee/lang4self/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--2.0--or--later-blue" alt="GPL-2.0-or-later"></a>
 </p>
 
-Lang4Self combines a fast offline dictionary, speech lookup, spaced-repetition review, word lists, and locally generated example sentences. There is no account, telemetry, or cloud backend.
+Lang4Self combines a fast offline dictionary, speech lookup, spaced-repetition review, word lists, and locally generated example sentences. There is no account, telemetry, or Lang4Self cloud backend. Grammar analysis sends generated German sentences to the public UDPipe API.
 
 ## Screenshots
 
@@ -27,10 +27,11 @@ The screenshots use the app's small deterministic test fixture. They do not cont
 
 - Fast SQLite + FTS5 lookup across more than one million imported entries
 - English and Russian translations from user-supplied dict.cc exports
-- Optional offline Wiktionary explanations
+- Optional offline Wiktionary explanations, pronunciation, etymology, related words, and morphology
 - On-device German Apple Speech lookup in Dictionary
 - Named word lists and SM-2-style review scheduling
 - Local example-sentence generation through LM Studio
+- Grammar analysis through the public UDPipe API
 - Keyboard navigation throughout the app
 - A shared `Lang4SelfCore` library and a small command-line client
 
@@ -57,7 +58,7 @@ dict.cc does not permit its translation data to be redistributed with this repos
 
 Keep downloaded exports outside this checkout. Common dict.cc filenames, archives, and SQLite databases are ignored as an extra safeguard, and CI rejects local data files if they become tracked.
 
-For richer German definitions and verified noun, verb, and adjective forms, optionally download Lector's [free German SQLite dictionary](https://lector.dev/free/german-dictionary/). Import the `.db` file using **Settings → Offline dictionary → Import Lector database**. The data remains on your Mac; generated grammar rules are used only when imported forms are unavailable.
+For richer German definitions, IPA, etymology, related words, and verified morphology, optionally download Lector's [free German SQLite dictionary](https://lector.dev/free/german-dictionary/). Import the `.db` file using **Settings → Offline dictionary → Import Lector database**. The data remains on your Mac; generated grammar rules are used only when imported forms are unavailable.
 
 ### Enable local sentence generation
 
@@ -65,7 +66,7 @@ For richer German definitions and verified noun, verb, and adjective forms, opti
 2. Install the [`lms` command-line tool](https://lmstudio.ai/docs/developer/core/lms-cli) from LM Studio.
 3. Choose the model and generation settings in Lang4Self's **Settings**.
 
-Lang4Self starts the localhost server and loads the selected model on first use. It offloads its model instance when the app quits.
+Lang4Self starts the localhost server and loads the selected model on first use. It offloads its model instance when the app quits. After generation, the German sentence text is sent to the public UDPipe service for grammar analysis; cards, translations, and review history stay in the local database.
 
 ## Tests and builds
 

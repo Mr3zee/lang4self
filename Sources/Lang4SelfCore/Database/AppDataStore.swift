@@ -8,6 +8,7 @@ public protocol DictionaryStoring: Sendable {
     func installedTranslationLanguages() async throws -> Set<TranslationLanguage>
     func explanationCount() async throws -> Int
     func seedStarterDictionaryIfNeeded() async throws
+    func dictionaryEntry(id: DictionaryEntry.ID) async throws -> DictionaryEntry?
     func searchDictionary(_ query: String, limit: Int) async throws -> [DictionaryEntry]
     func importDictionary(
         from url: URL,

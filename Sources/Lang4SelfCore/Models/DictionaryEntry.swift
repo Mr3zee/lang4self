@@ -70,18 +70,23 @@ public enum TranslationLanguage: String, Codable, CaseIterable, Sendable {
 
 public struct DictionaryMeaning: Identifiable, Hashable, Codable, Sendable {
     public var id: String {
-        "\(language.rawValue):\(gender.rawValue):\(english.lowercased()):\(usage ?? ""):\(explanation ?? "")"
+        "\(language.rawValue):\(gender.rawValue):\(english.lowercased()):\(usage ?? ""):\(explanation ?? ""):\(grammar ?? ""):\(subject ?? ""):\(rawGerman ?? "")"
     }
 
     public let english: String
     public let rawEnglish: String
+    public let rawGerman: String?
     public let language: TranslationLanguage
     public let gender: Gender
     public let usage: String?
     public let explanation: String?
+    public let grammar: String?
+    public let subject: String?
 
     public var translation: String { english }
     public var rawTranslation: String { rawEnglish }
+    public var germanMetadata: [String] { Self.annotations(in: rawGerman ?? "") }
+    public var translationMetadata: [String] { Self.annotations(in: rawEnglish) }
     public var distinctExplanation: String? {
         guard let explanation else { return nil }
         let trimmed = explanation.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -93,21 +98,43 @@ public struct DictionaryMeaning: Identifiable, Hashable, Codable, Sendable {
     public init(
         english: String,
         rawEnglish: String? = nil,
+        rawGerman: String? = nil,
         language: TranslationLanguage = .english,
         gender: Gender = .unknown,
         usage: String? = nil,
-        explanation: String? = nil
+        explanation: String? = nil,
+        grammar: String? = nil,
+        subject: String? = nil
     ) {
         self.english = english
         self.rawEnglish = rawEnglish ?? english
+        self.rawGerman = rawGerman
         self.language = language
         self.gender = gender
         self.usage = usage
         self.explanation = explanation
+        self.grammar = grammar
+        self.subject = subject
     }
 
     private static func comparableText(_ value: String) -> String {
         comparableDictionaryText(value)
+    }
+
+    private static func annotations(in value: String) -> [String] {
+        let pairs: [(Character, Character)] = [("[", "]"), ("{", "}"), ("<", ">")]
+        var result: [String] = []
+        for (opening, closing) in pairs {
+            var remainder = value[...]
+            while let start = remainder.firstIndex(of: opening),
+                  let end = remainder[remainder.index(after: start)...].firstIndex(of: closing) {
+                let content = remainder[remainder.index(after: start)..<end]
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if !content.isEmpty, !result.contains(content) { result.append(content) }
+                remainder = remainder[remainder.index(after: end)...]
+            }
+        }
+        return result
     }
 }
 
@@ -135,6 +162,19 @@ public struct DictionaryForm: Identifiable, Hashable, Codable, Sendable {
     }
 }
 
+public struct DictionaryRelatedForm: Identifiable, Hashable, Codable, Sendable {
+    public var id: String { "\(source):\(relation):\(word)" }
+    public let word: String
+    public let relation: String
+    public let source: String
+
+    public init(word: String, relation: String, source: String = "Wiktionary via Lector") {
+        self.word = word
+        self.relation = relation
+        self.source = source
+    }
+}
+
 public struct DictionaryEntry: Identifiable, Hashable, Codable, Sendable {
     public let id: Int64
     public let german: String
@@ -149,6 +189,9 @@ public struct DictionaryEntry: Identifiable, Hashable, Codable, Sendable {
     public let meanings: [DictionaryMeaning]
     public let explanations: [DictionaryExplanation]
     public let forms: [DictionaryForm]
+    public let ipa: String?
+    public let etymology: String?
+    public let relatedForms: [DictionaryRelatedForm]
 
     public var translations: String { english }
     public var distinctExplanations: [DictionaryExplanation] {
@@ -179,11 +222,15 @@ public struct DictionaryEntry: Identifiable, Hashable, Codable, Sendable {
         translationLanguage: TranslationLanguage = .english,
         meanings: [DictionaryMeaning]? = nil,
         explanations: [DictionaryExplanation] = [],
-        forms: [DictionaryForm] = []
+        forms: [DictionaryForm] = [],
+        ipa: String? = nil,
+        etymology: String? = nil,
+        relatedForms: [DictionaryRelatedForm] = []
     ) {
         let resolvedMeanings = meanings ?? [DictionaryMeaning(
             english: english,
             rawEnglish: rawEnglish,
+            rawGerman: rawGerman,
             language: translationLanguage,
             gender: gender,
             usage: usage,
@@ -202,6 +249,9 @@ public struct DictionaryEntry: Identifiable, Hashable, Codable, Sendable {
         self.meanings = resolvedMeanings
         self.explanations = explanations
         self.forms = forms
+        self.ipa = ipa
+        self.etymology = etymology
+        self.relatedForms = relatedForms
     }
 }
 

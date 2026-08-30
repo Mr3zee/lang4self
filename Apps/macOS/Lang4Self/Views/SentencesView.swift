@@ -9,8 +9,10 @@ struct SentencesView: View {
     @State private var minimumWordsText = "5"
     @State private var maximumWordsText = "14"
     @State private var selection: SentenceSelection?
-    @FocusState private var sentenceListFocused: Bool
+    @FocusState private var focusedControl: FocusControl?
     let automaticallyFocusContent: Bool
+
+    private enum FocusControl: Hashable { case style, sentences }
 
     var body: some View {
         HSplitView {
@@ -28,6 +30,7 @@ struct SentencesView: View {
             if let sentence = selectedSentence {
                 SentenceInspector(sentence: sentence)
                     .id(sentence.id)
+                    .accessibilityIdentifier(sentence.id.inspectorAccessibilityIdentifier)
             } else {
                 PlaceholderView(
                     symbol: "text.quote",
@@ -41,13 +44,19 @@ struct SentencesView: View {
         .onAppear {
             repairSelection()
             if automaticallyFocusContent {
-                DispatchQueue.main.async { sentenceListFocused = true }
+                DispatchQueue.main.async { focusedControl = .sentences }
             }
         }
-        .onChange(of: state.generatedSentences.map(\.id)) { _, _ in repairSelection(preferGenerated: true) }
+        .onChange(of: state.generatedSentences.map(\.id)) { _, _ in
+            repairSelection(preferGenerated: true)
+            DispatchQueue.main.async { focusedControl = .sentences }
+        }
         .onChange(of: state.savedSentences.map(\.id)) { _, _ in repairSelection() }
         .onReceive(NotificationCenter.default.publisher(for: .focusSentenceList)) { _ in
-            DispatchQueue.main.async { sentenceListFocused = true }
+            DispatchQueue.main.async { focusedControl = .sentences }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .focusSentenceContent)) { _ in
+            focusPrimaryContent()
         }
     }
 
@@ -131,6 +140,7 @@ struct SentencesView: View {
                     .foregroundStyle(.secondary)
                 TextField("Sentence style", text: $generationOptions.style)
                     .textFieldStyle(.roundedBorder)
+                    .focused($focusedControl, equals: .style)
                     .accessibilityLabel("Sentence style")
                     .accessibilityIdentifier("sentences.style")
             }
@@ -257,6 +267,7 @@ struct SentencesView: View {
                             )
                         }
                         .tag(SentenceSelection.generated(sentence.id))
+                        .accessibilityIdentifier("sentences.generated.\(sentence.id.uuidString)")
                     }
                 }
             }
@@ -274,6 +285,7 @@ struct SentencesView: View {
                             footnote: sentence.sourceListName
                         )
                         .tag(SentenceSelection.saved(sentence.id))
+                        .accessibilityIdentifier("sentences.saved.\(sentence.id)")
                         .contextMenu {
                             Button("Delete Sentence", role: .destructive) {
                                 state.deleteSentence(sentence)
@@ -288,11 +300,11 @@ struct SentencesView: View {
                   let sentence = state.savedSentences.first(where: { $0.id == id }) else { return }
             state.deleteSentence(sentence)
         }
-        .focused($sentenceListFocused)
+        .focused($focusedControl, equals: .sentences)
         .accessibilityIdentifier("sentences.list")
         .onKeyPress(.rightArrow) {
             guard selectedSentence != nil else { return .ignored }
-            sentenceListFocused = false
+            focusedControl = nil
             NotificationCenter.default.post(name: .focusSentenceInspector, object: nil)
             return .handled
         }
@@ -370,11 +382,35 @@ struct SentencesView: View {
             selection = nil
         }
     }
+
+    private func focusPrimaryContent() {
+        if let first = state.generatedSentences.first {
+            selection = .generated(first.id)
+            focusedControl = nil
+            DispatchQueue.main.async { focusedControl = .sentences }
+        } else if let first = state.savedSentences.first {
+            selection = .saved(first.id)
+            focusedControl = nil
+            DispatchQueue.main.async { focusedControl = .sentences }
+        } else {
+            selection = nil
+            focusedControl = .style
+        }
+    }
 }
 
 private enum SentenceSelection: Hashable {
     case generated(UUID)
     case saved(Int64)
+
+    var inspectorAccessibilityIdentifier: String {
+        switch self {
+        case .generated(let id):
+            "sentences.inspector.generated.\(id.uuidString)"
+        case .saved(let id):
+            "sentences.inspector.saved.\(id)"
+        }
+    }
 }
 
 private struct SentencePresentation: Identifiable {
@@ -480,7 +516,15 @@ private struct SentenceInspector: View {
                             focusedTokenIndex = offset
                         } label: {
                             Text(token.surface)
-                                .font(.title2.weight(isSelected ? .semibold : .regular))
+                                .font(.title2)
+                                .opacity(isSelected ? 0 : 1)
+                                .overlay {
+                                    if isSelected {
+                                        Text(token.surface)
+                                            .font(.title2.weight(.semibold))
+                                            .fixedSize()
+                                    }
+                                }
                                 .foregroundStyle(tokenGenders[token.index]?.color ?? .primary)
                                 .padding(.horizontal, 7)
                                 .padding(.vertical, 5)
@@ -525,7 +569,10 @@ private struct SentenceInspector: View {
                             ForEach(entries.indices, id: \.self) { index in
                                 HStack {
                                     GermanWordView(entry: entries[index], font: .body)
-                                    Text("— " + entries[index].english)
+                                    Text("— " + TranslationPresentation.summary(
+                                        of: entries[index].meanings,
+                                        fallback: entries[index].english
+                                    ))
                                 }
                                 .tag(index)
                             }
@@ -595,9 +642,10 @@ private struct SentenceInspector: View {
     }
 }
 
-private extension Notification.Name {
+extension Notification.Name {
     static let focusSentenceInspector = Notification.Name("focusSentenceInspector")
     static let focusSentenceList = Notification.Name("focusSentenceList")
+    static let focusSentenceContent = Notification.Name("focusSentenceContent")
 }
 
 private struct TokenFlowLayout: Layout {

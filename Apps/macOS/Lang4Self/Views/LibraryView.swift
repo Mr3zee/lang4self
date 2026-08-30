@@ -85,7 +85,12 @@ struct LibraryView: View {
                             if card.isStarred { Image(systemName: "star.fill").foregroundStyle(.yellow) }
                             VStack(alignment: .leading, spacing: 3) {
                                 GermanWordView(entry: entry(for: card))
-                                Text(card.english).font(.subheadline).foregroundStyle(.secondary)
+                                Text(TranslationPresentation.summary(
+                                    of: card.resolvedMeanings,
+                                    fallback: card.english
+                                ))
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
                             }
                             Spacer()
                             if card.isSuspended { Image(systemName: "pause.circle").foregroundStyle(.secondary) }
@@ -139,6 +144,9 @@ struct LibraryView: View {
             state.route = .library
             focusedArea = .search
         }
+        .onReceive(NotificationCenter.default.publisher(for: .focusLibraryContent)) { _ in
+            focusPrimaryContent()
+        }
         .onReceive(NotificationCenter.default.publisher(for: .createWordList)) { _ in
             guard state.route == .library else { return }
             listEditor = .new
@@ -169,13 +177,26 @@ struct LibraryView: View {
     private func cardDetail(_ card: PersonalCard) -> some View {
         VStack(spacing: 0) {
             EntryDetailView(entry: entry(for: card))
+            if !card.notes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                HStack(alignment: .top, spacing: 10) {
+                    Text("Notes")
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(.secondary)
+                    Text(card.notes)
+                        .textSelection(.enabled)
+                        .accessibilityIdentifier("library.card-notes")
+                    Spacer()
+                }
+                .padding(.horizontal, 14)
+                .padding(.bottom, 12)
+            }
             Divider()
             HStack {
                 Label(card.isSuspended ? "Suspended" : "Due \(card.dueAt.formatted(date: .abbreviated, time: .shortened))", systemImage: card.isSuspended ? "pause.circle" : "calendar")
                     .foregroundStyle(.secondary)
                 Spacer()
-                Button("Edit") { beginEditing(card) }
-                    .accessibilityLabel("Edit \(card.german)")
+                Button("Edit notes") { beginEditing(card) }
+                    .accessibilityLabel("Edit notes for \(card.german)")
                     .accessibilityIdentifier("library.edit-card")
                 Button {
                     var changed = card
@@ -212,7 +233,7 @@ struct LibraryView: View {
 
     @ViewBuilder
     private func cardMenu(_ card: PersonalCard) -> some View {
-        Button("Edit…") { beginEditing(card) }
+        Button("Edit notes…") { beginEditing(card) }
         Button(card.isStarred ? "Unstar" : "Star") {
             var changed = card; changed.isStarred.toggle(); state.updateCard(changed)
         }
@@ -268,8 +289,28 @@ struct LibraryView: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { focusedArea = .cards }
     }
 
+    private func focusPrimaryContent() {
+        guard let first = state.cards.first else {
+            focusedArea = .search
+            return
+        }
+        selectedID = first.id
+        focusedArea = nil
+        DispatchQueue.main.async { focusedArea = .cards }
+    }
+
     private func entry(for card: PersonalCard) -> DictionaryEntry {
-        .init(id: card.dictionaryEntryID ?? 0, german: card.german, english: card.english, rawGerman: card.rawGerman, kind: card.kind, gender: card.gender, source: "My words", forms: card.forms)
+        .init(
+            id: card.dictionaryEntryID ?? 0,
+            german: card.german,
+            english: card.english,
+            rawGerman: card.rawGerman,
+            kind: card.kind,
+            gender: card.gender,
+            source: "My words",
+            meanings: card.resolvedMeanings,
+            forms: card.forms
+        )
     }
 }
 
@@ -353,10 +394,8 @@ private struct ListNameEditor: View {
 private struct CardEditor: View {
     @Environment(\.dismiss) private var dismiss
     @State private var card: PersonalCard
-    @FocusState private var focusedField: Field?
+    @FocusState private var notesFocused: Bool
     let save: (PersonalCard) -> Void
-
-    private enum Field: Hashable { case german }
 
     init(card: PersonalCard, save: @escaping (PersonalCard) -> Void) {
         _card = State(initialValue: card)
@@ -365,26 +404,12 @@ private struct CardEditor: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Edit entry").font(.title2.weight(.bold))
+            Text("Edit notes").font(.title2.weight(.bold))
             Form {
-                TextField("German", text: $card.german)
-                    .focused($focusedField, equals: .german)
-                    .accessibilityIdentifier("card-editor.german")
-                TextField("Translations", text: $card.english)
-                    .accessibilityIdentifier("card-editor.translations")
-                TextField("Tags", text: $card.tags, prompt: Text("travel, A2"))
-                    .accessibilityIdentifier("card-editor.tags")
                 TextField("Notes", text: $card.notes, axis: .vertical)
                     .lineLimit(3...8)
+                    .focused($notesFocused)
                     .accessibilityIdentifier("card-editor.notes")
-                Picker("Entry type", selection: $card.kind) {
-                    ForEach(WordKind.allCases, id: \.self) { Text($0.label).tag($0) }
-                }
-                .accessibilityIdentifier("card-editor.kind")
-                Picker("Gender", selection: $card.gender) {
-                    ForEach(Gender.allCases, id: \.self) { Text($0 == .unknown ? "Unknown" : $0.article).tag($0) }
-                }
-                .accessibilityIdentifier("card-editor.gender")
             }
             HStack {
                 Spacer()
@@ -394,19 +419,19 @@ private struct CardEditor: View {
                 Button("Save") { save(card) }
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.defaultAction)
-                    .disabled(card.german.isEmpty || card.english.isEmpty)
                     .accessibilityIdentifier("card-editor.save")
             }
         }
         .padding(24)
         .frame(width: 480)
         .onAppear {
-            DispatchQueue.main.async { focusedField = .german }
+            DispatchQueue.main.async { notesFocused = true }
         }
     }
 }
 
 extension Notification.Name {
     static let focusLibrarySearch = Notification.Name("focusLibrarySearch")
+    static let focusLibraryContent = Notification.Name("focusLibraryContent")
     static let createWordList = Notification.Name("createWordList")
 }

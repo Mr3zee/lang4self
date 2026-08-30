@@ -52,6 +52,17 @@ public struct PersonalCard: Identifiable, Hashable, Codable, Sendable {
     public var isStarred: Bool
     public var isSuspended: Bool
     public var forms: [DictionaryForm]
+    public var meanings: [DictionaryMeaning]?
+
+    public var resolvedMeanings: [DictionaryMeaning] {
+        meanings ?? english.split(separator: ";", omittingEmptySubsequences: true).map {
+            DictionaryMeaning(
+                english: $0.trimmingCharacters(in: .whitespacesAndNewlines),
+                language: .english,
+                gender: gender
+            )
+        }
+    }
 
     public init(
         id: Int64 = 0,
@@ -72,7 +83,8 @@ public struct PersonalCard: Identifiable, Hashable, Codable, Sendable {
         lapses: Int = 0,
         isStarred: Bool = false,
         isSuspended: Bool = false,
-        forms: [DictionaryForm] = []
+        forms: [DictionaryForm] = [],
+        meanings: [DictionaryMeaning]? = nil
     ) {
         self.id = id
         self.dictionaryEntryID = dictionaryEntryID
@@ -93,6 +105,7 @@ public struct PersonalCard: Identifiable, Hashable, Codable, Sendable {
         self.isStarred = isStarred
         self.isSuspended = isSuspended
         self.forms = forms
+        self.meanings = meanings
     }
 }
 

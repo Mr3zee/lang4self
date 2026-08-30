@@ -26,6 +26,7 @@ final class Lang4SelfUITests: XCTestCase {
         app.launchEnvironment["LANG4SELF_UI_TEST_RUSSIAN_DICTIONARY"] = russianDictionaryURL.path
         app.launch()
 
+        XCTAssertTrue(element("app.ready").waitForExistence(timeout: 12))
         XCTAssertTrue(app.textFields["dictionary.search"].waitForExistence(timeout: 8))
         XCTAssertTrue(app.buttons["dictionary.voice-search"].waitForExistence(timeout: 3))
         assertFocused(app.buttons["dictionary.voice-search"])
@@ -107,6 +108,99 @@ final class Lang4SelfUITests: XCTestCase {
         XCTAssertTrue(routeElement("dictionary").waitForExistence(timeout: 3))
         app.typeKey(.downArrow, modifierFlags: [])
         XCTAssertTrue(routeElement("review").waitForExistence(timeout: 3))
+    }
+
+    func testSidebarEnterFocusesPagePrimaryContent() {
+        let sidebar = element("sidebar.routes")
+
+        element("sidebar.dictionary").click()
+        assertFocused(sidebar)
+        app.typeKey(.return, modifierFlags: [])
+        assertFocused(app.textFields["dictionary.search"])
+
+        app.typeText("Haus")
+        XCTAssertTrue(element("dictionary.results").waitForExistence(timeout: 3))
+        element("sidebar.dictionary").click()
+        app.typeKey(.return, modifierFlags: [])
+        assertFocused(element("dictionary.results"))
+
+        element("sidebar.library").click()
+        XCTAssertTrue(element("library.cards").waitForExistence(timeout: 3))
+        app.typeKey(.return, modifierFlags: [])
+        assertFocused(element("library.cards"))
+        XCTAssertTrue(waitUntil { self.app.buttons["library.edit-card"].label == "Edit notes for Haus" })
+
+        app.staticTexts["lernen"].click()
+        XCTAssertTrue(waitUntil { self.app.buttons["library.edit-card"].label == "Edit notes for lernen" })
+        element("sidebar.library").click()
+        app.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(waitUntil { self.app.buttons["library.edit-card"].label == "Edit notes for Haus" })
+
+        element("library.new-list").click()
+        let listName = app.textFields["list-editor.name"]
+        XCTAssertTrue(listName.waitForExistence(timeout: 3))
+        listName.typeText("Empty List")
+        app.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(app.staticTexts["No saved entries"].waitForExistence(timeout: 3))
+        element("sidebar.library").click()
+        app.typeKey(.return, modifierFlags: [])
+        assertFocused(app.textFields["library.search"])
+
+        element("sidebar.sentences").click()
+        XCTAssertTrue(element("sentences.list").waitForExistence(timeout: 3))
+        app.typeKey(.return, modifierFlags: [])
+        assertFocused(element("sentences.list"))
+        XCTAssertTrue(
+            app.descendants(matching: .any)
+                .matching(NSPredicate(
+                    format: "identifier BEGINSWITH %@",
+                    "sentences.inspector.generated."
+                ))
+                .firstMatch
+                .waitForExistence(timeout: 3)
+        )
+
+        let generatedRows = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "sentences.generated.")
+        )
+        let savedRows = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "sentences.saved.")
+        )
+        XCTAssertGreaterThan(generatedRows.count, 0)
+        app.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(waitUntil { generatedRows.count == 0 && savedRows.count > 0 })
+
+        element("sidebar.sentences").click()
+        app.typeKey(.return, modifierFlags: [])
+        assertFocused(element("sentences.list"))
+        XCTAssertTrue(
+            app.descendants(matching: .any)
+                .matching(NSPredicate(
+                    format: "identifier BEGINSWITH %@",
+                    "sentences.inspector.saved."
+                ))
+                .firstMatch
+                .waitForExistence(timeout: 3)
+        )
+
+        let visibleSavedRowIDs = {
+            Set(savedRows.allElementsBoundByIndex.map(\.identifier))
+        }
+        while !visibleSavedRowIDs().isEmpty {
+            let previousRows = visibleSavedRowIDs()
+            app.typeKey(.delete, modifierFlags: [])
+            XCTAssertTrue(waitUntil { visibleSavedRowIDs() != previousRows })
+        }
+        element("sidebar.sentences").click()
+        app.typeKey(.return, modifierFlags: [])
+        assertFocused(app.textFields["sentences.style"])
+
+        for route in ["review", "settings"] {
+            element("sidebar.\(route)").click()
+            assertFocused(sidebar)
+            app.typeKey(.return, modifierFlags: [])
+            assertFocused(sidebar)
+        }
     }
 
     func testCommandNOnlyCreatesAListInMyWords() {
@@ -231,6 +325,33 @@ final class Lang4SelfUITests: XCTestCase {
         XCTAssertTrue(app.buttons["dictionary.add-selected"].waitForExistence(timeout: 3))
     }
 
+    func testVoiceSearchCyclesRecognitionAlternativesAndShowsConfidence() {
+        let initialTextSearchCenterY = app.textFields["dictionary.search"].frame.midY
+        let voiceButton = app.buttons["dictionary.voice-search"]
+        voiceButton.click()
+        voiceButton.click()
+
+        let transcription = element("dictionary.voice-transcription")
+        let confidence = element("dictionary.voice-confidence")
+        XCTAssertTrue(transcription.waitForExistence(timeout: 3))
+        XCTAssertEqual(elementText(transcription), "Der Hund")
+        XCTAssertEqual(elementText(confidence), "1 of 3 · 96% confidence")
+        XCTAssertEqual(
+            app.textFields["dictionary.search"].frame.midY,
+            initialTextSearchCenterY,
+            accuracy: 0.5,
+            "Showing a recognition result changed the speech panel height"
+        )
+
+        app.typeKey(.rightArrow, modifierFlags: [])
+        XCTAssertTrue(waitUntil {
+            self.elementText(transcription) == "Die Hunde"
+                && self.elementText(confidence) == "2 of 3 · 78% confidence"
+        })
+        app.typeKey(.leftArrow, modifierFlags: [])
+        XCTAssertTrue(waitUntil { self.elementText(transcription) == "Der Hund" })
+    }
+
     func testEntryDetailFoldsAdditionalEnglishAndRussianTranslations() {
         app.typeKey("f", modifierFlags: .command)
         app.typeText("Mädchen")
@@ -261,7 +382,9 @@ final class Lang4SelfUITests: XCTestCase {
         let detail = element("entry.detail")
         XCTAssertTrue(detail.waitForExistence(timeout: 3))
         XCTAssertTrue(detail.staticTexts["ich"].exists)
-        XCTAssertTrue(detail.staticTexts["I; me"].exists)
+        XCTAssertTrue(detail.staticTexts["I"].exists)
+        XCTAssertTrue(detail.staticTexts["me"].exists)
+        XCTAssertFalse(detail.staticTexts["I; me"].exists)
         XCTAssertFalse(detail.staticTexts["German"].exists)
         XCTAssertFalse(detail.staticTexts["Translations"].exists)
     }
@@ -390,6 +513,66 @@ final class Lang4SelfUITests: XCTestCase {
         XCTAssertTrue(app.buttons["review.reveal"].exists)
     }
 
+    func testReviewCyclesTranslationsAndLanguagesWithArrowKeys() {
+        func text(of element: XCUIElement) -> String {
+            if let value = element.value as? String, !value.isEmpty { return value }
+            return element.label
+        }
+
+        app.typeKey("f", modifierFlags: .command)
+        app.typeText("Mädchen")
+        let addButton = app.buttons["dictionary.add-selected"]
+        XCTAssertTrue(addButton.waitForExistence(timeout: 3))
+        addButton.click()
+        XCTAssertTrue(app.buttons["banner.dismiss"].waitForExistence(timeout: 3))
+
+        openRoute("2", route: "review")
+        for translation in ["house", "to learn"] {
+            XCTAssertTrue(waitUntil {
+                text(of: self.element("review.translation.current")) == translation
+            })
+            app.typeKey(.space, modifierFlags: [])
+            XCTAssertTrue(app.buttons["review.rating.4"].waitForExistence(timeout: 3))
+            app.typeKey("4", modifierFlags: [])
+            XCTAssertTrue(app.buttons["review.reveal"].waitForExistence(timeout: 3))
+        }
+
+        let currentTranslation = element("review.translation.current")
+        let currentLanguage = element("review.language.current")
+        XCTAssertTrue(waitUntil { text(of: currentTranslation) == "chick" })
+        XCTAssertTrue(waitUntil { text(of: currentLanguage) == "ENGLISH" })
+        let previousTranslation = element("review.translation.previous")
+        XCTAssertTrue(previousTranslation.waitForExistence(timeout: 3))
+        XCTAssertEqual(text(of: previousTranslation), "girl")
+        let nextTranslation = element("review.translation.next")
+        XCTAssertTrue(nextTranslation.waitForExistence(timeout: 3))
+        XCTAssertEqual(text(of: nextTranslation), "chit")
+        XCTAssertTrue(element("review.translation.language-next").waitForExistence(timeout: 3))
+
+        app.typeKey(.rightArrow, modifierFlags: [])
+        XCTAssertTrue(waitUntil {
+            text(of: currentTranslation) == "chit"
+                && text(of: self.element("review.translation.previous")) == "chick"
+                && text(of: self.element("review.translation.next")) == "colleen"
+        })
+
+        app.typeKey(.downArrow, modifierFlags: [])
+        XCTAssertTrue(waitUntil {
+            text(of: currentLanguage) == "RUSSIAN" && text(of: currentTranslation) == "девочка"
+        })
+        XCTAssertEqual(text(of: element("review.translation.language-previous")), "English: chit")
+        XCTAssertEqual(text(of: element("review.translation.language-next")), "English: chit")
+
+        app.typeKey(.rightArrow, modifierFlags: [])
+        XCTAssertTrue(waitUntil { text(of: currentTranslation) == "девушка" })
+        app.typeKey(.upArrow, modifierFlags: [])
+        XCTAssertTrue(waitUntil {
+            text(of: currentLanguage) == "ENGLISH" && text(of: currentTranslation) == "chit"
+        })
+        app.typeKey(.leftArrow, modifierFlags: [])
+        XCTAssertTrue(waitUntil { text(of: currentTranslation) == "chick" })
+    }
+
     func testReviewListScopeCompletionAndRestart() {
         openRoute("2", route: "review")
 
@@ -440,13 +623,11 @@ final class Lang4SelfUITests: XCTestCase {
         waitForUIToSettle()
 
         app.typeKey(.return, modifierFlags: [])
-        let germanField = app.textFields["card-editor.german"]
-        XCTAssertTrue(germanField.waitForExistence(timeout: 3))
-        assertFocused(germanField)
-        app.typeKey("a", modifierFlags: .command)
-        app.typeText("Edited Haus")
+        let notesField = app.textFields["card-editor.notes"]
+        XCTAssertTrue(notesField.waitForExistence(timeout: 3))
+        assertFocused(notesField)
         app.typeKey(.escape, modifierFlags: [])
-        XCTAssertTrue(germanField.waitForNonExistence(timeout: 3))
+        XCTAssertTrue(notesField.waitForNonExistence(timeout: 3))
 
         app.typeKey("n", modifierFlags: .command)
         let nameField = app.textFields["list-editor.name"]
@@ -475,48 +656,33 @@ final class Lang4SelfUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Haus"].waitForExistence(timeout: 3))
     }
 
-    func testCardEditorSaveFieldsPickersAndListMembershipActions() {
+    func testCardEditorOnlyEditsNotesAndSupportsListMembershipActions() {
         openLibrary()
 
-        app.typeKey(.return, modifierFlags: [])
-        let german = app.textFields["card-editor.german"]
-        XCTAssertTrue(german.waitForExistence(timeout: 3))
-        assertFocused(german)
-        app.typeKey("a", modifierFlags: .command)
-        app.typeText("Saved Haus")
-
-        app.typeKey(.tab, modifierFlags: [])
-        let translations = app.textFields["card-editor.translations"]
-        assertFocused(translations)
-        app.typeKey(.tab, modifierFlags: .shift)
-        assertFocused(german)
-        app.typeKey(.tab, modifierFlags: [])
-        app.typeKey("a", modifierFlags: .command)
-        app.typeText("saved house")
-
-        app.textFields["card-editor.tags"].click()
-        app.typeText("ui-test")
-        app.textFields["card-editor.notes"].click()
+        let editNotes = app.buttons["library.edit-card"]
+        XCTAssertTrue(editNotes.waitForExistence(timeout: 3))
+        editNotes.click()
+        let notes = app.textFields["card-editor.notes"]
+        XCTAssertTrue(notes.waitForExistence(timeout: 3))
+        assertFocused(notes)
+        XCTAssertFalse(app.textFields["card-editor.german"].exists)
+        XCTAssertFalse(app.textFields["card-editor.translations"].exists)
+        XCTAssertFalse(app.textFields["card-editor.tags"].exists)
+        XCTAssertFalse(element("card-editor.kind").exists)
+        XCTAssertFalse(element("card-editor.gender").exists)
         app.typeText("Edited entirely from the keyboard")
-        element("card-editor.kind").click()
-        app.menuItems["Phrase"].click()
-        element("card-editor.gender").click()
-        app.menuItems["das"].click()
 
         app.buttons["card-editor.save"].click()
-        XCTAssertTrue(german.waitForNonExistence(timeout: 3))
-        let savedHaus = app.staticTexts.matching(
-            NSPredicate(format: "value CONTAINS %@", "Saved Haus")
-        ).firstMatch
-        XCTAssertTrue(savedHaus.waitForExistence(timeout: 3))
+        XCTAssertTrue(notes.waitForNonExistence(timeout: 3))
+        XCTAssertTrue(element("library.card-notes").waitForExistence(timeout: 3))
+        XCTAssertEqual(elementText(element("library.card-notes")), "Edited entirely from the keyboard")
         assertFocused(element("library.cards"))
         waitForUIToSettle()
 
-        element("library.cards").click()
-        app.typeKey(.upArrow, modifierFlags: [])
+        app.staticTexts["lernen"].click()
         XCTAssertTrue(
-            waitUntil { self.app.buttons["library.edit-card"].label == "Edit lernen" },
-            "Up Arrow did not select the previous card"
+            waitUntil { self.app.buttons["library.edit-card"].label == "Edit notes for lernen" },
+            "Selecting lernen did not update the detail"
         )
         element("library.more-actions").click()
         app.menuItems["Add to List"].click()
@@ -634,6 +800,7 @@ final class Lang4SelfUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Das Haus hat ein rotes Dach."].waitForExistence(timeout: 3))
         XCTAssertTrue(app.staticTexts["Der Zug kommt pünktlich an."].waitForExistence(timeout: 3), "Stepper did not increase generation count")
         XCTAssertEqual(app.checkBoxes.count, 6)
+        assertFocused(element("sentences.list"))
     }
 
     func testDetachedSeparablePrefixShowsTheWholeVerbTranslation() {
@@ -642,11 +809,31 @@ final class Lang4SelfUITests: XCTestCase {
         let sentence = app.staticTexts["Das Blatt fällt ab."]
         XCTAssertTrue(sentence.waitForExistence(timeout: 3))
         sentence.click()
+
+        let initialTokenCenters = (0...3).map { index in
+            let frame = app.buttons["sentence.token.\(index)"].frame
+            return CGPoint(x: frame.midX, y: frame.midY)
+        }
         app.buttons["sentence.token.3"].click()
 
         XCTAssertTrue(app.buttons["sentence.token.2"].isSelected)
         XCTAssertTrue(app.buttons["sentence.token.3"].isSelected)
         XCTAssertTrue(app.staticTexts["to fall off"].waitForExistence(timeout: 3))
+        for index in 0...3 {
+            let frame = app.buttons["sentence.token.\(index)"].frame
+            XCTAssertEqual(
+                frame.midX,
+                initialTokenCenters[index].x,
+                accuracy: 0.5,
+                "Selecting another word moved a token horizontally"
+            )
+            XCTAssertEqual(
+                frame.midY,
+                initialTokenCenters[index].y,
+                accuracy: 0.5,
+                "Selecting another word moved a token vertically"
+            )
+        }
 
         app.buttons["sentence.token.0"].click()
         XCTAssertTrue(waitUntil {
@@ -692,9 +879,9 @@ final class Lang4SelfUITests: XCTestCase {
         app.menuItems["UI Test Model — 1B · 1 GB"].click()
 
         element("settings.context-window").click()
-        app.menuItems["32,768 tokens"].click()
+        app.menuItems["262,144 tokens"].click()
         element("settings.max-output").click()
-        app.menuItems["8,192 tokens"].click()
+        app.menuItems["16,384 tokens"].click()
 
         let temperature = element("settings.temperature")
         let topP = element("settings.top-p")
@@ -752,6 +939,11 @@ final class Lang4SelfUITests: XCTestCase {
 
     private func element(_ identifier: String) -> XCUIElement {
         app.descendants(matching: .any).matching(identifier: identifier).firstMatch
+    }
+
+    private func elementText(_ element: XCUIElement) -> String {
+        if let value = element.value as? String, !value.isEmpty { return value }
+        return element.label
     }
 
     private func assertFocused(

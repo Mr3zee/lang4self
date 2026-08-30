@@ -137,12 +137,15 @@ final class AppState: ObservableObject {
     @Published private(set) var cards: [PersonalCard] = []
     @Published private(set) var dueCards: [PersonalCard] = []
     @Published private(set) var reviewCards: [PersonalCard] = []
+    @Published private(set) var reviewDictionaryMeanings: [DictionaryMeaning] = []
+    @Published private(set) var reviewDictionaryMeaningsCardID: PersonalCard.ID?
     @Published private(set) var isReviewingAll = false
     @Published private(set) var stats = StudyStats()
     @Published private(set) var dictionaryCount = 0
     @Published private(set) var hasCompleteDictionary = false
     @Published private(set) var installedTranslationLanguages: Set<TranslationLanguage> = []
     @Published private(set) var explanationCount = 0
+    @Published private(set) var isBootstrapComplete = false
     @Published private(set) var importProgress: ImportProgress?
     @Published private(set) var isImporting = false
     @Published private(set) var explanationImportProgress: ExplanationImportProgress?
@@ -167,6 +170,7 @@ final class AppState: ObservableObject {
     private var searchTask: Task<Void, Never>?
     private var searchGeneration = UUID()
     private var libraryTask: Task<Void, Never>?
+    private var reviewDictionaryTask: Task<Void, Never>?
     private var sentenceGenerationTask: Task<Void, Never>?
     private var bannerDismissTask: Task<Void, Never>?
     private var hasBootstrapped = false
@@ -181,6 +185,7 @@ final class AppState: ObservableObject {
 
     var selectedWordList: WordList? { wordLists.first { $0.id == selectedListID } }
     var databaseURL: URL { store.databaseURL }
+    var isUITestSession: Bool { isUITesting }
 
     init(
         store: any AppDataStore,
@@ -211,6 +216,7 @@ final class AppState: ObservableObject {
     func bootstrap() async {
         guard !hasBootstrapped else { return }
         hasBootstrapped = true
+        defer { isBootstrapComplete = true }
         do {
             try await store.seedStarterDictionaryIfNeeded()
             if isUITesting { try await seedUITestDataIfNeeded() }
@@ -560,6 +566,47 @@ final class AppState: ObservableObject {
         }
     }
 
+    func prepareReviewTranslations(for card: PersonalCard?) {
+        reviewDictionaryTask?.cancel()
+        reviewDictionaryTask = nil
+        reviewDictionaryMeaningsCardID = card?.id
+        reviewDictionaryMeanings = card?.resolvedMeanings ?? []
+        guard let card else { return }
+        guard card.meanings == nil else { return }
+
+        reviewDictionaryTask = Task {
+            do {
+                let entry = try await reviewDictionaryEntry(for: card)
+                guard !Task.isCancelled,
+                      reviewDictionaryMeaningsCardID == card.id,
+                      reviewCards.first?.id == card.id
+                else { return }
+                reviewDictionaryMeanings = entry?.meanings ?? []
+                reviewDictionaryTask = nil
+            } catch is CancellationError {
+            } catch {
+                guard !Task.isCancelled, reviewDictionaryMeaningsCardID == card.id else { return }
+                reviewDictionaryTask = nil
+            }
+        }
+    }
+
+    func stopPreparingReviewTranslations() {
+        reviewDictionaryTask?.cancel()
+        reviewDictionaryTask = nil
+    }
+
+    private func reviewDictionaryEntry(for card: PersonalCard) async throws -> DictionaryEntry? {
+        if let id = card.dictionaryEntryID,
+           let entry = try await store.dictionaryEntry(id: id) {
+            return entry
+        }
+        let normalizedGerman = DictCCParser.normalized(card.german)
+        return try await store.searchDictionary(card.german, limit: 20).first {
+            $0.kind == card.kind && DictCCParser.normalized($0.german) == normalizedGerman
+        }
+    }
+
     func showDueReviews() {
         isReviewingAll = false
         let listID = selectedListID
@@ -840,6 +887,7 @@ final class AppState: ObservableObject {
                         kind: card.kind,
                         gender: card.gender,
                         source: "My words",
+                        meanings: card.resolvedMeanings,
                         forms: card.forms
                     ))
                 }
