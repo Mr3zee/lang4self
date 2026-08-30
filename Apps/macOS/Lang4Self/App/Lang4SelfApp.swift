@@ -222,8 +222,9 @@ private struct Lang4SelfCommands: Commands {
             notification = .focusDictionarySearch
         }
 
-        // Wait until the destination view is mounted before moving focus.
-        DispatchQueue.main.async {
+        // Route changes mount their destination asynchronously. A short delay
+        // prevents the notification from racing the new view on slower Macs.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
             NotificationCenter.default.post(name: notification, object: nil)
         }
     }

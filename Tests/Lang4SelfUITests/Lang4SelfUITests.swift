@@ -485,8 +485,8 @@ final class Lang4SelfUITests: XCTestCase {
         app.typeKey(.escape, modifierFlags: [])
         XCTAssertTrue(app.buttons["settings.import-explanations"].waitForExistence(timeout: 3))
 
-        app.scrollViews.firstMatch.swipeUp()
         let model = element("settings.model")
+        scrollToHittable(model, in: app.scrollViews.firstMatch)
         model.click()
         app.menuItems["UI Test Model — 1B · 1 GB"].click()
 
@@ -580,6 +580,14 @@ final class Lang4SelfUITests: XCTestCase {
         attachment.name = name
         attachment.lifetime = .keepAlways
         add(attachment)
+    }
+
+    private func scrollToHittable(_ element: XCUIElement, in scrollView: XCUIElement) {
+        for _ in 0..<4 where !element.isHittable {
+            scrollView.swipeUp()
+            waitForUIToSettle()
+        }
+        XCTAssertTrue(element.isHittable, "Could not scroll \(element) into view")
     }
 
     @discardableResult
