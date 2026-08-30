@@ -272,8 +272,10 @@ final class Lang4SelfUITests: XCTestCase {
         XCTAssertEqual(newList.frame.height, listPicker.frame.height, accuracy: 1)
 
         app.typeKey("f", modifierFlags: .command)
+        let librarySearch = app.textFields["library.search"]
+        assertFocused(librarySearch, timeout: 5)
         app.typeText("Haus")
-        XCTAssertEqual(app.textFields["library.search"].value as? String, "Haus")
+        XCTAssertEqual(librarySearch.value as? String, "Haus")
         app.typeKey(.escape, modifierFlags: [])
         XCTAssertEqual(app.textFields["library.search"].value as? String, "")
 
