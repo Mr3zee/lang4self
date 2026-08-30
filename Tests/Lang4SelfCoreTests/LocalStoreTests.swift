@@ -192,6 +192,38 @@ final class LocalStoreTests: XCTestCase {
         XCTAssertEqual(results.first?.gender, .feminine)
     }
 
+    func testSmartGermanSearchPrefersBaseWordsForSpeechForms() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixture = directory.appendingPathComponent("dict.txt")
+        try """
+        Hund {m}\tdog
+        Hunde {pl}\tdogs
+        Hundedermatologie {f}\tcanine dermatology
+        Familie der Hunde {f}\tcanidae
+        lernen {vt}\tto learn
+        fallen {vi}\tto fall
+        ab|fallen {vi}\tto drop off
+        """.write(to: fixture, atomically: true, encoding: .utf8)
+        let store = try LocalStore(url: directory.appendingPathComponent("test.sqlite3"))
+        _ = try await store.importDictionary(from: fixture)
+
+        let withArticle = try await store.searchDictionary("Der Hund")
+        let plural = try await store.searchDictionary("Hunde")
+        let conjugated = try await store.searchDictionary("lernt")
+        let irregular = try await store.searchDictionary("fällt")
+        let separated = try await store.searchDictionary("fällt ab")
+        let participle = try await store.searchDictionary("abgefallen")
+        XCTAssertEqual(withArticle.first?.german, "Hund")
+        XCTAssertEqual(withArticle.first.map(GermanMorphology.pluralForms), ["Hunde"])
+        XCTAssertEqual(plural.first?.german, "Hund")
+        XCTAssertEqual(conjugated.first?.german, "lernen")
+        XCTAssertEqual(irregular.first?.german, "fallen")
+        XCTAssertEqual(separated.first?.german, "abfallen")
+        XCTAssertEqual(participle.first?.german, "abfallen")
+    }
+
     func testAutoDetectsEnglishFirstFile() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

@@ -579,6 +579,38 @@ final class AppState: ObservableObject {
         }
     }
 
+    func sentenceGenders(for tokens: [SentenceToken]) async -> [Int: Gender] {
+        var result: [Int: Gender] = [:]
+        var resolved: [String: Gender] = [:]
+        for token in tokens where token.lookupTerm.first?.isUppercase == true
+            && !GermanMorphology.isDeterminer(token.lookupTerm) {
+            let key = SentenceTokenizer.normalized(token.lookupTerm)
+            if let gender = resolved[key] {
+                if gender != .unknown { result[token.index] = gender }
+                continue
+            }
+
+            do {
+                let gender: Gender
+                if let cardID = token.cardID,
+                   let card = try await store.personalCard(id: cardID),
+                   card.kind == .noun {
+                    gender = card.gender
+                } else {
+                    let entries = try await store.searchDictionary(token.lookupTerm, limit: 8)
+                    gender = entries.first(where: {
+                        $0.kind == .noun && $0.gender != .unknown
+                    })?.gender ?? .unknown
+                }
+                resolved[key] = gender
+                if gender != .unknown { result[token.index] = gender }
+            } catch {
+                resolved[key] = .unknown
+            }
+        }
+        return result
+    }
+
     func refreshStudyData() async {
         let listID = selectedListID
         do {

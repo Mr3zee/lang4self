@@ -112,7 +112,11 @@ struct SentencesView: View {
                             .accessibilityLabel("Include generated sentence when saving")
                             .accessibilityIdentifier("sentences.include.\(sentence.id.uuidString)")
 
-                            SentenceRow(german: sentence.german, translation: sentence.translation)
+                            SentenceRow(
+                                german: sentence.german,
+                                translation: sentence.translation,
+                                tokens: sentence.tokens
+                            )
                         }
                         .tag(SentenceSelection.generated(sentence.id))
                     }
@@ -128,6 +132,7 @@ struct SentencesView: View {
                         SentenceRow(
                             german: sentence.german,
                             translation: sentence.translation,
+                            tokens: sentence.tokens,
                             footnote: sentence.sourceListName
                         )
                         .tag(SentenceSelection.saved(sentence.id))
@@ -230,11 +235,14 @@ private struct SentencePresentation: Identifiable {
 private struct SentenceRow: View {
     let german: String
     let translation: String
+    let tokens: [SentenceToken]
     var footnote: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
-            Text(german).fontWeight(.medium).lineLimit(2)
+            GermanSentenceText(german: german, tokens: tokens)
+                .fontWeight(.medium)
+                .lineLimit(2)
             Text(translation).font(.subheadline).foregroundStyle(.secondary).lineLimit(2)
             if let footnote {
                 Label(footnote, systemImage: "list.bullet")
@@ -254,6 +262,7 @@ private struct SentenceInspector: View {
     @State private var entries: [DictionaryEntry] = []
     @State private var selectedEntryIndex = 0
     @State private var isLookingUp = false
+    @State private var tokenGenders: [Int: Gender] = [:]
     @FocusState private var focusedTokenIndex: Int?
 
     private var selectedToken: SentenceToken? {
@@ -289,6 +298,7 @@ private struct SentenceInspector: View {
                         } label: {
                             Text(token.surface)
                                 .font(.title2.weight(offset == selectedTokenIndex ? .semibold : .regular))
+                                .foregroundStyle(tokenGenders[token.index]?.color ?? .primary)
                                 .padding(.horizontal, 7)
                                 .padding(.vertical, 5)
                                 .background(
@@ -329,7 +339,11 @@ private struct SentenceInspector: View {
                     if entries.count > 1 {
                         Picker("Translation card", selection: $selectedEntryIndex) {
                             ForEach(entries.indices, id: \.self) { index in
-                                Text(entries[index].german + " — " + entries[index].english).tag(index)
+                                HStack {
+                                    GermanWordView(entry: entries[index], font: .body)
+                                    Text("— " + entries[index].english)
+                                }
+                                .tag(index)
                             }
                         }
                         .pickerStyle(.menu)
@@ -349,6 +363,9 @@ private struct SentenceInspector: View {
             entries = foundEntries
             selectedEntryIndex = 0
             isLookingUp = false
+        }
+        .task(id: sentence.tokens) {
+            tokenGenders = await state.sentenceGenders(for: sentence.tokens)
         }
         .onAppear {
             selectedTokenIndex = 0

@@ -43,4 +43,29 @@ final class DictCCParserTests: XCTestCase {
         XCTAssertEqual(entry.kind, .verb)
         XCTAssertEqual(entry.meanings.first?.language, .russian)
     }
+
+    func testNounInfoSeparatesPluralFormsFromUsageNotes() throws {
+        let dog = try XCTUnwrap(DictCCParser.parse(line: "Hund {m} [Hunde]\tdog"))
+        let mother = try XCTUnwrap(DictCCParser.parse(line: "Mutter {f} [Mütter]\tmother"))
+        let technicalTerm = try XCTUnwrap(DictCCParser.parse(
+            line: "Hundedermatologie {f} [auch: Hunde-Dermatologie]\tcanine dermatology"
+        ))
+
+        XCTAssertEqual(GermanMorphology.pluralForms(for: dog), ["Hunde"])
+        XCTAssertEqual(GermanMorphology.pluralForms(for: mother), ["Mütter"])
+        let dogRows = GermanMorphology.info(for: dog).rows
+        XCTAssertEqual(dogRows.map(\.label), ["Article / gender", "Singular", "Plural"])
+        XCTAssertEqual(dogRows.map(\.value), ["der", "Hund", "Hunde"])
+        XCTAssertTrue(GermanMorphology.pluralForms(for: technicalTerm).isEmpty)
+        XCTAssertEqual(GermanMorphology.info(for: technicalTerm).rows.last?.label, "Usage")
+    }
+
+    func testLookupTermsIncludeArticlesInflectionsAndSeparatedPrefixes() {
+        XCTAssertTrue(GermanMorphology.lookupTerms(for: "Der Hund").contains("hund"))
+        XCTAssertTrue(GermanMorphology.lookupTerms(for: "Hunde").contains("hund"))
+        XCTAssertTrue(GermanMorphology.lookupTerms(for: "lernt").contains("lernen"))
+        XCTAssertTrue(GermanMorphology.lookupTerms(for: "fällt").contains("fallen"))
+        XCTAssertTrue(GermanMorphology.lookupTerms(for: "fällt ab").contains("abfallen"))
+        XCTAssertTrue(GermanMorphology.lookupTerms(for: "abgefallen").contains("abfallen"))
+    }
 }

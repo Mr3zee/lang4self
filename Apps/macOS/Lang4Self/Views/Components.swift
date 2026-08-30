@@ -4,10 +4,9 @@ import Lang4SelfCore
 extension Gender {
     var color: Color {
         switch self {
-        case .masculine: .blue
-        case .feminine: .pink
-        case .neuter: .green
-        case .plural: .orange
+        case .masculine: Color(red: 0.38, green: 0.68, blue: 1.0)
+        case .feminine, .plural: Color(red: 1.0, green: 0.52, blue: 0.68)
+        case .neuter: .yellow
         case .unknown: .secondary
         }
     }
@@ -76,13 +75,46 @@ struct GermanWordView: View {
                     .fontWeight(.semibold)
             }
             if let parts = GermanMorphology.separableParts(for: entry) {
-                (Text(parts.prefix).foregroundStyle(.tint).underline() + Text(parts.stem))
+                (Text(parts.prefix).fontWeight(.semibold)
+                    + Text("·").foregroundStyle(.secondary)
+                    + Text(parts.stem))
             } else {
                 Text(entry.german)
+                    .foregroundStyle(
+                        entry.kind == .noun && entry.gender != .unknown ? entry.gender.color : .primary
+                    )
             }
         }
         .font(font)
         .textSelection(.enabled)
+    }
+}
+
+struct GermanSentenceText: View {
+    @EnvironmentObject private var state: AppState
+    let german: String
+    let tokens: [SentenceToken]
+    @State private var genders: [Int: Gender] = [:]
+
+    var body: some View {
+        styledText
+            .accessibilityLabel(german)
+            .task(id: tokens) {
+                genders = await state.sentenceGenders(for: tokens)
+            }
+    }
+
+    private var styledText: Text {
+        guard !tokens.isEmpty else { return Text(german) }
+        return tokens.enumerated().reduce(Text("")) { text, item in
+            let (offset, token) = item
+            let prefix = offset == 0 ? "" : " "
+            var segment = Text(prefix + token.surface)
+            if let gender = genders[token.index] {
+                segment = segment.foregroundColor(gender.color)
+            }
+            return text + segment
+        }
     }
 }
 
@@ -179,7 +211,7 @@ struct EntryDetailView: View {
                 }
 
                 if info.separablePrefix != nil {
-                    Label("The blue underlined prefix separates in a main clause.", systemImage: "link.badge.plus")
+                    Label("The middle dot marks a prefix that separates in a main clause.", systemImage: "arrow.left.and.right")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 }
@@ -281,10 +313,20 @@ struct EntryDetailView: View {
                         .gridColumnAlignment(.trailing)
                     Text(row.value)
                         .fontWeight(.medium)
+                        .foregroundStyle(infoColor(for: row))
                         .textSelection(.enabled)
                 }
             }
         }
+    }
+
+    private func infoColor(for row: WordInfo.Row) -> Color {
+        guard entry.kind == .noun else { return .primary }
+        if row.label == "Plural" { return Gender.plural.color }
+        if (row.label == "Singular" || row.label == "Article / gender"), entry.gender != .unknown {
+            return entry.gender.color
+        }
+        return .primary
     }
 
     private var adjectiveScale: some View {

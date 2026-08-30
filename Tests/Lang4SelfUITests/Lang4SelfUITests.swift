@@ -154,6 +154,8 @@ final class Lang4SelfUITests: XCTestCase {
         let results = element("speak.results")
         XCTAssertTrue(results.waitForExistence(timeout: 3))
         assertFocused(results)
+        XCTAssertTrue(app.staticTexts["Hund"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.staticTexts["Hunde"].waitForExistence(timeout: 3))
         XCTAssertTrue(app.staticTexts["Part of speech: Noun"].firstMatch.exists)
         app.typeKey(.return, modifierFlags: [])
         XCTAssertTrue(app.buttons["banner.dismiss"].waitForExistence(timeout: 3))

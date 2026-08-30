@@ -142,6 +142,7 @@ public actor LocalStore {
         guard try dictionaryCount() == 0 else { return }
         let starter = [
             "Haus {n}\thouse", "Frau {f}\twoman", "Mann {m}\tman", "Kind {n}\tchild",
+            "Hund {m}\tdog", "Hunde {pl}\tdogs",
             "Zeit {f}\ttime", "Tag {m}\tday", "Wasser {n}\twater", "Buch {n}\tbook",
             "Stadt {f}\tcity", "Sprache {f}\tlanguage", "gut {adj}\tgood", "groß {adj}\tbig",
             "klein {adj}\tsmall", "neu {adj}\tnew", "alt {adj}\told", "sein {vi}\tto be",
@@ -175,8 +176,36 @@ public actor LocalStore {
     }
 
     public func searchDictionary(_ query: String, limit: Int = 80) throws -> [DictionaryEntry] {
-        let normalized = DictCCParser.normalized(query)
-        guard !normalized.isEmpty, limit > 0 else { return [] }
+        let lookupTerms = GermanMorphology.lookupTerms(for: query)
+        guard !lookupTerms.isEmpty, limit > 0 else { return [] }
+        var hitsByGroup: [DictionaryGroupKey: DictionarySearchHit] = [:]
+        var ordinal = 0
+        for (termIndex, term) in lookupTerms.prefix(16).enumerated() {
+            for entry in try dictionaryMatches(for: term, limit: limit) {
+                let key = DictionaryGroupKey(entry)
+                let hit = DictionarySearchHit(
+                    entry: entry,
+                    preference: searchPreference(
+                        for: entry,
+                        literalTerm: lookupTerms[0],
+                        lookupTerms: lookupTerms
+                    ),
+                    termIndex: termIndex,
+                    ordinal: ordinal
+                )
+                ordinal += 1
+                if let existing = hitsByGroup[key], existing.sortsBefore(hit) { continue }
+                hitsByGroup[key] = hit
+            }
+        }
+
+        let representatives = hitsByGroup.values
+            .sorted { $0.sortsBefore($1) }
+            .prefix(limit)
+        return try representatives.map { try dictionaryGroup(representedBy: $0.entry) }
+    }
+
+    private func dictionaryMatches(for normalized: String, limit: Int) throws -> [DictionaryEntry] {
         let tokens = normalized
             .split(whereSeparator: { $0.isWhitespace })
             .map { "\"\($0.replacingOccurrences(of: "\"", with: "\"\""))\"*" }
@@ -205,12 +234,23 @@ public actor LocalStore {
         let requestedLimit = Int32(clamping: limit)
         let candidateLimit = requestedLimit > Int32.max / 8 ? Int32.max : requestedLimit * 8
         sqlite3_bind_int(statement, 4, candidateLimit)
-        let matches = try readEntries(statement)
-        var seen = Set<DictionaryGroupKey>()
-        let representatives = matches.filter { entry in
-            seen.insert(DictionaryGroupKey(entry)).inserted
-        }.prefix(limit)
-        return try representatives.map { try dictionaryGroup(representedBy: $0) }
+        return try readEntries(statement)
+    }
+
+    private func searchPreference(
+        for entry: DictionaryEntry,
+        literalTerm: String,
+        lookupTerms: [String]
+    ) -> Int {
+        let german = DictCCParser.normalized(entry.german)
+        guard let exactIndex = lookupTerms.firstIndex(of: german) else { return 10 }
+        let isBaseForm = entry.kind == .verb
+            || (entry.kind == .noun && entry.gender != .plural && entry.gender != .unknown)
+        if exactIndex > 0, isBaseForm { return 0 }
+        if german == literalTerm, entry.gender != .plural { return 0 }
+        if isBaseForm { return 1 }
+        if german == literalTerm { return 2 }
+        return 3
     }
 
     @discardableResult
@@ -878,6 +918,7 @@ public actor LocalStore {
             if !result.contains(source) { result.append(source) }
         }
         let explanations = try dictionaryExplanations(for: canonical)
+        let pluralForms = try dictionaryPluralForms(for: canonical)
         let allSources = explanations.reduce(into: sources) { result, explanation in
             if !result.contains(explanation.source) { result.append(explanation.source) }
         }
@@ -892,9 +933,32 @@ public actor LocalStore {
             gender: genders.count == 1 ? canonical.gender : .unknown,
             usage: usages.count == 1 ? canonical.usage : nil,
             source: allSources.joined(separator: ", "),
+            pluralForms: pluralForms,
             meanings: meanings,
             explanations: explanations
         )
+    }
+
+    private func dictionaryPluralForms(for entry: DictionaryEntry) throws -> [String] {
+        guard entry.kind == .noun, entry.gender != .plural else { return [] }
+        let statement = try prepare("""
+            SELECT id, german, english, raw_german, raw_english,
+                   kind, gender, usage, source, translation_language,
+                   explanation
+            FROM dictionary_entries
+            WHERE kind = 'noun' AND gender = 'plural'
+              AND normalized_german LIKE ? ESCAPE '\\'
+            ORDER BY length(normalized_german), id
+            LIMIT 32
+            """)
+        defer { sqlite3_finalize(statement) }
+        bind(escapedLike(DictCCParser.normalized(entry.german)) + "%", to: 1, in: statement)
+        return try readEntries(statement).reduce(into: [String]()) { forms, candidate in
+            if GermanMorphology.isPluralForm(candidate.german, of: entry.german),
+               !forms.contains(candidate.german) {
+                forms.append(candidate.german)
+            }
+        }
     }
 
     private func dictionaryExplanations(for entry: DictionaryEntry) throws -> [DictionaryExplanation] {
@@ -1071,6 +1135,19 @@ private struct DictionaryGroupKey: Hashable {
     init(_ entry: DictionaryEntry) {
         german = dictionaryGroupingTerm(entry.german)
         kind = entry.kind
+    }
+}
+
+private struct DictionarySearchHit {
+    let entry: DictionaryEntry
+    let preference: Int
+    let termIndex: Int
+    let ordinal: Int
+
+    func sortsBefore(_ other: DictionarySearchHit) -> Bool {
+        if preference != other.preference { return preference < other.preference }
+        if termIndex != other.termIndex { return termIndex < other.termIndex }
+        return ordinal < other.ordinal
     }
 }
 

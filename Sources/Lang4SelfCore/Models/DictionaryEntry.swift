@@ -116,6 +116,7 @@ public struct DictionaryEntry: Identifiable, Hashable, Codable, Sendable {
     public let gender: Gender
     public let usage: String?
     public let source: String
+    public let pluralForms: [String]
     public let meanings: [DictionaryMeaning]
     public let explanations: [DictionaryExplanation]
 
@@ -143,6 +144,7 @@ public struct DictionaryEntry: Identifiable, Hashable, Codable, Sendable {
         gender: Gender = .unknown,
         usage: String? = nil,
         source: String = "dict.cc",
+        pluralForms: [String] = [],
         explanation: String? = nil,
         translationLanguage: TranslationLanguage = .english,
         meanings: [DictionaryMeaning]? = nil,
@@ -165,6 +167,7 @@ public struct DictionaryEntry: Identifiable, Hashable, Codable, Sendable {
         self.gender = gender
         self.usage = usage
         self.source = source
+        self.pluralForms = pluralForms
         self.meanings = resolvedMeanings
         self.explanations = explanations
     }

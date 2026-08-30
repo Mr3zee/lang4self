@@ -38,7 +38,7 @@ final class SpeechRecognizer: NSObject, ObservableObject {
     func start() {
         guard phase != .requestingPermission, phase != .listening else { return }
         if isUITesting {
-            transcription = "Haus"
+            transcription = "Der Hund"
             confidence = 1
             phase = .listening
             return

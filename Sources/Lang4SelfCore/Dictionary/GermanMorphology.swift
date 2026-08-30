@@ -18,6 +18,7 @@ public enum GermanMorphology {
         "nehmen": .init(present: "ich nehme · du nimmst · er/sie nimmt · wir nehmen · ihr nehmt · sie nehmen", past: "nahm", participle: "genommen", auxiliary: "haben"),
         "geben": .init(present: "ich gebe · du gibst · er/sie gibt · wir geben · ihr gebt · sie geben", past: "gab", participle: "gegeben", auxiliary: "haben"),
         "sprechen": .init(present: "ich spreche · du sprichst · er/sie spricht · wir sprechen · ihr sprecht · sie sprechen", past: "sprach", participle: "gesprochen", auxiliary: "haben"),
+        "rufen": .init(present: "ich rufe · du rufst · er/sie ruft · wir rufen · ihr ruft · sie rufen", past: "rief", participle: "gerufen", auxiliary: "haben"),
         "sehen": .init(present: "ich sehe · du siehst · er/sie sieht · wir sehen · ihr seht · sie sehen", past: "sah", participle: "gesehen", auxiliary: "haben"),
         "lesen": .init(present: "ich lese · du liest · er/sie liest · wir lesen · ihr lest · sie lesen", past: "las", participle: "gelesen", auxiliary: "haben"),
         "essen": .init(present: "ich esse · du isst · er/sie isst · wir essen · ihr esst · sie essen", past: "aß", participle: "gegessen", auxiliary: "haben"),
@@ -28,7 +29,10 @@ public enum GermanMorphology {
         "denken": .init(present: "ich denke · du denkst · er/sie denkt · wir denken · ihr denkt · sie denken", past: "dachte", participle: "gedacht", auxiliary: "haben"),
         "wissen": .init(present: "ich weiß · du weißt · er/sie weiß · wir wissen · ihr wisst · sie wissen", past: "wusste", participle: "gewusst", auxiliary: "haben"),
         "tun": .init(present: "ich tue · du tust · er/sie tut · wir tun · ihr tut · sie tun", past: "tat", participle: "getan", auxiliary: "haben"),
-        "stehen": .init(present: "ich stehe · du stehst · er/sie steht · wir stehen · ihr steht · sie stehen", past: "stand", participle: "gestanden", auxiliary: "haben")
+        "stehen": .init(present: "ich stehe · du stehst · er/sie steht · wir stehen · ihr steht · sie stehen", past: "stand", participle: "gestanden", auxiliary: "haben"),
+        "fallen": .init(present: "ich falle · du fällst · er/sie fällt · wir fallen · ihr fallt · sie fallen", past: "fiel", participle: "gefallen", auxiliary: "sein"),
+        "laufen": .init(present: "ich laufe · du läufst · er/sie läuft · wir laufen · ihr lauft · sie laufen", past: "lief", participle: "gelaufen", auxiliary: "sein"),
+        "tragen": .init(present: "ich trage · du trägst · er/sie trägt · wir tragen · ihr tragt · sie tragen", past: "trug", participle: "getragen", auxiliary: "haben")
     ]
 
     private static let adjectiveForms: [String: (String, String)] = [
@@ -54,10 +58,17 @@ public enum GermanMorphology {
         switch entry.kind {
         case .noun:
             var rows: [WordInfo.Row] = []
+            let plurals = pluralForms(for: entry)
             if entry.gender != .unknown { rows.append(.init("Article / gender", entry.gender.article)) }
-            rows.append(.init("Singular", term))
-            if entry.gender == .plural { rows.append(.init("Number", "plural form")) }
-            if let usage = entry.usage { rows.append(.init("Usage", usage)) }
+            if entry.gender == .plural {
+                rows.append(.init("Plural", term))
+            } else {
+                rows.append(.init("Singular", term))
+                if !plurals.isEmpty { rows.append(.init("Plural", plurals.joined(separator: " · "))) }
+            }
+            if let usage = entry.usage, !plurals.contains(usage) {
+                rows.append(.init("Usage", usage))
+            }
             return .init(headline: term, kind: .noun, gender: entry.gender, separablePrefix: nil, stem: term, rows: rows, isEstimated: false)
 
         case .verb:
@@ -98,6 +109,60 @@ public enum GermanMorphology {
             return (prefix, String(term.dropFirst(prefix.count)))
         }
         return nil
+    }
+
+    /// Terms worth trying when a German lookup contains an article or an inflected word.
+    /// The literal term stays first; callers can use entry metadata to prefer a base form.
+    public static func lookupTerms(for value: String) -> [String] {
+        let normalized = DictCCParser.normalized(value)
+        guard !normalized.isEmpty else { return [] }
+
+        var result = [normalized]
+        let words = normalized.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+        let lexicalWords = words.drop(while: { leadingDeterminers.contains($0) })
+        let lexicalTerm = lexicalWords.joined(separator: " ")
+        if !lexicalTerm.isEmpty { appendUnique(lexicalTerm, to: &result) }
+
+        if lexicalWords.count == 1, let word = lexicalWords.first {
+            for candidate in baseFormCandidates(for: word) {
+                appendUnique(candidate, to: &result)
+            }
+        } else if lexicalWords.count == 2,
+                  let inflected = lexicalWords.first,
+                  let prefix = lexicalWords.last,
+                  separablePrefixes.contains(prefix) {
+            for infinitive in verbBaseCandidates(for: inflected) {
+                appendUnique(prefix + infinitive, to: &result)
+            }
+        }
+        return result
+    }
+
+    public static func isDeterminer(_ value: String) -> Bool {
+        leadingDeterminers.contains(DictCCParser.normalized(value))
+    }
+
+    /// Plural forms supplied by dict.cc in square brackets, excluding usage notes.
+    public static func pluralForms(for entry: DictionaryEntry) -> [String] {
+        guard entry.kind == .noun, entry.gender != .plural else { return [] }
+        let singular = canonicalGerman(entry.german)
+        let singularKey = DictCCParser.normalized(singular)
+        guard !singularKey.isEmpty else { return [] }
+
+        return (entry.pluralForms + squareAnnotations(in: entry.rawGerman)
+            .flatMap(splitPluralAlternatives)
+            .filter { isPluralForm($0, of: singular) })
+            .reduce(into: [String]()) { forms, form in
+                if !forms.contains(form) { forms.append(form) }
+            }
+    }
+
+    public static func isPluralForm(_ candidate: String, of singular: String) -> Bool {
+        let candidateKey = DictCCParser.normalized(candidate)
+        let singularKey = DictCCParser.normalized(singular)
+        guard !candidateKey.isEmpty, !singularKey.isEmpty,
+              comparableSpelling(candidate) != comparableSpelling(singular) else { return false }
+        return candidateKey == singularKey || nounBaseCandidates(for: candidateKey).contains(singularKey)
     }
 
     private static func verbInfo(for termValue: String, raw: String, gender: Gender) -> WordInfo {
@@ -171,5 +236,108 @@ public enum GermanMorphology {
 
     private static func needsExtraE(_ adjective: String) -> Bool {
         ["s", "ß", "x", "z", "tz", "t", "d"].contains(where: adjective.hasSuffix)
+    }
+
+    private static let leadingDeterminers: Set<String> = [
+        "der", "die", "das", "den", "dem", "des",
+        "ein", "eine", "einen", "einem", "einer", "eines"
+    ]
+
+    private static func baseFormCandidates(for word: String) -> [String] {
+        nounBaseCandidates(for: word) + verbBaseCandidates(for: word)
+    }
+
+    private static func nounBaseCandidates(for word: String) -> [String] {
+        var result: [String] = []
+        let suffixes = ["ern", "en", "er", "es", "e", "n", "s"]
+        for suffix in suffixes where word.hasSuffix(suffix) && word.count > suffix.count + 2 {
+            appendUnique(String(word.dropLast(suffix.count)), to: &result)
+        }
+        if word.hasSuffix("n"), word.count > 4 {
+            appendUnique(String(word.dropLast()), to: &result)
+        }
+        return result
+    }
+
+    private static func verbBaseCandidates(for word: String, includeSeparableForms: Bool = true) -> [String] {
+        var result: [String] = []
+        if let irregular = irregularInfinitives[word] {
+            for infinitive in irregular { appendUnique(infinitive, to: &result) }
+        }
+
+        for suffix in ["test", "tet", "ten", "te", "est", "st", "et", "t", "e"]
+        where word.hasSuffix(suffix) && word.count > suffix.count + 2 {
+            let stem = String(word.dropLast(suffix.count))
+            appendUnique(infinitive(from: stem), to: &result)
+        }
+
+        if word.hasPrefix("ge"), word.hasSuffix("t"), word.count > 5 {
+            let stem = String(word.dropFirst(2).dropLast())
+            appendUnique(infinitive(from: stem), to: &result)
+        }
+        if includeSeparableForms {
+            for prefix in separablePrefixes where word.hasPrefix(prefix) {
+                let separatedForm = String(word.dropFirst(prefix.count))
+                guard separatedForm.count > 3 else { continue }
+                for base in verbBaseCandidates(for: separatedForm, includeSeparableForms: false) {
+                    appendUnique(prefix + base, to: &result)
+                }
+            }
+        }
+        return result
+    }
+
+    private static func infinitive(from stem: String) -> String {
+        stem.hasSuffix("e") ? stem + "n" : stem + "en"
+    }
+
+    private static let irregularInfinitives: [String: [String]] = {
+        var result: [String: [String]] = [:]
+        for (infinitive, forms) in irregularVerbs {
+            let values = forms.present
+                .split(separator: "·")
+                .compactMap { $0.split(whereSeparator: { $0.isWhitespace }).last.map(String.init) }
+                + [forms.past, forms.participle]
+            for value in values {
+                let key = DictCCParser.normalized(value)
+                if !result[key, default: []].contains(infinitive) {
+                    result[key, default: []].append(infinitive)
+                }
+            }
+        }
+        return result
+    }()
+
+    private static func squareAnnotations(in value: String) -> [String] {
+        let expression = try! NSRegularExpression(pattern: #"\[([^]]+)\]"#)
+        let range = NSRange(value.startIndex..., in: value)
+        return expression.matches(in: value, range: range).compactMap { match in
+            guard match.numberOfRanges > 1,
+                  let matchRange = Range(match.range(at: 1), in: value) else { return nil }
+            return String(value[matchRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+    }
+
+    private static func splitPluralAlternatives(_ value: String) -> [String] {
+        var value = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        for marker in ["Plural:", "Pl.:", "Pl:"] where value.lowercased().hasPrefix(marker.lowercased()) {
+            value = String(value.dropFirst(marker.count)).trimmingCharacters(in: .whitespaces)
+            break
+        }
+        guard !value.contains(":"), !value.isEmpty else { return [] }
+        return value
+            .split(whereSeparator: { $0 == "/" || $0 == ";" || $0 == "," })
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
+
+    private static func comparableSpelling(_ value: String) -> String {
+        DictCCParser.cleanedTerm(value)
+            .precomposedStringWithCanonicalMapping
+            .lowercased(with: Locale(identifier: "de_DE"))
+    }
+
+    private static func appendUnique(_ value: String, to values: inout [String]) {
+        if !value.isEmpty, !values.contains(value) { values.append(value) }
     }
 }
