@@ -93,7 +93,6 @@ struct RootView: View {
     private var content: some View {
         switch state.route {
         case .dictionary: DictionaryView(automaticallyFocusContent: !sidebarFocused)
-        case .speak: SpeakView(automaticallyFocusContent: !sidebarFocused)
         case .review: ReviewView(automaticallyFocusContent: !sidebarFocused)
         case .library: LibraryView(automaticallyFocusContent: !sidebarFocused)
         case .sentences: SentencesView(automaticallyFocusContent: !sidebarFocused)

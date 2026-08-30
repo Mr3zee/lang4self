@@ -122,7 +122,7 @@ struct ReviewView: View {
 
     private var emptyReviewDetail: String {
         if state.stats.totalCards == 0 {
-            return "Add a word or phrase from Dictionary or Speak to start learning."
+            return "Search for a word or phrase in Dictionary to start learning."
         }
         return state.isReviewingAll ? "You reviewed every active card in this list." : "No cards are due right now. You can still review the whole list."
     }

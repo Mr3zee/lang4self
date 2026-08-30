@@ -228,14 +228,14 @@ final class SpeechRecognizer: NSObject, ObservableObject {
 }
 
 @MainActor
-protocol SpeakShortcutRouting: AnyObject {
+protocol VoiceSearchShortcutRouting: AnyObject {
     var route: AppRoute { get set }
 }
 
-extension AppState: SpeakShortcutRouting {}
+extension AppState: VoiceSearchShortcutRouting {}
 
 @MainActor
-protocol SpeakShortcutRecording: AnyObject {
+protocol VoiceSearchShortcutRecording: AnyObject {
     var phase: SpeechRecognizer.Phase { get }
     var hasRecordingPermission: Bool { get }
     func start()
@@ -243,33 +243,71 @@ protocol SpeakShortcutRecording: AnyObject {
     func stop()
 }
 
-extension SpeechRecognizer: SpeakShortcutRecording {}
+extension SpeechRecognizer: VoiceSearchShortcutRecording {}
 
 @MainActor
-final class SpeakShortcutController: ObservableObject {
+protocol VoiceSearchShortcutContext: AnyObject {
+    var hasActiveDialog: Bool { get }
+    var hasEditableTextInputFocus: Bool { get }
+}
+
+@MainActor
+final class AppKitVoiceSearchShortcutContext: VoiceSearchShortcutContext {
+    private let application: NSApplication
+
+    init(application: NSApplication) {
+        self.application = application
+    }
+
+    var hasActiveDialog: Bool {
+        application.modalWindow != nil
+            || application.keyWindow?.sheetParent != nil
+            || application.mainWindow?.attachedSheet != nil
+    }
+
+    var hasEditableTextInputFocus: Bool {
+        guard let editor = application.keyWindow?.firstResponder as? NSTextView else { return false }
+        return editor.isEditable
+    }
+}
+
+@MainActor
+final class VoiceSearchShortcutController: ObservableObject {
     @Published private(set) var isSpaceHeld = false
 
-    private let router: any SpeakShortcutRouting
-    private let speech: any SpeakShortcutRecording
+    private let router: any VoiceSearchShortcutRouting
+    private let speech: any VoiceSearchShortcutRecording
+    private let context: any VoiceSearchShortcutContext
     private let holdDelay: TimeInterval
+    private let onForwardedSpaceEvent: () -> Void
     private var eventMonitor: Any?
     private var isSpaceDown = false
     private var pendingHold: UUID?
+    private var isDictionaryTextSearchFocused = false
 
     init(
-        router: any SpeakShortcutRouting,
-        speech: any SpeakShortcutRecording,
-        holdDelay: TimeInterval
+        router: any VoiceSearchShortcutRouting,
+        speech: any VoiceSearchShortcutRecording,
+        context: any VoiceSearchShortcutContext,
+        holdDelay: TimeInterval,
+        onForwardedSpaceEvent: @escaping () -> Void
     ) {
         self.router = router
         self.speech = speech
+        self.context = context
         self.holdDelay = holdDelay
+        self.onForwardedSpaceEvent = onForwardedSpaceEvent
     }
 
     func startMonitoring() {
         guard eventMonitor == nil else { return }
         eventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) { [weak self] event in
-            self?.handle(event) ?? event
+            guard let self else { return event }
+            let forwardedEvent = self.handle(event)
+            if event.keyCode == 49, forwardedEvent != nil {
+                self.onForwardedSpaceEvent()
+            }
+            return forwardedEvent
         }
     }
 
@@ -283,8 +321,21 @@ final class SpeakShortcutController: ObservableObject {
         endSpaceHold()
     }
 
+    func beginDictionarySpaceHold() {
+        guard !isSpaceDown,
+              !isDictionaryTextSearchFocused,
+              !context.hasActiveDialog
+        else { return }
+        isSpaceDown = true
+        beginSpaceHold()
+    }
+
     func cancelSpaceHold() {
         endSpaceHold()
+    }
+
+    func dictionaryTextSearchFocusChanged(isFocused: Bool) {
+        isDictionaryTextSearchFocused = isFocused
     }
 
     private func endSpaceHold() {
@@ -295,7 +346,7 @@ final class SpeakShortcutController: ObservableObject {
         speech.stop()
     }
 
-    private func handle(_ event: NSEvent) -> NSEvent? {
+    func handle(_ event: NSEvent) -> NSEvent? {
         guard event.keyCode == 49 else { return event }
 
         // Finish or consume a gesture that already began even if a sheet appeared
@@ -314,13 +365,16 @@ final class SpeakShortcutController: ObservableObject {
 
         guard event.type == .keyDown,
               event.modifierFlags.intersection([.command, .control, .option]).isEmpty,
-              !hasActiveDialog
+              !context.hasActiveDialog
         else { return event }
 
+        // An editable text field always owns Space, including a long press and
+        // its repeat events. Voice search remains available from the button.
+        guard !textInputOwnsSpace else { return event }
         guard !event.isARepeat else { return nil }
         isSpaceDown = true
 
-        if router.route == .speak || !requiresHoldGesture {
+        if router.route != .review {
             beginSpaceHold()
             return nil
         }
@@ -329,16 +383,11 @@ final class SpeakShortcutController: ObservableObject {
         return event
     }
 
-    private var requiresHoldGesture: Bool {
-        if router.route == .review { return true }
-        guard let editor = NSApp.keyWindow?.firstResponder as? NSTextView else { return false }
-        return editor.isEditable
-    }
-
-    private var hasActiveDialog: Bool {
-        NSApp.modalWindow != nil
-            || NSApp.keyWindow?.sheetParent != nil
-            || NSApp.mainWindow?.attachedSheet != nil
+    private var textInputOwnsSpace: Bool {
+        if router.route == .dictionary {
+            return isDictionaryTextSearchFocused
+        }
+        return context.hasEditableTextInputFocus
     }
 
     private func scheduleSpaceHold() {
@@ -357,11 +406,11 @@ final class SpeakShortcutController: ObservableObject {
         pendingHold = nil
         guard isSpaceDown, !isSpaceHeld else { return }
         isSpaceHeld = true
-        router.route = .speak
+        router.route = .dictionary
 
         if !speech.hasRecordingPermission {
-            // Space only opens the permission information page. The explicit
-            // Return action owns permission prompts; this gesture never does.
+            // Space only opens Dictionary's permission information. The
+            // microphone setup button owns permission prompts.
             return
         }
 

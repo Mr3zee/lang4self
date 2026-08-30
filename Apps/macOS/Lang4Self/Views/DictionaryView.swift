@@ -1,122 +1,464 @@
+import AppKit
 import SwiftUI
 import Lang4SelfCore
 
 struct DictionaryView: View {
     @EnvironmentObject private var state: AppState
-    @FocusState private var focusedArea: FocusArea?
+    @EnvironmentObject private var speech: SpeechRecognizer
+    @EnvironmentObject private var voiceSearchShortcut: VoiceSearchShortcutController
+    @State private var isManualRecording = false
+    @State private var isShowingAddedListSelection = false
+    @FocusState private var focusedControl: FocusControl?
     let automaticallyFocusContent: Bool
 
-    private enum FocusArea: Hashable { case search, results }
+    private enum FocusControl: Hashable { case search, record, results }
 
     var body: some View {
-        HSplitView {
-            VStack(spacing: 0) {
-                HStack {
-                    Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                    TextField("German, English, or Russian", text: $state.searchQuery)
-                        .textFieldStyle(.plain)
-                        .focused($focusedArea, equals: .search)
-                        .accessibilityIdentifier("dictionary.search")
-                        .onSubmit(focusFirstResult)
-                        .onKeyPress(.downArrow) {
-                            focusFirstResult()
-                            return state.searchResults.isEmpty ? .ignored : .handled
-                        }
-                        .onExitCommand(perform: clearSearch)
-                    if !state.searchQuery.isEmpty {
-                        Button {
-                            clearSearch()
-                        } label: { Image(systemName: "xmark.circle.fill") }
-                            .buttonStyle(.plain)
-                            .foregroundStyle(.secondary)
-                            .help("Clear search")
-                            .accessibilityLabel("Clear search")
-                            .accessibilityIdentifier("dictionary.clear-search")
-                    }
-                }
-                .padding(9)
-                .background(.quaternary.opacity(0.7), in: RoundedRectangle(cornerRadius: 9))
-                .padding(12)
+        VStack(spacing: 0) {
+            speechSearch
 
-                Divider()
+            Divider()
 
-                if state.searchQuery.isEmpty {
-                    PlaceholderView(
-                        symbol: "text.magnifyingglass",
-                        title: "Search locally",
-                        detail: "Type a German, English, or Russian word or phrase. Find from anywhere:",
-                        shortcut: .commandF
-                    )
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else if state.isSearchingDictionary {
-                    VStack(spacing: 12) {
-                        ProgressView()
-                        Text("Searching…")
-                            .foregroundStyle(.secondary)
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .accessibilityIdentifier("dictionary.searching")
-                } else if state.searchResults.isEmpty {
-                    PlaceholderView(symbol: "questionmark.folder", title: "No match", detail: "Try another spelling or import the complete dict.cc file in Settings.")
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else {
-                    List(state.searchResults, selection: $state.selectedEntry) { entry in
-                        EntryRow(entry: entry)
-                            .tag(entry)
-                            .contextMenu {
-                                Button(contextAddLabel) { state.addToPersonalDictionary(entry) }
-                            }
-                    }
-                    .listStyle(.inset)
-                    .focused($focusedArea, equals: .results)
-                    .accessibilityIdentifier("dictionary.results")
-                }
-            }
-            .frame(minWidth: 285, idealWidth: 340)
+            textSearch
 
-            if let entry = state.selectedEntry {
-                EntryDetailView(
-                    entry: entry,
-                    addLabel: addButtonLabel(for: entry),
-                    wordLists: state.wordLists,
-                    addedListID: state.addedListID(for: entry),
-                    switchAddedListAction: { await state.switchListForAddedEntry(entry, to: $0) },
-                    addAction: { state.addToPersonalDictionary(entry) }
-                )
-            } else {
-                PlaceholderView(symbol: "character.book.closed", title: "Lang4Self", detail: "Your offline German dictionary")
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
+            Divider()
+
+            lookupResults
         }
         .navigationTitle("Dictionary")
-        .onChange(of: state.searchQuery) { _, query in state.search(query) }
+        .onKeyPress(.space, phases: .all, action: handleSpaceKeyPress)
+        .onChange(of: focusedControl) { _, control in
+            voiceSearchShortcut.dictionaryTextSearchFocusChanged(isFocused: control == .search)
+        }
+        .onChange(of: state.searchQuery) { _, query in
+            let isVoiceResult = !speech.transcription.isEmpty && query == speech.transcription
+            if !isVoiceResult, focusedControl == .search, speech.phase != .idle {
+                releaseRecordingHolds()
+                speech.reset()
+                isShowingAddedListSelection = false
+            }
+            state.search(query, immediate: isVoiceResult, selectFirstResult: isVoiceResult)
+        }
+        .onChange(of: speech.transcription) { _, transcription in
+            guard !transcription.isEmpty, state.searchQuery != transcription else { return }
+            state.searchQuery = transcription
+        }
+        .onChange(of: speech.phase) { _, phase in
+            if phase == .listening, !isRecordingRequested {
+                speech.stop()
+            }
+            if phase == .listening, speech.transcription.isEmpty {
+                state.search("")
+            }
+            if phase != .listening, phase != .requestingPermission {
+                isManualRecording = false
+            }
+            if phase == .guess {
+                focusResults()
+            } else if (phase == .idle || phase.isUnavailable), !isRecordingRequested {
+                isShowingAddedListSelection = false
+                if focusedControl != .search {
+                    DispatchQueue.main.async { focusedControl = .record }
+                }
+            }
+        }
+        .onChange(of: state.searchResults.map(\.id)) { _, _ in
+            if speech.phase == .guess { focusResults() }
+        }
         .onReceive(NotificationCenter.default.publisher(for: .focusDictionarySearch)) { _ in
             state.route = .dictionary
-            focusedArea = .search
+            focusedControl = .search
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in
+            releaseRecordingHolds()
         }
         .onAppear {
+            voiceSearchShortcut.startMonitoring()
+            if !speech.transcription.isEmpty {
+                state.search(speech.transcription, immediate: true, selectFirstResult: true)
+            }
             guard automaticallyFocusContent else { return }
-            DispatchQueue.main.async { focusedArea = .search }
+            DispatchQueue.main.async { focusedControl = .record }
         }
+        .onDisappear {
+            voiceSearchShortcut.dictionaryTextSearchFocusChanged(isFocused: false)
+            releaseRecordingHolds()
+            speech.reset()
+        }
+    }
+
+    private var textSearch: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Text search")
+                    .font(.headline)
+                Spacer()
+                KeyboardShortcutHint(.commandF)
+                    .accessibilityHidden(true)
+            }
+
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundStyle(.secondary)
+                TextField("German, English, or Russian", text: $state.searchQuery)
+                    .textFieldStyle(.plain)
+                    .focused($focusedControl, equals: .search)
+                    .accessibilityIdentifier("dictionary.search")
+                    .onSubmit(focusFirstResult)
+                    .onKeyPress(.downArrow) {
+                        focusFirstResult()
+                        return state.searchResults.isEmpty ? .ignored : .handled
+                    }
+                    .onExitCommand(perform: leaveTextSearch)
+                if !state.searchQuery.isEmpty {
+                    Button(action: clearSearch) {
+                        Image(systemName: "xmark.circle.fill")
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .help("Clear search")
+                    .accessibilityLabel("Clear search")
+                    .accessibilityIdentifier("dictionary.clear-search")
+                }
+            }
+            .padding(9)
+            .background(.quaternary.opacity(0.7), in: RoundedRectangle(cornerRadius: 9))
+        }
+        .padding(12)
+    }
+
+    private var speechSearch: some View {
+        VStack(spacing: 16) {
+            ZStack {
+                Circle()
+                    .fill(speech.isListening ? Color.red.opacity(0.14) : Color.accentColor.opacity(0.12))
+                    .frame(width: 92, height: 92)
+                Image(systemName: speech.isListening ? "waveform" : "mic.fill")
+                    .font(.system(size: 36, weight: .semibold))
+                    .foregroundStyle(speech.isListening ? Color.red : Color.accentColor)
+                    .symbolEffect(.variableColor.iterative, isActive: speech.isListening)
+            }
+
+            Text(statusTitle)
+                .font(.title2.weight(.bold))
+                .accessibilityIdentifier("dictionary.voice-status")
+
+            if !speech.transcription.isEmpty {
+                Text(speech.transcription)
+                    .font(.system(size: 34, weight: .bold, design: .rounded))
+                    .textSelection(.enabled)
+            } else {
+                statusDetail
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 520)
+            }
+
+            speechControls
+        }
+        .padding(26)
+    }
+
+    @ViewBuilder
+    private var lookupResults: some View {
+        if state.searchQuery.isEmpty {
+            PlaceholderView(
+                symbol: "waveform.and.magnifyingglass",
+                title: "Say or type a word or phrase",
+                detail: "Voice recognition and lookup stay on this Mac. Nothing is uploaded."
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if state.isSearchingDictionary {
+            VStack(spacing: 12) {
+                ProgressView()
+                Text("Searching…")
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .accessibilityIdentifier("dictionary.searching")
+        } else if let entry = state.selectedEntry, !state.searchResults.isEmpty {
+            HSplitView {
+                List(state.searchResults, selection: $state.selectedEntry) { result in
+                    EntryRow(entry: result)
+                        .tag(result)
+                        .contextMenu {
+                            Button(contextAddLabel) { state.addToPersonalDictionary(result) }
+                        }
+                }
+                .frame(minWidth: 260, idealWidth: 310)
+                .focused($focusedControl, equals: .results)
+                .accessibilityIdentifier("dictionary.results")
+                .onKeyPress(.rightArrow) {
+                    guard isVoiceResult,
+                          let addedListID = state.addedListID(for: entry),
+                          state.wordLists.contains(where: { $0.id != addedListID })
+                    else {
+                        return .ignored
+                    }
+                    isShowingAddedListSelection = true
+                    return .handled
+                }
+
+                entryDetail(entry)
+            }
+        } else {
+            PlaceholderView(
+                symbol: "questionmark.folder",
+                title: "No match",
+                detail: "Try another spelling or import the complete dict.cc file in Settings."
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    @ViewBuilder
+    private var speechControls: some View {
+        HStack {
+            if speech.hasRecordingPermission {
+                holdToRecordControl
+            } else {
+                permissionSetupControl
+            }
+
+            if speech.phase == .requestingPermission || speech.phase == .processing {
+                ProgressView().controlSize(.small)
+            }
+        }
+    }
+
+    private var permissionSetupControl: some View {
+        Button(action: speech.requestPermissions) {
+            HStack(spacing: 8) {
+                Label("Request speech access", systemImage: "lock.open.fill")
+                    .lineLimit(1)
+                KeyboardShortcutHint(.returnKey)
+                    .accessibilityHidden(true)
+            }
+            .fontWeight(.semibold)
+            .fixedSize(horizontal: true, vertical: false)
+            .frame(minWidth: 180)
+        }
+        .buttonStyle(SpeechActionButtonStyle(isListening: false))
+        .controlSize(.large)
+        .disabled(speech.phase == .requestingPermission || voiceSearchShortcut.isSpaceHeld)
+        .focusable()
+        .focused($focusedControl, equals: .record)
+        .focusEffectDisabled()
+        .onKeyPress(.return) {
+            speech.requestPermissions()
+            return .handled
+        }
+        .accessibilityIdentifier("dictionary.voice-permission")
+        .accessibilityLabel("Request speech access")
+        .accessibilityHint("Allow microphone and Speech Recognition access without starting a recording")
+    }
+
+    @ViewBuilder
+    private func entryDetail(_ entry: DictionaryEntry) -> some View {
+        if isVoiceResult {
+            EntryDetailView(
+                entry: entry,
+                addLabel: addButtonTitle,
+                addShortcut: .returnKey,
+                addShortcutModifiers: [],
+                addAccessibilityIdentifier: "dictionary.add-selected",
+                wordLists: state.wordLists,
+                addedListID: state.addedListID(for: entry),
+                isShowingListSelection: $isShowingAddedListSelection,
+                switchAddedListAction: { await state.switchListForAddedEntry(entry, to: $0) },
+                didFinishListSelection: focusResults,
+                addAction: { state.addToPersonalDictionary(entry) }
+            )
+        } else {
+            EntryDetailView(
+                entry: entry,
+                addLabel: addButtonTitle,
+                wordLists: state.wordLists,
+                addedListID: state.addedListID(for: entry),
+                switchAddedListAction: { await state.switchListForAddedEntry(entry, to: $0) },
+                addAction: { state.addToPersonalDictionary(entry) }
+            )
+        }
+    }
+
+    private var holdToRecordControl: some View {
+        Button(action: toggleManualRecording) {
+            Label(holdControlTitle, systemImage: speech.isListening ? "stop.fill" : "mic.fill")
+                .fontWeight(.semibold)
+                .frame(width: 180)
+        }
+        .buttonStyle(SpeechActionButtonStyle(isListening: speech.isListening))
+        .controlSize(.large)
+        .focusable()
+        .focused($focusedControl, equals: .record)
+        .focusEffectDisabled()
+        .overlay {
+            Capsule()
+                .strokeBorder(
+                    focusedControl == .record && !voiceSearchShortcut.isSpaceHeld
+                        ? Color(nsColor: .keyboardFocusIndicatorColor)
+                        : .clear,
+                    lineWidth: 3
+                )
+                .padding(2)
+                .allowsHitTesting(false)
+        }
+        .accessibilityIdentifier("dictionary.voice-search")
+        .accessibilityLabel(speech.isListening ? "Stop recording" : "Start recording")
+        .accessibilityHint("Press the button, or hold Space outside a text field and release it to stop")
+    }
+
+    private var statusTitle: String {
+        if !speech.hasRecordingPermission {
+            return switch speech.phase {
+            case .requestingPermission: "Requesting speech access…"
+            case .unavailable: "Speech setup needed"
+            default: "Speech access needed"
+            }
+        }
+        return switch speech.phase {
+        case .idle: "Hold Space to speak"
+        case .requestingPermission: "Checking local speech access…"
+        case .listening: "Listening…"
+        case .processing: "Recognizing…"
+        case .guess: "Choose words to add"
+        case .unavailable: "Speech setup needed"
+        }
+    }
+
+    @ViewBuilder
+    private var statusDetail: some View {
+        if !speech.hasRecordingPermission {
+            if case .unavailable(let message) = speech.phase {
+                Text(message)
+            } else if speech.phase == .requestingPermission {
+                Text("Respond to the macOS permission prompts. Recording will not start yet.")
+            } else {
+                Text("Microphone and Speech Recognition access are required.")
+            }
+        } else if case .unavailable(let message) = speech.phase {
+            Text(message)
+        } else if speech.phase == .guess {
+            HStack(spacing: 5) {
+                Text("Select a match and use")
+                KeyboardShortcutHint(.returnKey)
+                Text("to add it · Choose another match to add more")
+            }
+        } else {
+            Text("Click record, or hold Space when you are not typing · Release to look up")
+        }
+    }
+
+    private var holdControlTitle: String {
+        switch speech.phase {
+        case .requestingPermission: voiceSearchShortcut.isSpaceHeld ? "Keep holding Space…" : "Cancel recording"
+        case .listening: voiceSearchShortcut.isSpaceHeld ? "Release Space to finish" : "Stop recording"
+        case .processing: "Record again"
+        case .idle, .guess, .unavailable: "Hold Space to record"
+        }
+    }
+
+    private var addButtonTitle: String {
+        state.selectedEntry?.kind == .phrase ? "Add phrase" : "Add word"
     }
 
     private var contextAddLabel: String {
         "Add to \(state.selectedWordList?.name ?? "My words")"
     }
 
-    private func addButtonLabel(for entry: DictionaryEntry) -> String {
-        entry.kind == .phrase ? "Add phrase" : "Add word"
+    private var isVoiceResult: Bool {
+        speech.phase == .guess
+            && !speech.transcription.isEmpty
+            && state.searchQuery == speech.transcription
+    }
+
+    private var isRecordingRequested: Bool {
+        voiceSearchShortcut.isSpaceHeld || isManualRecording
+    }
+
+    private func clearSearch() {
+        releaseRecordingHolds()
+        speech.reset()
+        state.search("")
+        focusedControl = .search
+    }
+
+    private func leaveTextSearch() {
+        releaseRecordingHolds()
+        speech.reset()
+        state.search("")
+        focusedControl = .record
     }
 
     private func focusFirstResult() {
         guard let first = state.searchResults.first else { return }
         state.selectedEntry = first
-        focusedArea = .results
+        focusedControl = .results
     }
 
-    private func clearSearch() {
-        state.search("")
-        focusedArea = .search
+    private func focusResults() {
+        guard !state.searchResults.isEmpty else { return }
+        DispatchQueue.main.async { focusedControl = .results }
+    }
+
+    private func releaseRecordingHolds() {
+        let wasRecording = isRecordingRequested
+        voiceSearchShortcut.cancelSpaceHold()
+        isManualRecording = false
+        if wasRecording { speech.stop() }
+    }
+
+    private func handleSpaceKeyPress(_ keyPress: KeyPress) -> KeyPress.Result {
+        guard focusedControl != .search else { return .ignored }
+        if keyPress.phase == .down {
+            voiceSearchShortcut.beginDictionarySpaceHold()
+        } else if keyPress.phase == .up {
+            voiceSearchShortcut.releaseSpaceHold()
+        }
+        return .handled
+    }
+
+    private func recordingRequestChanged(wasRecording: Bool) {
+        if !wasRecording, isRecordingRequested {
+            switch speech.phase {
+            case .idle, .unavailable:
+                speech.start()
+            case .processing, .guess:
+                speech.rerecord()
+            case .requestingPermission, .listening:
+                break
+            }
+        } else if wasRecording, !isRecordingRequested {
+            speech.stop()
+        }
+    }
+
+    private func toggleManualRecording() {
+        guard speech.hasRecordingPermission, !voiceSearchShortcut.isSpaceHeld else { return }
+        let wasRecording = isRecordingRequested
+        isManualRecording.toggle()
+        recordingRequestChanged(wasRecording: wasRecording)
+    }
+}
+
+private struct SpeechActionButtonStyle: ButtonStyle {
+    let isListening: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .foregroundStyle(.white)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 9)
+            .background(isListening ? Color.red : Color.accentColor, in: Capsule())
+            .brightness(configuration.isPressed ? -0.08 : 0)
+            .contentShape(Capsule())
+    }
+}
+
+private extension SpeechRecognizer.Phase {
+    var isUnavailable: Bool {
+        if case .unavailable = self { return true }
+        return false
     }
 }
 

@@ -24,7 +24,8 @@ final class Lang4SelfUITests: XCTestCase {
         app.launch()
 
         XCTAssertTrue(app.textFields["dictionary.search"].waitForExistence(timeout: 8))
-        assertFocused(app.textFields["dictionary.search"])
+        XCTAssertTrue(app.buttons["dictionary.voice-search"].waitForExistence(timeout: 3))
+        assertFocused(app.buttons["dictionary.voice-search"])
     }
 
     override func tearDownWithError() throws {
@@ -37,17 +38,16 @@ final class Lang4SelfUITests: XCTestCase {
     func testGlobalNavigationFindSettingsAndShortcutReference() {
         for (key, route) in [
             ("1", "dictionary"),
-            ("2", "speak"),
-            ("3", "review"),
-            ("4", "library"),
-            ("5", "sentences"),
-            ("6", "settings")
+            ("2", "review"),
+            ("3", "library"),
+            ("4", "sentences"),
+            ("5", "settings")
         ] {
             app.typeKey(key, modifierFlags: .command)
             XCTAssertTrue(routeElement(route).waitForExistence(timeout: 3), "⌘\(key) did not open \(route)")
         }
 
-        for route in ["dictionary", "speak", "review", "library", "sentences", "settings"] {
+        for route in ["dictionary", "review", "library", "sentences", "settings"] {
             element("sidebar.\(route)").click()
             XCTAssertTrue(routeElement(route).waitForExistence(timeout: 3), "Sidebar did not open \(route)")
         }
@@ -61,7 +61,7 @@ final class Lang4SelfUITests: XCTestCase {
 
         app.typeKey("/", modifierFlags: .command)
         XCTAssertTrue(app.sheets.firstMatch.waitForExistence(timeout: 3))
-        for heading in ["Global", "Dictionary", "Speak", "Review", "Lists and sentences", "Dialogs and controls", "Standard macOS"] {
+        for heading in ["Global", "Dictionary", "Review", "Lists and sentences", "Dialogs and controls", "Standard macOS"] {
             XCTAssertTrue(app.staticTexts[heading].exists, "Missing shortcut group: \(heading)")
         }
         app.typeKey(.space, modifierFlags: [])
@@ -83,7 +83,7 @@ final class Lang4SelfUITests: XCTestCase {
         app.typeText("Haus")
         XCTAssertTrue(app.buttons["dictionary.clear-search"].waitForExistence(timeout: 3))
 
-        openRoute("4", route: "library")
+        openRoute("3", route: "library")
         app.typeKey("f", modifierFlags: .command)
         assertFocused(app.textFields["library.search"])
         app.typeText("Haus")
@@ -103,7 +103,7 @@ final class Lang4SelfUITests: XCTestCase {
         app.typeKey(.downArrow, modifierFlags: [])
         XCTAssertTrue(routeElement("dictionary").waitForExistence(timeout: 3))
         app.typeKey(.downArrow, modifierFlags: [])
-        XCTAssertTrue(routeElement("speak").waitForExistence(timeout: 3))
+        XCTAssertTrue(routeElement("review").waitForExistence(timeout: 3))
     }
 
     func testCommandNOnlyCreatesAListInMyWords() {
@@ -132,6 +132,8 @@ final class Lang4SelfUITests: XCTestCase {
     }
 
     func testDictionaryKeyboardSearchSelectionAddAndClear() {
+        assertFocused(app.buttons["dictionary.voice-search"])
+        app.typeKey("f", modifierFlags: .command)
         assertFocused(app.textFields["dictionary.search"])
         app.typeText("Haus")
         XCTAssertTrue(app.buttons["dictionary.clear-search"].waitForExistence(timeout: 3))
@@ -147,6 +149,9 @@ final class Lang4SelfUITests: XCTestCase {
         app.typeKey("f", modifierFlags: .command)
         app.typeKey(.escape, modifierFlags: [])
         XCTAssertTrue(app.buttons["dictionary.clear-search"].waitForNonExistence(timeout: 3))
+        assertFocused(app.buttons["dictionary.voice-search"])
+
+        app.typeKey("f", modifierFlags: .command)
         assertFocused(app.textFields["dictionary.search"])
 
         app.typeText("lernen")
@@ -159,140 +164,111 @@ final class Lang4SelfUITests: XCTestCase {
         XCTAssertTrue(app.buttons["dictionary.clear-search"].waitForNonExistence(timeout: 3))
     }
 
-    func testSpeakRecordingControlAndMultipleAddsAreKeyboardOperable() {
-        openRoute("2", route: "speak")
-        let recordButton = app.buttons["speak.record"]
-        XCTAssertTrue(recordButton.waitForExistence(timeout: 3))
+    func testDictionarySupportsEnglishTextAndGermanVoiceSearch() {
+        let search = app.textFields["dictionary.search"]
+        app.typeKey("f", modifierFlags: .command)
+        assertFocused(search)
+        search.typeText("to learn")
+        XCTAssertEqual(search.value as? String, "to learn")
+        XCTAssertTrue(app.staticTexts["lernen"].waitForExistence(timeout: 3))
 
-        waitForUIToSettle()
         app.typeKey(.space, modifierFlags: [])
-        let addButton = app.buttons["speak.add-selected"]
-        XCTAssertTrue(addButton.waitForExistence(timeout: 3))
-        let detail = element("entry.detail")
-        XCTAssertTrue(detail.waitForExistence(timeout: 3))
-        XCTAssertGreaterThan(addButton.frame.midX, detail.frame.midX)
-        XCTAssertLessThan(addButton.frame.midY, detail.frame.midY)
-        let results = element("speak.results")
+        XCTAssertEqual(search.value as? String, "to learn ")
+
+        app.typeKey(.escape, modifierFlags: [])
+        let voiceButton = app.buttons["dictionary.voice-search"]
+        XCTAssertTrue(voiceButton.waitForExistence(timeout: 3))
+        assertFocused(voiceButton)
+        voiceButton.click()
+
+        XCTAssertEqual(voiceButton.label, "Stop recording")
+        XCTAssertTrue(element("dictionary.voice-status").waitForExistence(timeout: 3))
+        voiceButton.click()
+
+        XCTAssertEqual(search.value as? String, "Der Hund")
+        let results = element("dictionary.results")
         XCTAssertTrue(results.waitForExistence(timeout: 3))
         assertFocused(results)
         XCTAssertTrue(app.staticTexts["Hund"].waitForExistence(timeout: 3))
         XCTAssertTrue(app.staticTexts["Hunde"].waitForExistence(timeout: 3))
-        XCTAssertTrue(app.staticTexts["Part of speech: Noun"].firstMatch.exists)
-
-        results.staticTexts["Hund"].firstMatch.click()
-        app.typeKey(.return, modifierFlags: [])
-        XCTAssertTrue(app.buttons["banner.dismiss"].waitForExistence(timeout: 3))
-        XCTAssertTrue(app.staticTexts["Added “Hund” to My words"].exists)
-        assertFocused(results)
-        XCTAssertTrue(app.buttons["banner.dismiss"].waitForNonExistence(timeout: 4))
-
-        let addedListMenu = element("speak.add-selected.list")
-        XCTAssertTrue(addedListMenu.waitForExistence(timeout: 3))
-        XCTAssertFalse(addButton.exists)
-        XCTAssertLessThan(addedListMenu.frame.width, 220, "The list control should not crowd the word")
-        XCTAssertLessThan(element("entry.word").frame.height, 60, "The word heading should stay on one line")
-
-        app.typeKey(.rightArrow, modifierFlags: [])
-        XCTAssertTrue(element("entry.list-selection").waitForExistence(timeout: 3))
-        app.typeKey(.downArrow, modifierFlags: [])
-        app.typeKey(.return, modifierFlags: [])
-        XCTAssertTrue(app.buttons["banner.dismiss"].waitForExistence(timeout: 3))
-        XCTAssertTrue(app.staticTexts["Moved “Hund” to Travel"].exists)
-        assertFocused(results)
-        XCTAssertTrue(app.buttons["banner.dismiss"].waitForNonExistence(timeout: 4))
-
-        app.typeKey(.downArrow, modifierFlags: [])
-        XCTAssertTrue(addButton.waitForExistence(timeout: 3), "Another result should remain addable")
-        app.typeKey(.return, modifierFlags: [])
-        XCTAssertTrue(app.buttons["banner.dismiss"].waitForExistence(timeout: 3))
-        XCTAssertTrue(app.staticTexts["Added “Hunde” to Travel"].exists)
-        app.buttons["banner.dismiss"].click()
-
-        waitForUIToSettle()
-        let idleFrame = recordButton.frame
-
-        recordButton.click()
-        XCTAssertEqual(recordButton.label, "Stop recording")
-        waitForUIToSettle()
-        XCTAssertEqual(recordButton.frame.width, idleFrame.width, accuracy: 1)
-        XCTAssertEqual(recordButton.frame.midX, idleFrame.midX, accuracy: 1)
-
-        recordButton.click()
-        XCTAssertTrue(element("speak.add-selected.list").waitForExistence(timeout: 3))
+        XCTAssertTrue(app.buttons["dictionary.add-selected"].waitForExistence(timeout: 3))
     }
 
-    func testSpeakHidesListSwitchWhenThereIsNoAlternativeList() {
-        openRoute("4", route: "library")
-        element("library.list-picker").click()
-        app.menuItems["Travel"].click()
-        element("library.list-actions").click()
-        app.menuItems["Delete List…"].click()
-        app.sheets.firstMatch.buttons["Delete List"].click()
+    func testConsecutiveSpaceVoiceSearchesStayKeyboardOperable() {
+        let leakedSpace = expectation(description: "No Space event reaches the focused results control")
+        leakedSpace.isInverted = true
+        leakedSpace.assertForOverFulfill = false
+        let observer = DistributedNotificationCenter.default().addObserver(
+            forName: Notification.Name("Lang4SelfUITestingSpaceEventLeaked"),
+            object: nil,
+            queue: .main
+        ) { _ in
+            leakedSpace.fulfill()
+        }
+        defer { DistributedNotificationCenter.default().removeObserver(observer) }
 
-        openRoute("2", route: "speak")
+        let recordButton = app.buttons["dictionary.voice-search"]
+        assertFocused(recordButton)
+
         app.typeKey(.space, modifierFlags: [])
-        let results = element("speak.results")
+        let results = element("dictionary.results")
         XCTAssertTrue(results.waitForExistence(timeout: 3))
-        app.typeKey(.return, modifierFlags: [])
-        XCTAssertTrue(app.buttons["banner.dismiss"].waitForExistence(timeout: 3))
-
-        let addedListStatus = element("speak.add-selected.list")
-        XCTAssertTrue(addedListStatus.waitForExistence(timeout: 3))
-        XCTAssertFalse(app.buttons["speak.add-selected.list"].exists)
-
-        app.typeKey(.rightArrow, modifierFlags: [])
-        XCTAssertFalse(element("entry.list-selection").waitForExistence(timeout: 1))
         assertFocused(results)
+
+        simulateHeldSpaceWithRepeats()
+        XCTAssertTrue(results.waitForExistence(timeout: 3))
+        assertFocused(results)
+        XCTAssertEqual(app.textFields["dictionary.search"].value as? String, "Der Hund")
+        wait(for: [leakedSpace], timeout: 0.5)
     }
 
-    func testSpaceOnlyOpensPermissionInfo() {
-        app.terminate()
-        app.launchArguments.append("--ui-testing-speech-permission-setup")
-        app.launch()
-        XCTAssertTrue(app.textFields["dictionary.search"].waitForExistence(timeout: 8))
+    func testDictionaryViewHandlesConsecutiveSpaceHoldsWithoutGlobalMonitor() {
+        DistributedNotificationCenter.default().postNotificationName(
+            Notification.Name("Lang4SelfUITestingDisableSpaceMonitor"),
+            object: nil,
+            userInfo: nil,
+            deliverImmediately: true
+        )
+        waitForUIToSettle(0.2)
 
-        openRoute("6", route: "settings")
         app.typeKey(.space, modifierFlags: [])
-        XCTAssertTrue(app.buttons["speak.permission-setup"].waitForExistence(timeout: 3))
-        XCTAssertFalse(app.buttons["speak.record"].exists)
-        XCTAssertFalse(app.buttons["speak.add-selected"].exists)
+        let results = element("dictionary.results")
+        XCTAssertTrue(results.waitForExistence(timeout: 3))
+        assertFocused(results)
 
-        waitForUIToSettle(1.25)
-        XCTAssertTrue(app.buttons["speak.permission-setup"].exists)
-        XCTAssertFalse(app.buttons["speak.record"].exists)
+        simulateHeldSpaceWithRepeats()
+        XCTAssertTrue(results.waitForExistence(timeout: 3))
+        assertFocused(results)
+        XCTAssertEqual(app.textFields["dictionary.search"].value as? String, "Der Hund")
     }
 
-    func testPermissionSetupReturnDoesNotStartRecording() {
+    func testVoicePermissionSetupDoesNotStartRecording() {
         app.terminate()
         app.launchArguments.append("--ui-testing-speech-permission-setup")
         app.launch()
         XCTAssertTrue(app.textFields["dictionary.search"].waitForExistence(timeout: 8))
 
-        app.typeKey("2", modifierFlags: .command)
-        let setupButton = app.buttons["speak.permission-setup"]
+        let setupButton = app.buttons["dictionary.voice-permission"]
         XCTAssertTrue(setupButton.waitForExistence(timeout: 3))
-        XCTAssertLessThan(setupButton.frame.height, 45, "Permission button title should stay on one line")
-        XCTAssertFalse(app.buttons["speak.record"].exists)
-
+        XCTAssertTrue(element("dictionary.voice-status").exists)
+        assertFocused(setupButton)
         app.typeKey(.return, modifierFlags: [])
-        XCTAssertFalse(app.buttons["speak.add-selected"].exists)
-        let recordButton = app.buttons["speak.record"]
-        XCTAssertTrue(recordButton.waitForExistence(timeout: 3))
-        XCTAssertEqual(recordButton.label, "Start recording")
-        XCTAssertFalse(app.buttons["speak.add-selected"].exists)
 
-        recordButton.click()
-        XCTAssertEqual(recordButton.label, "Stop recording")
+        let voiceButton = app.buttons["dictionary.voice-search"]
+        XCTAssertTrue(voiceButton.waitForExistence(timeout: 3))
+        XCTAssertEqual(voiceButton.label, "Start recording")
+        XCTAssertEqual(app.textFields["dictionary.search"].value as? String, "")
     }
 
-    func testSpaceOpensSpeakAndRecordsFromAnotherPage() {
-        openRoute("6", route: "settings")
+    func testSpaceOpensDictionaryVoiceSearchFromAnotherPage() {
+        openRoute("5", route: "settings")
 
         app.typeKey(.space, modifierFlags: [])
 
-        XCTAssertTrue(app.buttons["speak.record"].waitForExistence(timeout: 3))
-        XCTAssertTrue(app.buttons["speak.add-selected"].waitForExistence(timeout: 3))
-        let results = element("speak.results")
+        XCTAssertTrue(app.buttons["dictionary.voice-search"].waitForExistence(timeout: 3))
+        XCTAssertEqual(app.textFields["dictionary.search"].value as? String, "Der Hund")
+        XCTAssertTrue(app.buttons["dictionary.add-selected"].waitForExistence(timeout: 3))
+        let results = element("dictionary.results")
         XCTAssertTrue(results.waitForExistence(timeout: 3))
         assertFocused(results)
     }
@@ -300,7 +276,7 @@ final class Lang4SelfUITests: XCTestCase {
     func testReviewRevealAndEveryRatingShortcut() {
         for rating in ["1", "2", "3", "4"] {
             relaunchFixture()
-            openRoute("3", route: "review")
+            openRoute("2", route: "review")
             XCTAssertTrue(app.buttons["review.reveal"].waitForExistence(timeout: 3))
 
             app.typeKey(.space, modifierFlags: [])
@@ -311,7 +287,7 @@ final class Lang4SelfUITests: XCTestCase {
     }
 
     func testReviewPromptShowsPartOfSpeechBeforeReveal() {
-        openRoute("3", route: "review")
+        openRoute("2", route: "review")
 
         let partOfSpeech = element("review.part-of-speech")
         XCTAssertTrue(partOfSpeech.waitForExistence(timeout: 3))
@@ -320,7 +296,7 @@ final class Lang4SelfUITests: XCTestCase {
     }
 
     func testReviewListScopeCompletionAndRestart() {
-        openRoute("3", route: "review")
+        openRoute("2", route: "review")
 
         element("review.list-picker").click()
         app.menuItems["Travel"].click()
@@ -494,7 +470,7 @@ final class Lang4SelfUITests: XCTestCase {
     }
 
     func testSentenceSelectionCheckboxesSavingDeletionAndTokenFocus() {
-        openRoute("5", route: "sentences")
+        openRoute("4", route: "sentences")
         XCTAssertTrue(element("sentences.list").waitForExistence(timeout: 3))
         assertFocused(element("sentences.list"))
         XCTAssertGreaterThanOrEqual(app.checkBoxes.count, 2)
@@ -527,7 +503,7 @@ final class Lang4SelfUITests: XCTestCase {
     }
 
     func testSentenceGenerationListCountAndGenerateControls() {
-        openRoute("5", route: "sentences")
+        openRoute("4", route: "sentences")
 
         element("sentences.list-picker").click()
         app.menuItems["Travel"].click()
@@ -555,10 +531,10 @@ final class Lang4SelfUITests: XCTestCase {
         XCTAssertGreaterThanOrEqual(app.sliders.count, 2)
         XCTAssertTrue(app.buttons["settings.reset-model-defaults"].exists)
 
-        for shortcut in ["global.routes", "global.settings", "global.find", "global.help", "dictionary.add", "lists.new", "review.rate", "lists.delete", "macos.quit", "macos.undo"] {
+        for shortcut in ["global.routes", "global.settings", "global.find", "global.help", "dictionary.add", "dictionary.voice-search", "lists.new", "review.rate", "lists.delete", "macos.quit", "macos.undo"] {
             XCTAssertTrue(element("shortcut.\(shortcut)").exists, "Settings is missing \(shortcut)")
         }
-        for oldTextShortcut in ["⌘1 … ⌘6", "⌘F", "⌘Return", "1 … 4", "Delete"] {
+        for oldTextShortcut in ["⌘1 … ⌘5", "⌘F", "⌘Return", "1 … 4", "Delete"] {
             XCTAssertFalse(app.staticTexts[oldTextShortcut].exists, "Shortcut is still rendered as text: \(oldTextShortcut)")
         }
 
@@ -594,7 +570,7 @@ final class Lang4SelfUITests: XCTestCase {
     }
 
     func testAccessibilityAuditOnEveryScreen() throws {
-        for (key, route) in [("1", "dictionary"), ("2", "speak"), ("3", "review"), ("4", "library"), ("5", "sentences"), ("6", "settings")] {
+        for (key, route) in [("1", "dictionary"), ("2", "review"), ("3", "library"), ("4", "sentences"), ("5", "settings")] {
             openRoute(key, route: route)
             // Other macOS audit types currently flag system menus and standard SwiftUI layout controls.
             try app.performAccessibilityAudit(for: .elementDetection)
@@ -602,6 +578,7 @@ final class Lang4SelfUITests: XCTestCase {
     }
 
     func testCaptureReadmeScreenshots() {
+        app.typeKey("f", modifierFlags: .command)
         app.typeText("Haus")
         XCTAssertTrue(app.staticTexts["Haus"].waitForExistence(timeout: 3))
         attachWindowScreenshot(named: "dictionary")
@@ -609,12 +586,12 @@ final class Lang4SelfUITests: XCTestCase {
         openLibrary()
         attachWindowScreenshot(named: "my-words")
 
-        openRoute("5", route: "sentences")
+        openRoute("4", route: "sentences")
         attachWindowScreenshot(named: "sentences")
     }
 
     private func openLibrary() {
-        openRoute("4", route: "library")
+        openRoute("3", route: "library")
         XCTAssertTrue(element("library.cards").waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["Haus"].waitForExistence(timeout: 3))
     }
@@ -627,7 +604,6 @@ final class Lang4SelfUITests: XCTestCase {
     private func routeElement(_ route: String) -> XCUIElement {
         switch route {
         case "dictionary": return app.textFields["dictionary.search"]
-        case "speak": return app.buttons["speak.record"]
         case "review": return app.buttons["review.reveal"]
         case "library": return element("library.cards")
         case "sentences": return element("sentences.list")
@@ -659,6 +635,15 @@ final class Lang4SelfUITests: XCTestCase {
     private func waitForUIToSettle(_ delay: TimeInterval = 0.25) {
         let readyAt = Date().addingTimeInterval(delay)
         _ = waitUntil(timeout: delay + 0.5) { Date() >= readyAt }
+    }
+
+    private func simulateHeldSpaceWithRepeats() {
+        DistributedNotificationCenter.default().postNotificationName(
+            Notification.Name("Lang4SelfUITestingSimulateHeldSpace"),
+            object: nil,
+            userInfo: nil,
+            deliverImmediately: true
+        )
     }
 
     private func attachWindowScreenshot(named name: String) {

@@ -4,7 +4,6 @@ import Lang4SelfCore
 
 enum AppRoute: String, CaseIterable, Identifiable {
     case dictionary
-    case speak
     case review
     case library
     case sentences
@@ -15,7 +14,6 @@ enum AppRoute: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .dictionary: "Dictionary"
-        case .speak: "Speak"
         case .review: "Review"
         case .library: "My words"
         case .sentences: "Sentences"
@@ -26,7 +24,6 @@ enum AppRoute: String, CaseIterable, Identifiable {
     var symbol: String {
         switch self {
         case .dictionary: "character.book.closed"
-        case .speak: "waveform"
         case .review: "rectangle.on.rectangle.angled"
         case .library: "books.vertical"
         case .sentences: "text.quote"

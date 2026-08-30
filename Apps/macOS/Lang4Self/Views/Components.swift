@@ -695,7 +695,6 @@ struct AppShortcut: Identifiable {
     enum Group: String, CaseIterable {
         case global = "Global"
         case dictionary = "Dictionary"
-        case speak = "Speak"
         case review = "Review"
         case lists = "Lists and sentences"
         case dialogs = "Dialogs and controls"
@@ -708,20 +707,17 @@ struct AppShortcut: Identifiable {
     let action: String
 
     static let all: [AppShortcut] = [
-        .init(id: "global.routes", group: .global, shortcut: .init(chords: [.init(.command, .digit(1)), .init(.command, .digit(6))], separator: .range), action: "Open Dictionary, Speak, Review, My Words, Sentences, or Settings"),
+        .init(id: "global.routes", group: .global, shortcut: .init(chords: [.init(.command, .digit(1)), .init(.command, .digit(5))], separator: .range), action: "Open Dictionary, Review, My Words, Sentences, or Settings"),
         .init(id: "global.settings", group: .global, shortcut: .init(chords: [.init(.command, .comma)]), action: "Open Settings"),
         .init(id: "global.find", group: .global, shortcut: .commandF, action: "Focus search in Dictionary or My Words; open Dictionary elsewhere"),
         .init(id: "global.help", group: .global, shortcut: .init(chords: [.init(.command, .slash), .init(.command, .questionMark)], separator: .alternatives), action: "Show this keyboard shortcut reference"),
-        .init(id: "global.speak", group: .global, shortcut: .init(chords: [.init(.space)], hold: true), action: "Open Speak and record from anywhere"),
+        .init(id: "global.voice-search", group: .global, shortcut: .init(chords: [.init(.space)], hold: true), action: "Open Dictionary and search by voice when not typing"),
         .init(id: "global.focus", group: .global, shortcut: .init(chords: [.init(.tab), .init(.shift, .tab)]), action: "Move focus forward or backward"),
         .init(id: "dictionary.navigate", group: .dictionary, shortcut: .init(chords: [.init(.up), .init(.down)]), action: "Move through search results"),
         .init(id: "dictionary.results", group: .dictionary, shortcut: .returnKey, action: "Move from search into its results"),
         .init(id: "dictionary.add", group: .dictionary, shortcut: .init(chords: [.init(.command, .returnKey)]), action: "Add the selected dictionary entry"),
         .init(id: "dictionary.clear", group: .dictionary, shortcut: .init(chords: [.init(.escape)]), action: "Clear the focused search field"),
-        .init(id: "speak.record", group: .speak, shortcut: .init(chords: [.init(.space)], hold: true), action: "Record again; release to look it up"),
-        .init(id: "speak.navigate", group: .speak, shortcut: .init(chords: [.init(.up), .init(.down)]), action: "Move through words from the recording or list choices"),
-        .init(id: "speak.choose-list", group: .speak, shortcut: .init(chords: [.init(.right)]), action: "Choose another list for an added word"),
-        .init(id: "speak.add", group: .speak, shortcut: .returnKey, action: "Add the selected word or confirm a list choice"),
+        .init(id: "dictionary.voice-search", group: .dictionary, shortcut: .init(chords: [.init(.space)], hold: true), action: "Search spoken German when focus is outside the text field"),
         .init(id: "review.reveal", group: .review, shortcut: .init(chords: [.init(.space)]), action: "Reveal the current answer or restart after completion"),
         .init(id: "review.rate", group: .review, shortcut: .init(chords: [.init(.digit(1)), .init(.digit(4))], separator: .range), action: "Rate Again, Hard, Good, or Easy after revealing"),
         .init(id: "lists.navigate", group: .lists, shortcut: .init(chords: [.init(.up), .init(.down)]), action: "Move through results, cards, and sentences"),

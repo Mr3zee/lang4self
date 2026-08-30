@@ -28,7 +28,7 @@ The screenshots use the app's small deterministic test fixture. They do not cont
 - Fast SQLite + FTS5 lookup across more than one million imported entries
 - English and Russian translations from user-supplied dict.cc exports
 - Optional offline Wiktionary explanations
-- On-device Apple Speech lookup
+- On-device German Apple Speech lookup in Dictionary
 - Named word lists and SM-2-style review scheduling
 - Local example-sentence generation through LM Studio
 - Keyboard navigation throughout the app
@@ -111,13 +111,13 @@ lang4self import-explanations ~/Downloads/dictionary-de.db
 
 | Keys | Action |
 |---|---|
-| ⌘1 … ⌘6 | Open Dictionary, Speak, Review, My words, Sentences, or Settings |
+| ⌘1 … ⌘5 | Open Dictionary, Review, My words, Sentences, or Settings |
 | ⌘F | Focus Dictionary or My words search |
 | ⌘? | Show all shortcuts |
 | ↑ / ↓ | Navigate results, saved cards, and sentences |
 | Return | Open or confirm the current selection |
 | ⌘Return | Add the selected dictionary entry |
-| Hold Space | Record speech; release to look it up |
+| Hold Space | Outside text fields, record speech; release to look it up |
 | Space | Reveal a review |
 | 1 … 4 | Rate a review: Again, Hard, Good, or Easy |
 | Delete | Remove the selected saved card or sentence |

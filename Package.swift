@@ -47,6 +47,11 @@ let package = Package(
             name: "Lang4SelfCoreTests",
             dependencies: ["Lang4SelfCore"],
             path: "Tests/Lang4SelfCoreTests"
+        ),
+        .testTarget(
+            name: "Lang4SelfAppTests",
+            dependencies: ["Lang4Self"],
+            path: "Tests/Lang4SelfAppTests"
         )
     ],
     swiftLanguageVersions: [.v5]

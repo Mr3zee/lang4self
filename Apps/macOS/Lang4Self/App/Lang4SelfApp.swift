@@ -14,17 +14,17 @@ struct Lang4SelfApp: App {
         )
         _dependencies = StateObject(wrappedValue: dependencies)
         appDelegate.appState = dependencies.state
-        appDelegate.speakShortcut = dependencies.speakShortcut
+        appDelegate.voiceSearchShortcut = dependencies.voiceSearchShortcut
         appDelegate.isUITesting = dependencies.isUITesting
     }
 
     var body: some Scene {
         Window("Lang4Self", id: "main") {
-            if let state = dependencies.state, let speakShortcut = dependencies.speakShortcut {
+            if let state = dependencies.state, let voiceSearchShortcut = dependencies.voiceSearchShortcut {
                 RootView()
                     .environmentObject(state)
                     .environmentObject(dependencies.speech)
-                    .environmentObject(speakShortcut)
+                    .environmentObject(voiceSearchShortcut)
             } else {
                 StartupFailureView(message: dependencies.startupFailure ?? "The application could not start.")
             }
@@ -47,7 +47,7 @@ private final class Lang4SelfDependencies: ObservableObject {
     let isUITesting: Bool
     let state: AppState?
     let speech: SpeechRecognizer
-    let speakShortcut: SpeakShortcutController?
+    let voiceSearchShortcut: VoiceSearchShortcutController?
     let startupFailure: String?
 
     init(processInfo: ProcessInfo, settingsDefaults: UserDefaults) {
@@ -72,15 +72,27 @@ private final class Lang4SelfDependencies: ObservableObject {
                 calendar: .autoupdatingCurrent
             )
             self.state = state
-            speakShortcut = SpeakShortcutController(
+            let reportForwardedSpaceEvent: () -> Void = isUITesting
+                ? {
+                    DistributedNotificationCenter.default().postNotificationName(
+                        Notification.Name("Lang4SelfUITestingSpaceEventLeaked"),
+                        object: nil,
+                        userInfo: nil,
+                        deliverImmediately: true
+                    )
+                }
+                : {}
+            voiceSearchShortcut = VoiceSearchShortcutController(
                 router: state,
                 speech: speech,
-                holdDelay: 0.18
+                context: AppKitVoiceSearchShortcutContext(application: .shared),
+                holdDelay: 0.18,
+                onForwardedSpaceEvent: reportForwardedSpaceEvent
             )
             startupFailure = nil
         } catch {
             state = nil
-            speakShortcut = nil
+            voiceSearchShortcut = nil
             startupFailure = error.localizedDescription
         }
     }
@@ -102,15 +114,33 @@ private struct StartupFailureView: View {
 @MainActor
 private final class Lang4SelfAppDelegate: NSObject, NSApplicationDelegate {
     weak var appState: AppState?
-    var speakShortcut: SpeakShortcutController?
+    var voiceSearchShortcut: VoiceSearchShortcutController?
     var isUITesting = false
     private var shortcutKeyMonitor: Any?
+    private var uiTestingInputObserver: NSObjectProtocol?
+    private var uiTestingDisableMonitorObserver: NSObjectProtocol?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        speakShortcut?.startMonitoring()
+        voiceSearchShortcut?.startMonitoring()
         installShortcutKeyMonitor()
 
         guard isUITesting else { return }
+        uiTestingInputObserver = DistributedNotificationCenter.default().addObserver(
+            forName: Notification.Name("Lang4SelfUITestingSimulateHeldSpace"),
+            object: nil,
+            queue: .main
+        ) { _ in
+            UITestingInput.postHeldSpaceWithRepeats()
+        }
+        uiTestingDisableMonitorObserver = DistributedNotificationCenter.default().addObserver(
+            forName: Notification.Name("Lang4SelfUITestingDisableSpaceMonitor"),
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.voiceSearchShortcut?.stopMonitoring()
+            }
+        }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
             guard !NSApp.windows.contains(where: \.isVisible),
                   let openMainWindow = NSApp.mainMenu?.items
@@ -128,7 +158,7 @@ private final class Lang4SelfAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillResignActive(_ notification: Notification) {
-        speakShortcut?.cancelSpaceHold()
+        voiceSearchShortcut?.cancelSpaceHold()
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -140,9 +170,17 @@ private final class Lang4SelfAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        speakShortcut?.stopMonitoring()
+        voiceSearchShortcut?.stopMonitoring()
         if let shortcutKeyMonitor { NSEvent.removeMonitor(shortcutKeyMonitor) }
         shortcutKeyMonitor = nil
+        if let uiTestingInputObserver {
+            DistributedNotificationCenter.default().removeObserver(uiTestingInputObserver)
+        }
+        uiTestingInputObserver = nil
+        if let uiTestingDisableMonitorObserver {
+            DistributedNotificationCenter.default().removeObserver(uiTestingDisableMonitorObserver)
+        }
+        uiTestingDisableMonitorObserver = nil
     }
 
     private func installShortcutKeyMonitor() {
@@ -160,6 +198,7 @@ private final class Lang4SelfAppDelegate: NSObject, NSApplicationDelegate {
             return nil
         }
     }
+
 }
 
 private struct UITestingCommands: Commands {
@@ -170,6 +209,39 @@ private struct UITestingCommands: Commands {
             Button("Open Main Window for UI Testing") {
                 openWindow(id: "main")
             }
+        }
+    }
+}
+
+private enum UITestingInput {
+    static func postHeldSpaceWithRepeats() {
+        NSApp.activate()
+        NSApp.mainWindow?.makeKey()
+        postSpaceEvent(type: .keyDown, isRepeat: false, after: 0.05)
+        postSpaceEvent(type: .keyDown, isRepeat: true, after: 0.10)
+        postSpaceEvent(type: .keyDown, isRepeat: true, after: 0.15)
+        postSpaceEvent(type: .keyUp, isRepeat: false, after: 0.20)
+    }
+
+    private static func postSpaceEvent(
+        type: NSEvent.EventType,
+        isRepeat: Bool,
+        after delay: TimeInterval
+    ) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+            guard let event = NSEvent.keyEvent(
+                with: type,
+                location: .zero,
+                modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: NSApp.mainWindow?.windowNumber ?? 0,
+                context: nil,
+                characters: " ",
+                charactersIgnoringModifiers: " ",
+                isARepeat: isRepeat,
+                keyCode: 49
+            ) else { return }
+            NSApp.postEvent(event, atStart: false)
         }
     }
 }

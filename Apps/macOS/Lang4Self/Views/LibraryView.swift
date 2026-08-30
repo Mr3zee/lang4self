@@ -77,7 +77,7 @@ struct LibraryView: View {
                 Divider()
 
                 if state.cards.isEmpty {
-                    PlaceholderView(symbol: "books.vertical", title: "No saved entries", detail: "Add words or phrases from Dictionary or confirm them after speaking.")
+                    PlaceholderView(symbol: "books.vertical", title: "No saved entries", detail: "Add words or phrases from Dictionary.")
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
                     List(state.cards, selection: $selectedID) { card in
