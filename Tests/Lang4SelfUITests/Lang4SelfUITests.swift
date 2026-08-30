@@ -342,14 +342,68 @@ final class Lang4SelfUITests: XCTestCase {
             accuracy: 0.5,
             "Showing a recognition result changed the speech panel height"
         )
+        let results = element("dictionary.results")
+        XCTAssertTrue(results.waitForExistence(timeout: 3))
+        assertFocused(results)
+        XCTAssertTrue(app.buttons["Previous recognition result"].exists)
+        XCTAssertTrue(app.buttons["Next recognition result"].exists)
 
         app.typeKey(.rightArrow, modifierFlags: [])
+        XCTAssertEqual(elementText(transcription), "Der Hund")
+        assertFocused(results)
+
+        app.typeKey("]", modifierFlags: .command)
         XCTAssertTrue(waitUntil {
             self.elementText(transcription) == "Die Hunde"
                 && self.elementText(confidence) == "2 of 3 · 78% confidence"
         })
-        app.typeKey(.leftArrow, modifierFlags: [])
+        assertFocused(results)
+        app.typeKey("[", modifierFlags: .command)
         XCTAssertTrue(waitUntil { self.elementText(transcription) == "Der Hund" })
+        assertFocused(results)
+    }
+
+    func testVoiceSearchHidesCyclingControlsForOneAlternative() {
+        app.terminate()
+        app.launchArguments.append("--ui-testing-single-voice-alternative")
+        app.launch()
+
+        let voiceButton = app.buttons["dictionary.voice-search"]
+        XCTAssertTrue(voiceButton.waitForExistence(timeout: 8))
+        voiceButton.click()
+        voiceButton.click()
+
+        let transcription = element("dictionary.voice-transcription")
+        XCTAssertTrue(transcription.waitForExistence(timeout: 3))
+        XCTAssertEqual(elementText(transcription), "Der Hund")
+        XCTAssertEqual(elementText(element("dictionary.voice-confidence")), "96% confidence")
+        XCTAssertFalse(app.buttons["Previous recognition result"].exists)
+        XCTAssertFalse(app.buttons["Next recognition result"].exists)
+
+        let results = element("dictionary.results")
+        XCTAssertTrue(results.waitForExistence(timeout: 3))
+        assertFocused(results)
+        app.typeKey("]", modifierFlags: .command)
+        XCTAssertEqual(elementText(transcription), "Der Hund")
+        assertFocused(results)
+    }
+
+    func testEmptyVoiceRecordingReturnsToReadyState() {
+        app.terminate()
+        app.launchArguments.append("--ui-testing-empty-voice-result")
+        app.launch()
+
+        let voiceButton = app.buttons["dictionary.voice-search"]
+        XCTAssertTrue(voiceButton.waitForExistence(timeout: 8))
+        voiceButton.click()
+        voiceButton.click()
+
+        let status = element("dictionary.voice-status")
+        XCTAssertTrue(status.waitForExistence(timeout: 3))
+        XCTAssertEqual(elementText(status), "Hold Space to speak")
+        XCTAssertEqual(voiceButton.label, "Start recording")
+        XCTAssertEqual(app.textFields["dictionary.search"].value as? String, "")
+        assertFocused(voiceButton)
     }
 
     func testEntryDetailFoldsAdditionalEnglishAndRussianTranslations() {
@@ -476,6 +530,16 @@ final class Lang4SelfUITests: XCTestCase {
         XCTAssertTrue(voiceButton.waitForExistence(timeout: 3))
         XCTAssertEqual(voiceButton.label, "Start recording")
         XCTAssertEqual(app.textFields["dictionary.search"].value as? String, "")
+
+        voiceButton.click()
+        voiceButton.click()
+        let transcription = element("dictionary.voice-transcription")
+        XCTAssertTrue(transcription.waitForExistence(timeout: 3))
+        XCTAssertEqual(elementText(transcription), "Der Hund")
+
+        app.typeKey("]", modifierFlags: .command)
+        XCTAssertTrue(waitUntil { self.elementText(transcription) == "Die Hunde" })
+        assertFocused(element("dictionary.results"))
     }
 
     func testSpaceOpensDictionaryVoiceSearchFromAnotherPage() {

@@ -35,6 +35,7 @@ final class SpeechRecognizer: NSObject, ObservableObject {
     private var startGeneration = UUID()
     private var recognitionGeneration = UUID()
     private let isUITesting: Bool
+    private let uiTestingAlternativeCount: Int
     private var simulatesUndeterminedPermissions: Bool
 
     var isListening: Bool { phase == .listening }
@@ -49,9 +50,14 @@ final class SpeechRecognizer: NSObject, ObservableObject {
             && AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
     }
 
-    init(isUITesting: Bool, simulatesUndeterminedPermissions: Bool) {
+    init(
+        isUITesting: Bool,
+        simulatesUndeterminedPermissions: Bool,
+        uiTestingAlternativeCount: Int
+    ) {
         self.isUITesting = isUITesting
         self.simulatesUndeterminedPermissions = simulatesUndeterminedPermissions
+        self.uiTestingAlternativeCount = uiTestingAlternativeCount
         super.init()
     }
 
@@ -61,11 +67,11 @@ final class SpeechRecognizer: NSObject, ObservableObject {
         guard hasRecordingPermission else { return }
         guard phase != .requestingPermission, phase != .listening else { return }
         if isUITesting {
-            setAlternatives([
+            setAlternatives(Array([
                 .init(transcription: "Der Hund", confidence: 0.96),
                 .init(transcription: "Die Hunde", confidence: 0.78),
                 .init(transcription: "Ein Hund", confidence: 0.61)
-            ])
+            ].prefix(uiTestingAlternativeCount)))
             phase = .listening
             return
         }
@@ -102,7 +108,7 @@ final class SpeechRecognizer: NSObject, ObservableObject {
 
     func stop() {
         if isUITesting, phase == .listening {
-            phase = .guess
+            phase = completedRecognitionPhase
             return
         }
         if phase == .requestingPermission {
@@ -182,7 +188,7 @@ final class SpeechRecognizer: NSObject, ObservableObject {
                 if let error {
                     self.recognitionFinished = true
                     if self.phase == .processing {
-                        self.completeRecognition(error: error)
+                        self.completeRecognition()
                     } else if self.transcription.isEmpty {
                         self.cancelAudioOnly()
                         self.phase = .unavailable(error.localizedDescription)
@@ -216,14 +222,14 @@ final class SpeechRecognizer: NSObject, ObservableObject {
         }
     }
 
-    private func completeRecognition(error: Error? = nil) {
+    private func completeRecognition() {
         request = nil
         task = nil
-        if transcription.isEmpty, let error {
-            phase = .unavailable(error.localizedDescription)
-        } else {
-            phase = transcription.isEmpty ? .idle : .guess
-        }
+        phase = completedRecognitionPhase
+    }
+
+    private var completedRecognitionPhase: Phase {
+        transcription.isEmpty ? .idle : .guess
     }
 
     private func cancel() {
@@ -302,9 +308,11 @@ extension AppState: VoiceSearchShortcutRouting {}
 protocol VoiceSearchShortcutRecording: AnyObject {
     var phase: SpeechRecognizer.Phase { get }
     var hasRecordingPermission: Bool { get }
+    var hasMultipleAlternatives: Bool { get }
     func start()
     func rerecord()
     func stop()
+    func selectAlternative(by offset: Int)
 }
 
 extension SpeechRecognizer: VoiceSearchShortcutRecording {}
@@ -411,6 +419,13 @@ final class VoiceSearchShortcutController: ObservableObject {
     }
 
     func handle(_ event: NSEvent) -> NSEvent? {
+        if let alternativeOffset = voiceAlternativeOffset(for: event) {
+            DispatchQueue.main.async { [speech] in
+                speech.selectAlternative(by: alternativeOffset)
+            }
+            return nil
+        }
+
         guard event.keyCode == 49 else { return event }
 
         // Finish or consume a gesture that already began even if a sheet appeared
@@ -445,6 +460,27 @@ final class VoiceSearchShortcutController: ObservableObject {
 
         scheduleSpaceHold()
         return event
+    }
+
+    private func voiceAlternativeOffset(for event: NSEvent) -> Int? {
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        guard event.type == .keyDown,
+              !event.isARepeat,
+              modifiers.contains(.command),
+              modifiers.intersection([.control, .shift]).isEmpty,
+              router.route == .dictionary,
+              speech.phase == .guess,
+              speech.hasMultipleAlternatives,
+              !context.hasActiveDialog
+        else {
+            return nil
+        }
+        let characters = [event.characters, event.charactersIgnoringModifiers].compactMap { $0 }
+        if characters.contains("[") { return -1 }
+        if characters.contains("]") { return 1 }
+        if event.keyCode == 33 { return -1 }
+        if event.keyCode == 30 { return 1 }
+        return nil
     }
 
     private var textInputOwnsSpace: Bool {

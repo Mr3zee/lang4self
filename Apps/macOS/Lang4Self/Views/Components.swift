@@ -821,6 +821,7 @@ struct PlaceholderView: View {
 
 enum ShortcutKey: Hashable {
     case symbol(name: String, accessibilityName: String)
+    case character(String, accessibilityName: String)
     case comma
     case space
 
@@ -837,6 +838,8 @@ enum ShortcutKey: Hashable {
     static let right = symbol(name: "arrow.right", accessibilityName: "Right Arrow")
     static let slash = symbol(name: "line.diagonal", accessibilityName: "Slash")
     static let questionMark = symbol(name: "questionmark.square", accessibilityName: "Question Mark")
+    static let leftBracket = character("[", accessibilityName: "Left Bracket")
+    static let rightBracket = character("]", accessibilityName: "Right Bracket")
 
     static func letter(_ value: Character) -> ShortcutKey {
         symbol(name: "\(value.lowercased()).square", accessibilityName: value.uppercased())
@@ -849,6 +852,7 @@ enum ShortcutKey: Hashable {
     var accessibilityName: String {
         switch self {
         case .symbol(_, let accessibilityName): accessibilityName
+        case .character(_, let accessibilityName): accessibilityName
         case .comma: "Comma"
         case .space: "Space"
         }
@@ -924,6 +928,8 @@ struct KeyboardShortcutHint: View {
         switch key {
         case .symbol(let name, _):
             Image(systemName: name)
+        case .character(let value, _):
+            Text(value)
         case .comma:
             CommaShortcutIcon()
                 .fill(.primary)
@@ -992,7 +998,7 @@ struct AppShortcut: Identifiable {
         .init(id: "dictionary.add", group: .dictionary, shortcut: .init(chords: [.init(.command, .returnKey)]), action: "Add the selected dictionary entry"),
         .init(id: "dictionary.clear", group: .dictionary, shortcut: .init(chords: [.init(.escape)]), action: "Clear the focused search field"),
         .init(id: "dictionary.voice-search", group: .dictionary, shortcut: .init(chords: [.init(.space)], hold: true), action: "Search spoken German when focus is outside the text field"),
-        .init(id: "dictionary.voice-alternatives", group: .dictionary, shortcut: .init(chords: [.init(.left), .init(.right)]), action: "Cycle through voice recognition results"),
+        .init(id: "dictionary.voice-alternatives", group: .dictionary, shortcut: .init(chords: [.init(.command, .leftBracket), .init(.command, .rightBracket)]), action: "Cycle through voice recognition results"),
         .init(id: "review.reveal", group: .review, shortcut: .init(chords: [.init(.space)]), action: "Reveal the current answer or restart after completion"),
         .init(id: "review.translation", group: .review, shortcut: .init(chords: [.init(.left), .init(.right)]), action: "Move between translations in the current language"),
         .init(id: "review.language", group: .review, shortcut: .init(chords: [.init(.up), .init(.down)]), action: "Move between translation languages"),

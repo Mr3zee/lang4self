@@ -3,10 +3,25 @@ import XCTest
 
 @MainActor
 final class SpeechRecognizerAlternativeTests: XCTestCase {
+    func testEmptyRecordingReturnsToIdle() {
+        let recognizer = SpeechRecognizer(
+            isUITesting: true,
+            simulatesUndeterminedPermissions: false,
+            uiTestingAlternativeCount: 0
+        )
+
+        recognizer.start()
+        XCTAssertEqual(recognizer.phase, .listening)
+
+        recognizer.stop()
+        XCTAssertEqual(recognizer.phase, .idle)
+    }
+
     func testVoiceAlternativesExposeConfidenceAndWrapInBothDirections() {
         let recognizer = SpeechRecognizer(
             isUITesting: true,
-            simulatesUndeterminedPermissions: false
+            simulatesUndeterminedPermissions: false,
+            uiTestingAlternativeCount: 3
         )
 
         recognizer.start()

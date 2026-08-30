@@ -63,7 +63,15 @@ struct DictionaryView: View {
             }
         }
         .onChange(of: state.searchResults.map(\.id)) { _, _ in
-            if speech.phase == .guess { focusResults() }
+            if speech.phase == .guess, !state.isSearchingDictionary { focusResults() }
+        }
+        .onChange(of: state.isSearchingDictionary) { _, isSearching in
+            guard speech.phase == .guess else { return }
+            if isSearching {
+                focusedControl = nil
+            } else {
+                focusResults()
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: .focusDictionarySearch)) { _ in
             state.route = .dictionary
@@ -160,13 +168,12 @@ struct DictionaryView: View {
                             .frame(maxWidth: 520)
                             .textSelection(.enabled)
                             .accessibilityIdentifier("dictionary.voice-transcription")
-                        if let position = speech.alternativePosition {
+                        if speech.hasMultipleAlternatives, let position = speech.alternativePosition {
                             HStack(spacing: 10) {
                                 Button { cycleVoiceAlternative(by: -1) } label: {
                                     Image(systemName: "arrow.left")
                                 }
                                 .buttonStyle(.plain)
-                                .disabled(!speech.hasMultipleAlternatives)
                                 .accessibilityLabel("Previous recognition result")
                                 Text("\(position) · \(confidencePercent)% confidence")
                                     .monospacedDigit()
@@ -175,11 +182,16 @@ struct DictionaryView: View {
                                     Image(systemName: "arrow.right")
                                 }
                                 .buttonStyle(.plain)
-                                .disabled(!speech.hasMultipleAlternatives)
                                 .accessibilityLabel("Next recognition result")
                             }
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                        } else {
+                            Text("\(confidencePercent)% confidence")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
+                                .accessibilityIdentifier("dictionary.voice-confidence")
                         }
                     }
                 } else {
@@ -199,20 +211,6 @@ struct DictionaryView: View {
             SpeechAuroraBackground()
                 .accessibilityHidden(true)
                 .allowsHitTesting(false)
-        }
-        .onKeyPress(.leftArrow) {
-            guard isVoiceResult, speech.hasMultipleAlternatives, focusedControl != .search else {
-                return .ignored
-            }
-            cycleVoiceAlternative(by: -1)
-            return .handled
-        }
-        .onKeyPress(.rightArrow) {
-            guard isVoiceResult, speech.hasMultipleAlternatives, focusedControl != .search else {
-                return .ignored
-            }
-            cycleVoiceAlternative(by: 1)
-            return .handled
         }
     }
 
@@ -254,16 +252,7 @@ struct DictionaryView: View {
                     state.addToPersonalDictionary(selectedEntry)
                     return .handled
                 }
-                .onKeyPress(.leftArrow) {
-                    guard isVoiceResult, speech.hasMultipleAlternatives else { return .ignored }
-                    cycleVoiceAlternative(by: -1)
-                    return .handled
-                }
                 .onKeyPress(.rightArrow) {
-                    if isVoiceResult, speech.hasMultipleAlternatives {
-                        cycleVoiceAlternative(by: 1)
-                        return .handled
-                    }
                     guard isVoiceResult,
                           let addedListID = state.addedListID(for: entry),
                           state.wordLists.contains(where: { $0.id != addedListID })
@@ -320,7 +309,7 @@ struct DictionaryView: View {
         .focused($focusedControl, equals: .record)
         .focusEffectDisabled()
         .onKeyPress(.return) {
-            speech.requestPermissions()
+            DispatchQueue.main.async { speech.requestPermissions() }
             return .handled
         }
         .accessibilityIdentifier("dictionary.voice-permission")
@@ -443,7 +432,6 @@ struct DictionaryView: View {
 
     private func cycleVoiceAlternative(by offset: Int) {
         isShowingAddedListSelection = false
-        focusedControl = .record
         speech.selectAlternative(by: offset)
     }
 

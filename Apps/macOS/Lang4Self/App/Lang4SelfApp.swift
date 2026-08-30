@@ -55,7 +55,10 @@ private final class Lang4SelfDependencies: ObservableObject {
         self.isUITesting = isUITesting
         speech = SpeechRecognizer(
             isUITesting: isUITesting,
-            simulatesUndeterminedPermissions: processInfo.arguments.contains("--ui-testing-speech-permission-setup")
+            simulatesUndeterminedPermissions: processInfo.arguments.contains("--ui-testing-speech-permission-setup"),
+            uiTestingAlternativeCount: processInfo.arguments.contains("--ui-testing-empty-voice-result")
+                ? 0
+                : processInfo.arguments.contains("--ui-testing-single-voice-alternative") ? 1 : 3
         )
         do {
             let databaseURL = processInfo.environment["LANG4SELF_UI_TEST_DATABASE"]
