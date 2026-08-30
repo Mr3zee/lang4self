@@ -18,13 +18,20 @@ The app includes a tiny original starter list. The complete dict.cc file stays o
 | Keys | Action |
 |---|---|
 | ⌘1 … ⌘6 | Dictionary, Speak, Review, My words, Sentences, Settings |
-| ⌘F | Focus dictionary search |
-| Hold Space | Record speech; release to stop (Space reveals a review) |
-| Return | Confirm a spoken word or phrase |
-| 1 … 4 | Again, Hard, Good, Easy |
-| ↑ / ↓ | Navigate results and cards |
-| ← / → | Select a word in a saved sentence and show its translation card |
-| Delete | Remove the selected card from its list |
+| ⌘, | Open Settings |
+| ⌘F | Focus Dictionary or My words search; open Dictionary elsewhere |
+| ⌘? | Show the complete keyboard shortcut reference |
+| Tab / ⇧Tab | Move focus forward or backward |
+| ↑ / ↓ | Navigate dictionary results, saved cards, and sentences |
+| ← / → | Navigate words in the sentence inspector |
+| Return | Enter results, edit a card, inspect a sentence, confirm speech, or accept a dialog |
+| ⌘Return | Add the selected dictionary entry |
+| ⌘⇧N | Create a list in My words |
+| Hold Space | Record speech; release to look it up |
+| Space | Reveal a review or activate a focused control |
+| 1 … 4 | Rate a revealed review: Again, Hard, Good, Easy |
+| Delete | Remove the selected saved card or sentence |
+| Esc | Clear focused search, leave sentence inspection, or close a dialog |
 
 ## Local architecture
 
@@ -45,10 +52,22 @@ Run the core test suite with:
 swift test
 ```
 
+Run the macOS UI test suite with the **Lang4Self** scheme in Xcode, or with:
+
+```sh
+xcodebuild -project Lang4Self.xcodeproj -scheme Lang4Self -destination 'platform=macOS' test
+```
+
 Build the actual app bundle from Terminal with:
 
 ```sh
 ./scripts/build-macos.sh
+```
+
+Build an optimized release app bundle with:
+
+```sh
+./scripts/build-release.sh
 ```
 
 Stop, rebuild, and relaunch the development app with:
@@ -57,11 +76,13 @@ Stop, rebuild, and relaunch the development app with:
 ./scripts/reload-macos.sh
 ```
 
-Install the release app on the Desktop and the CLI in `~/.local/bin`:
+Build and install the release app on the Desktop and the CLI in `~/.local/bin`:
 
 ```sh
-./scripts/install.sh
+./scripts/release.sh
 ```
+
+`./scripts/install.sh` remains an alias for the same command.
 
 CLI examples:
 

@@ -22,6 +22,7 @@ struct RootView: View {
                     Image(systemName: route.symbol)
                 }
                 .tag(route)
+                .accessibilityIdentifier("sidebar.\(route.rawValue)")
             }
             .navigationSplitViewColumnWidth(min: 170, ideal: 205)
             .safeAreaInset(edge: .bottom) {
@@ -34,6 +35,7 @@ struct RootView: View {
                     }
                     .buttonStyle(.plain)
                     .padding(12)
+                    .accessibilityIdentifier("sidebar.get-full-dictionary")
                 }
             }
         } detail: {
@@ -52,6 +54,9 @@ struct RootView: View {
                             Image(systemName: "xmark")
                         }
                         .buttonStyle(.plain)
+                        .help("Dismiss notification")
+                        .accessibilityLabel("Dismiss notification")
+                        .accessibilityIdentifier("banner.dismiss")
                     }
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
@@ -63,6 +68,12 @@ struct RootView: View {
             }
         }
         .animation(.snappy, value: state.banner)
+        .sheet(isPresented: $state.isShowingKeyboardShortcuts) {
+            KeyboardShortcutsSheet()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .showKeyboardShortcuts)) { _ in
+            state.isShowingKeyboardShortcuts = true
+        }
     }
 
     @ViewBuilder
@@ -76,4 +87,8 @@ struct RootView: View {
         case .settings: SettingsView()
         }
     }
+}
+
+extension Notification.Name {
+    static let showKeyboardShortcuts = Notification.Name("showKeyboardShortcuts")
 }

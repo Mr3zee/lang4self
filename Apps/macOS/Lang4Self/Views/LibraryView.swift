@@ -25,6 +25,7 @@ struct LibraryView: View {
                     }
                     .labelsHidden()
                     .pickerStyle(.menu)
+                    .accessibilityIdentifier("library.list-picker")
 
                     Button {
                         listEditor = .new
@@ -32,6 +33,8 @@ struct LibraryView: View {
                         Image(systemName: "plus")
                     }
                     .help("New list")
+                    .accessibilityLabel("New list")
+                    .accessibilityIdentifier("library.new-list")
 
                     Menu {
                         Button("Rename List…") {
@@ -46,6 +49,8 @@ struct LibraryView: View {
                     }
                     .menuStyle(.borderlessButton)
                     .help("List actions")
+                    .accessibilityLabel("List actions")
+                    .accessibilityIdentifier("library.list-actions")
                 }
                 .padding(.horizontal, 12)
                 .padding(.top, 12)
@@ -55,6 +60,11 @@ struct LibraryView: View {
                     TextField("Search \(state.selectedWordList?.name ?? "My words")", text: $state.libraryQuery)
                         .textFieldStyle(.plain)
                         .focused($focusedArea, equals: .search)
+                        .accessibilityIdentifier("library.search")
+                        .onExitCommand {
+                            state.loadLibrary(search: "")
+                            focusedArea = .search
+                        }
                 }
                 .padding(9)
                 .background(.quaternary.opacity(0.7), in: RoundedRectangle(cornerRadius: 9))
@@ -82,6 +92,20 @@ struct LibraryView: View {
                     }
                     .focused($focusedArea, equals: .cards)
                     .onDeleteCommand(perform: removeSelectedCard)
+                    .onKeyPress(.upArrow) {
+                        moveCardSelection(.up)
+                        return .handled
+                    }
+                    .onKeyPress(.downArrow) {
+                        moveCardSelection(.down)
+                        return .handled
+                    }
+                    .onKeyPress(.return) {
+                        guard let selected else { return .ignored }
+                        beginEditing(selected)
+                        return .handled
+                    }
+                    .accessibilityIdentifier("library.cards")
                 }
             }
             .frame(minWidth: 300, idealWidth: 365)
@@ -107,13 +131,21 @@ struct LibraryView: View {
             state.loadLibrary()
             focusCardList()
         }
-        .sheet(item: $editingCard) { card in
+        .onReceive(NotificationCenter.default.publisher(for: .focusLibrarySearch)) { _ in
+            state.route = .library
+            focusedArea = .search
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .createWordList)) { _ in
+            guard state.route == .library else { return }
+            listEditor = .new
+        }
+        .sheet(item: $editingCard, onDismiss: focusCardList) { card in
             CardEditor(card: card) { updated in
                 state.updateCard(updated)
                 editingCard = nil
             }
         }
-        .sheet(item: $listEditor) { request in
+        .sheet(item: $listEditor, onDismiss: focusCardList) { request in
             ListNameEditor(title: request.title, initialName: request.initialName) { name in
                 switch request.action {
                 case .create: state.createWordList(name: name)
@@ -138,7 +170,9 @@ struct LibraryView: View {
                 Label(card.isSuspended ? "Suspended" : "Due \(card.dueAt.formatted(date: .abbreviated, time: .shortened))", systemImage: card.isSuspended ? "pause.circle" : "calendar")
                     .foregroundStyle(.secondary)
                 Spacer()
-                Button("Edit") { editingCard = card }
+                Button("Edit") { beginEditing(card) }
+                    .accessibilityLabel("Edit \(card.german)")
+                    .accessibilityIdentifier("library.edit-card")
                 Button {
                     var changed = card
                     changed.isStarred.toggle()
@@ -146,6 +180,27 @@ struct LibraryView: View {
                 } label: {
                     Label(card.isStarred ? "Unstar" : "Star", systemImage: card.isStarred ? "star.slash" : "star")
                 }
+                .accessibilityIdentifier("library.star-card")
+                Menu {
+                    Button(card.isSuspended ? "Resume Reviews" : "Suspend Reviews") {
+                        var changed = card
+                        changed.isSuspended.toggle()
+                        state.updateCard(changed)
+                    }
+                    Menu("Add to List") {
+                        ForEach(state.wordLists.filter { $0.id != state.selectedListID }) { list in
+                            Button(list.name) { state.addCard(card, to: list) }
+                        }
+                    }
+                    .disabled(state.wordLists.count < 2)
+                    Divider()
+                    Button("Remove from List", role: .destructive) {
+                        removeSelectedCard()
+                    }
+                } label: {
+                    Label("More", systemImage: "ellipsis.circle")
+                }
+                .accessibilityIdentifier("library.more-actions")
             }
             .padding(14)
         }
@@ -153,7 +208,7 @@ struct LibraryView: View {
 
     @ViewBuilder
     private func cardMenu(_ card: PersonalCard) -> some View {
-        Button("Edit…") { editingCard = card }
+        Button("Edit…") { beginEditing(card) }
         Button(card.isStarred ? "Unstar" : "Star") {
             var changed = card; changed.isStarred.toggle(); state.updateCard(changed)
         }
@@ -181,9 +236,32 @@ struct LibraryView: View {
         state.removeCardFromSelectedList(card)
     }
 
+    private func beginEditing(_ card: PersonalCard) {
+        focusedArea = nil
+        DispatchQueue.main.async { editingCard = card }
+    }
+
+    private func moveCardSelection(_ direction: MoveCommandDirection) {
+        guard !state.cards.isEmpty else { return }
+        let currentIndex = selectedID.flatMap { id in
+            state.cards.firstIndex { $0.id == id }
+        } ?? 0
+        let nextIndex: Int
+        switch direction {
+        case .up, .left:
+            nextIndex = max(0, currentIndex - 1)
+        case .down, .right:
+            nextIndex = min(state.cards.count - 1, currentIndex + 1)
+        @unknown default:
+            return
+        }
+        selectedID = state.cards[nextIndex].id
+    }
+
     private func focusCardList() {
         if selectedID == nil { selectedID = state.cards.first?.id }
-        DispatchQueue.main.async { focusedArea = .cards }
+        focusedArea = nil
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { focusedArea = .cards }
     }
 
     private func entry(for card: PersonalCard) -> DictionaryEntry {
@@ -208,6 +286,7 @@ private struct ListEditorRequest: Identifiable {
 private struct ListNameEditor: View {
     @Environment(\.dismiss) private var dismiss
     @State private var name: String
+    @FocusState private var nameFocused: Bool
     let title: String
     let save: (String) -> Void
 
@@ -223,17 +302,25 @@ private struct ListNameEditor: View {
             TextField("List name", text: $name)
                 .textFieldStyle(.roundedBorder)
                 .onSubmit(submit)
+                .focused($nameFocused)
+                .accessibilityIdentifier("list-editor.name")
             HStack {
                 Spacer()
-                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("Cancel") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                    .accessibilityIdentifier("list-editor.cancel")
                 Button("Save", action: submit)
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.defaultAction)
                     .disabled(trimmedName.isEmpty)
+                    .accessibilityIdentifier("list-editor.save")
             }
         }
         .padding(24)
         .frame(width: 380)
+        .onAppear {
+            DispatchQueue.main.async { nameFocused = true }
+        }
     }
 
     private var trimmedName: String { name.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -246,7 +333,10 @@ private struct ListNameEditor: View {
 private struct CardEditor: View {
     @Environment(\.dismiss) private var dismiss
     @State private var card: PersonalCard
+    @FocusState private var focusedField: Field?
     let save: (PersonalCard) -> Void
+
+    private enum Field: Hashable { case german }
 
     init(card: PersonalCard, save: @escaping (PersonalCard) -> Void) {
         _card = State(initialValue: card)
@@ -258,27 +348,45 @@ private struct CardEditor: View {
             Text("Edit entry").font(.title2.weight(.bold))
             Form {
                 TextField("German", text: $card.german)
+                    .focused($focusedField, equals: .german)
+                    .accessibilityIdentifier("card-editor.german")
                 TextField("Translations", text: $card.english)
+                    .accessibilityIdentifier("card-editor.translations")
                 TextField("Tags", text: $card.tags, prompt: Text("travel, A2"))
+                    .accessibilityIdentifier("card-editor.tags")
                 TextField("Notes", text: $card.notes, axis: .vertical)
                     .lineLimit(3...8)
+                    .accessibilityIdentifier("card-editor.notes")
                 Picker("Entry type", selection: $card.kind) {
                     ForEach(WordKind.allCases, id: \.self) { Text($0.label).tag($0) }
                 }
+                .accessibilityIdentifier("card-editor.kind")
                 Picker("Gender", selection: $card.gender) {
                     ForEach(Gender.allCases, id: \.self) { Text($0 == .unknown ? "Unknown" : $0.article).tag($0) }
                 }
+                .accessibilityIdentifier("card-editor.gender")
             }
             HStack {
                 Spacer()
-                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("Cancel") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                    .accessibilityIdentifier("card-editor.cancel")
                 Button("Save") { save(card) }
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.defaultAction)
                     .disabled(card.german.isEmpty || card.english.isEmpty)
+                    .accessibilityIdentifier("card-editor.save")
             }
         }
         .padding(24)
         .frame(width: 480)
+        .onAppear {
+            DispatchQueue.main.async { focusedField = .german }
+        }
     }
+}
+
+extension Notification.Name {
+    static let focusLibrarySearch = Notification.Name("focusLibrarySearch")
+    static let createWordList = Notification.Name("createWordList")
 }

@@ -6,6 +6,7 @@ struct SettingsView: View {
     @EnvironmentObject private var state: AppState
     @State private var showingImporter = false
     @State private var showingExplanationImporter = false
+    @FocusState private var firstControlFocused: Bool
 
     var body: some View {
         ScrollView {
@@ -29,9 +30,13 @@ struct SettingsView: View {
                             Link(destination: URL(string: "https://www1.dict.cc/translation_file_request.php?l=e")!) {
                                 Label("Request DE → EN file", systemImage: "safari")
                             }
+                            .focusable()
+                            .focused($firstControlFocused)
+                            .accessibilityIdentifier("settings.request-english")
                             Link(destination: URL(string: "https://www1.dict.cc/translation_file_request.php?l=e")!) {
                                 Label("Request DE → RU file", systemImage: "safari")
                             }
+                            .accessibilityIdentifier("settings.request-russian")
                             Button {
                                 showingImporter = true
                             } label: {
@@ -39,6 +44,7 @@ struct SettingsView: View {
                             }
                             .buttonStyle(.borderedProminent)
                             .disabled(state.isImporting)
+                            .accessibilityIdentifier("settings.import-dictionary")
                         }
                     }
 
@@ -66,6 +72,7 @@ struct SettingsView: View {
                         Spacer()
                         VStack(alignment: .trailing, spacing: 8) {
                             Link("Source and license", destination: URL(string: "https://lector.dev/free/german-dictionary/")!)
+                                .accessibilityIdentifier("settings.explanation-source")
                             Button {
                                 showingExplanationImporter = true
                             } label: {
@@ -73,6 +80,7 @@ struct SettingsView: View {
                             }
                             .buttonStyle(.borderedProminent)
                             .disabled(state.isImportingExplanations)
+                            .accessibilityIdentifier("settings.import-explanations")
                         }
                     }
 
@@ -113,6 +121,7 @@ struct SettingsView: View {
                                 .labelsHidden()
                                 .pickerStyle(.menu)
                                 .frame(maxWidth: .infinity, alignment: .leading)
+                                .accessibilityIdentifier("settings.model")
 
                                 if state.isRefreshingLMStudioModels {
                                     ProgressView().controlSize(.small)
@@ -124,6 +133,7 @@ struct SettingsView: View {
                                 }
                                 .disabled(state.isRefreshingLMStudioModels)
                                 .help("Refresh installed LM Studio models")
+                                .accessibilityIdentifier("settings.refresh-models")
                             }
                         }
 
@@ -136,6 +146,7 @@ struct SettingsView: View {
                             }
                             .labelsHidden()
                             .pickerStyle(.menu)
+                            .accessibilityIdentifier("settings.context-window")
                         }
 
                         GridRow {
@@ -147,12 +158,14 @@ struct SettingsView: View {
                             }
                             .labelsHidden()
                             .pickerStyle(.segmented)
+                            .accessibilityIdentifier("settings.gpu-offload")
                         }
 
                         GridRow {
                             Text("Temperature").foregroundStyle(.secondary)
                             HStack {
                                 Slider(value: lmSetting(\.temperature), in: 0...1.5, step: 0.05)
+                                    .accessibilityIdentifier("settings.temperature")
                                 Text(state.lmStudioSettings.temperature, format: .number.precision(.fractionLength(2)))
                                     .monospacedDigit()
                                     .frame(width: 36, alignment: .trailing)
@@ -163,6 +176,7 @@ struct SettingsView: View {
                             Text("Top-p").foregroundStyle(.secondary)
                             HStack {
                                 Slider(value: lmSetting(\.topP), in: 0.1...1, step: 0.05)
+                                    .accessibilityIdentifier("settings.top-p")
                                 Text(state.lmStudioSettings.topP, format: .number.precision(.fractionLength(2)))
                                     .monospacedDigit()
                                     .frame(width: 36, alignment: .trailing)
@@ -178,6 +192,7 @@ struct SettingsView: View {
                             }
                             .labelsHidden()
                             .pickerStyle(.menu)
+                            .accessibilityIdentifier("settings.max-output")
                         }
                     }
 
@@ -199,6 +214,7 @@ struct SettingsView: View {
                         Button("Reset Defaults") {
                             state.updateLMStudioSettings(.defaults)
                         }
+                        .accessibilityIdentifier("settings.reset-model-defaults")
                     }
                     Text("Model, context, and GPU changes reload the dedicated model on the next generation. Temperature and top-p apply without reloading.")
                         .font(.caption)
@@ -206,15 +222,7 @@ struct SettingsView: View {
                 }
 
                 settingsSection("Keyboard", symbol: "keyboard") {
-                    Grid(alignment: .leading, horizontalSpacing: 36, verticalSpacing: 9) {
-                        shortcut("⌘1 … ⌘6", "Open each section")
-                        shortcut("⌘F", "Search dictionary")
-                        shortcut("Hold Space", "Record speech; release to stop")
-                        shortcut("Return", "Confirm spoken entry")
-                        shortcut("1 … 4", "Rate a review")
-                        shortcut("↑ / ↓", "Move through lists")
-                        shortcut("Delete", "Remove the selected card from its list")
-                    }
+                    KeyboardShortcutList()
                 }
 
                 settingsSection("Local data", symbol: "internaldrive") {
@@ -230,6 +238,10 @@ struct SettingsView: View {
             .padding(28)
         }
         .navigationTitle("Settings")
+        .defaultFocus($firstControlFocused, true)
+        .onAppear {
+            DispatchQueue.main.async { firstControlFocused = true }
+        }
         .task {
             if state.installedLMStudioModels.isEmpty {
                 state.refreshLMStudioModels()
@@ -278,13 +290,6 @@ struct SettingsView: View {
                 .padding(16)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 12))
-        }
-    }
-
-    private func shortcut(_ keys: String, _ action: String) -> some View {
-        GridRow {
-            Text(keys).font(.body.monospaced().weight(.semibold))
-            Text(action).foregroundStyle(.secondary)
         }
     }
 

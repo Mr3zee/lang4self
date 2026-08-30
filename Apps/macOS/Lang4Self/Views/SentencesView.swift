@@ -5,6 +5,7 @@ struct SentencesView: View {
     @EnvironmentObject private var state: AppState
     @State private var generationCount = 5
     @State private var selection: SentenceSelection?
+    @FocusState private var sentenceListFocused: Bool
 
     var body: some View {
         HSplitView {
@@ -32,9 +33,15 @@ struct SentencesView: View {
             }
         }
         .navigationTitle("Sentences")
-        .onAppear { repairSelection() }
+        .onAppear {
+            repairSelection()
+            DispatchQueue.main.async { sentenceListFocused = true }
+        }
         .onChange(of: state.generatedSentences.map(\.id)) { _, _ in repairSelection(preferGenerated: true) }
         .onChange(of: state.savedSentences.map(\.id)) { _, _ in repairSelection() }
+        .onReceive(NotificationCenter.default.publisher(for: .focusSentenceList)) { _ in
+            DispatchQueue.main.async { sentenceListFocused = true }
+        }
     }
 
     private var generationControls: some View {
@@ -49,6 +56,7 @@ struct SentencesView: View {
                 .labelsHidden()
                 .pickerStyle(.menu)
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .accessibilityIdentifier("sentences.list-picker")
 
                 Stepper(value: $generationCount, in: 1...10) {
                     Text("\(generationCount)")
@@ -56,12 +64,14 @@ struct SentencesView: View {
                         .frame(minWidth: 18)
                 }
                 .help("Number of sentences (maximum 10)")
+                .accessibilityIdentifier("sentences.count")
 
                 Button("Generate") {
                     state.generateSentences(count: generationCount)
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(state.isGeneratingSentences || state.wordLists.isEmpty)
+                .accessibilityIdentifier("sentences.generate")
             }
 
             HStack(spacing: 8) {
@@ -90,18 +100,17 @@ struct SentencesView: View {
                 Section("Generated") {
                     ForEach(state.generatedSentences) { sentence in
                         HStack(alignment: .top, spacing: 9) {
-                            Button {
-                                state.setGeneratedSentence(
-                                    sentence.id,
-                                    selected: !state.selectedGeneratedSentenceIDs.contains(sentence.id)
-                                )
-                            } label: {
-                                Image(systemName: state.selectedGeneratedSentenceIDs.contains(sentence.id) ? "checkmark.square.fill" : "square")
-                                    .foregroundStyle(state.selectedGeneratedSentenceIDs.contains(sentence.id) ? Color.accentColor : .secondary)
+                            Toggle(isOn: Binding(
+                                get: { state.selectedGeneratedSentenceIDs.contains(sentence.id) },
+                                set: { state.setGeneratedSentence(sentence.id, selected: $0) }
+                            )) {
+                                Text("Include \(sentence.german) when saving")
                             }
-                            .buttonStyle(.plain)
-                            .focusable(false)
+                            .labelsHidden()
+                            .toggleStyle(.checkbox)
                             .help("Include when saving")
+                            .accessibilityLabel("Include generated sentence when saving")
+                            .accessibilityIdentifier("sentences.include.\(sentence.id.uuidString)")
 
                             SentenceRow(german: sentence.german, translation: sentence.translation)
                         }
@@ -136,6 +145,14 @@ struct SentencesView: View {
                   let sentence = state.savedSentences.first(where: { $0.id == id }) else { return }
             state.deleteSentence(sentence)
         }
+        .onKeyPress(.return) {
+            guard selectedSentence != nil else { return .ignored }
+            sentenceListFocused = false
+            NotificationCenter.default.post(name: .focusSentenceInspector, object: nil)
+            return .handled
+        }
+        .focused($sentenceListFocused)
+        .accessibilityIdentifier("sentences.list")
     }
 
     private var saveControls: some View {
@@ -145,12 +162,14 @@ struct SentencesView: View {
                     state.selectedGeneratedSentenceIDs.count != state.generatedSentences.count
                 )
             }
+            .accessibilityIdentifier("sentences.select-all")
             Spacer()
             Button("Save Selected (\(state.selectedGeneratedSentenceIDs.count))") {
                 state.saveSelectedGeneratedSentences()
             }
             .buttonStyle(.borderedProminent)
             .disabled(state.selectedGeneratedSentenceIDs.isEmpty)
+            .accessibilityIdentifier("sentences.save-selected")
         }
         .padding(12)
     }
@@ -235,7 +254,7 @@ private struct SentenceInspector: View {
     @State private var entries: [DictionaryEntry] = []
     @State private var selectedEntryIndex = 0
     @State private var isLookingUp = false
-    @FocusState private var sentenceHasFocus: Bool
+    @FocusState private var focusedTokenIndex: Int?
 
     private var selectedToken: SentenceToken? {
         guard sentence.tokens.indices.contains(selectedTokenIndex) else { return nil }
@@ -253,13 +272,20 @@ private struct SentenceInspector: View {
                     Text("←/→ select word")
                         .font(.caption)
                         .foregroundStyle(.tertiary)
+                    if let savedSentence {
+                        Button("Delete Sentence", role: .destructive) {
+                            state.deleteSentence(savedSentence)
+                        }
+                        .keyboardShortcut(.delete, modifiers: [])
+                        .accessibilityIdentifier("sentences.delete-selected")
+                    }
                 }
 
                 TokenFlowLayout(spacing: 7) {
                     ForEach(Array(sentence.tokens.enumerated()), id: \.element.id) { offset, token in
                         Button {
                             selectedTokenIndex = offset
-                            sentenceHasFocus = true
+                            focusedTokenIndex = offset
                         } label: {
                             Text(token.surface)
                                 .font(.title2.weight(offset == selectedTokenIndex ? .semibold : .regular))
@@ -271,14 +297,13 @@ private struct SentenceInspector: View {
                                 )
                         }
                         .buttonStyle(.plain)
-                        .focusable(false)
+                        .focusable()
+                        .focused($focusedTokenIndex, equals: offset)
+                        .onMoveCommand(perform: moveSelection)
+                        .accessibilityLabel("Word \(offset + 1) of \(sentence.tokens.count): \(token.surface)")
+                        .accessibilityIdentifier("sentence.token.\(offset)")
                     }
                 }
-                .focusable()
-                .focused($sentenceHasFocus)
-                .onMoveCommand(perform: moveSelection)
-                .accessibilityLabel("German sentence. Use arrow keys to select a word.")
-
                 Text(sentence.translation)
                     .font(.title3)
                     .foregroundStyle(.secondary)
@@ -310,6 +335,7 @@ private struct SentenceInspector: View {
                         .pickerStyle(.menu)
                         .padding(.horizontal, 18)
                         .padding(.top, 10)
+                        .accessibilityIdentifier("sentence.translation-picker")
                     }
                     EntryDetailView(entry: entries[min(selectedEntryIndex, entries.count - 1)])
                 }
@@ -326,7 +352,19 @@ private struct SentenceInspector: View {
         }
         .onAppear {
             selectedTokenIndex = 0
-            DispatchQueue.main.async { sentenceHasFocus = true }
+        }
+        .onChange(of: focusedTokenIndex) { _, index in
+            if let index { selectedTokenIndex = index }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .focusSentenceInspector)) { _ in
+            selectedTokenIndex = 0
+            focusedTokenIndex = 0
+        }
+        .onExitCommand {
+            focusedTokenIndex = nil
+            DispatchQueue.main.async {
+                NotificationCenter.default.post(name: .focusSentenceList, object: nil)
+            }
         }
     }
 
@@ -340,7 +378,18 @@ private struct SentenceInspector: View {
         @unknown default:
             break
         }
+        focusedTokenIndex = selectedTokenIndex
     }
+
+    private var savedSentence: SavedSentence? {
+        guard case .saved(let id) = sentence.id else { return nil }
+        return state.savedSentences.first { $0.id == id }
+    }
+}
+
+private extension Notification.Name {
+    static let focusSentenceInspector = Notification.Name("focusSentenceInspector")
+    static let focusSentenceList = Notification.Name("focusSentenceList")
 }
 
 private struct TokenFlowLayout: Layout {

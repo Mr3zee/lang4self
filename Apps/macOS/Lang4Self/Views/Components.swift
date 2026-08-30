@@ -151,6 +151,7 @@ struct EntryDetailView: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.return, modifiers: [.command])
+                    .accessibilityIdentifier("dictionary.add-selected")
                 }
 
                 Text("Source: \(entry.source)")
@@ -266,5 +267,115 @@ struct PlaceholderView: View {
 
     var body: some View {
         ContentUnavailableView(title, systemImage: symbol, description: Text(detail))
+    }
+}
+
+struct AppShortcut: Identifiable {
+    enum Group: String, CaseIterable {
+        case global = "Global"
+        case dictionary = "Dictionary"
+        case speak = "Speak"
+        case review = "Review"
+        case lists = "Lists and sentences"
+        case dialogs = "Dialogs and controls"
+        case macOS = "Standard macOS"
+    }
+
+    let group: Group
+    let keys: String
+    let action: String
+
+    var id: String { "\(group.rawValue)-\(keys)-\(action)" }
+
+    static let all: [AppShortcut] = [
+        .init(group: .global, keys: "⌘1 … ⌘6", action: "Open Dictionary, Speak, Review, My Words, Sentences, or Settings"),
+        .init(group: .global, keys: "⌘,", action: "Open Settings"),
+        .init(group: .global, keys: "⌘F", action: "Focus search in Dictionary or My Words; open Dictionary elsewhere"),
+        .init(group: .global, keys: "⌘?", action: "Show this keyboard shortcut reference"),
+        .init(group: .global, keys: "Tab / ⇧Tab", action: "Move focus forward or backward"),
+        .init(group: .dictionary, keys: "↑ / ↓", action: "Move through search results"),
+        .init(group: .dictionary, keys: "Return", action: "Move from search into its results"),
+        .init(group: .dictionary, keys: "⌘Return", action: "Add the selected dictionary entry"),
+        .init(group: .dictionary, keys: "Esc", action: "Clear the focused search field"),
+        .init(group: .speak, keys: "Hold Space", action: "Record speech; release to look it up"),
+        .init(group: .speak, keys: "Return", action: "Confirm the selected spoken entry"),
+        .init(group: .review, keys: "Space", action: "Reveal the current answer or restart after completion"),
+        .init(group: .review, keys: "1 … 4", action: "Rate Again, Hard, Good, or Easy after revealing"),
+        .init(group: .lists, keys: "↑ / ↓", action: "Move through results, cards, and sentences"),
+        .init(group: .lists, keys: "← / →", action: "Move through words in the sentence inspector"),
+        .init(group: .lists, keys: "Return", action: "Edit a selected card or inspect a selected sentence"),
+        .init(group: .lists, keys: "⌘⇧N", action: "Create a new list while My Words is open"),
+        .init(group: .lists, keys: "Delete", action: "Remove the selected card or saved sentence"),
+        .init(group: .dialogs, keys: "Return", action: "Activate the default button or save an editor"),
+        .init(group: .dialogs, keys: "Esc", action: "Cancel or close a dialog"),
+        .init(group: .dialogs, keys: "Space", action: "Activate the focused button, checkbox, or control"),
+        .init(group: .macOS, keys: "⌘N / ⌘W", action: "Open a new window or close the current window"),
+        .init(group: .macOS, keys: "⌘Q", action: "Quit Lang4Self"),
+        .init(group: .macOS, keys: "⌘X / ⌘C / ⌘V", action: "Cut, copy, or paste in an editable field"),
+        .init(group: .macOS, keys: "⌘A", action: "Select all text in the active editable field"),
+        .init(group: .macOS, keys: "⌘Z / ⇧⌘Z", action: "Undo or redo an edit"),
+        .init(group: .macOS, keys: "⌘M / ⌃⌘F", action: "Minimize the window or enter full screen")
+    ]
+}
+
+struct KeyboardShortcutList: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            ForEach(AppShortcut.Group.allCases, id: \.self) { group in
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(group.rawValue)
+                        .font(.headline)
+                    Grid(alignment: .leading, horizontalSpacing: 28, verticalSpacing: 8) {
+                        ForEach(AppShortcut.all.filter { $0.group == group }) { shortcut in
+                            GridRow {
+                                Text(shortcut.keys)
+                                    .font(.body.monospaced().weight(.semibold))
+                                    .frame(minWidth: 110, alignment: .leading)
+                                Text(shortcut.action)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+struct KeyboardShortcutsSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @FocusState private var closeFocused: Bool
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Label("Keyboard Shortcuts", systemImage: "keyboard")
+                    .font(.title2.weight(.bold))
+                Spacer()
+                Button("Close") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                    .focusable()
+                    .focused($closeFocused)
+                    .accessibilityIdentifier("shortcuts.close")
+            }
+            .padding(20)
+
+            Divider()
+
+            ScrollView {
+                KeyboardShortcutList()
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(20)
+            }
+        }
+        .frame(width: 620, height: 620)
+        .defaultFocus($closeFocused, true)
+        .onKeyPress(.space) {
+            dismiss()
+            return .handled
+        }
+        .onAppear {
+            DispatchQueue.main.async { closeFocused = true }
+        }
     }
 }

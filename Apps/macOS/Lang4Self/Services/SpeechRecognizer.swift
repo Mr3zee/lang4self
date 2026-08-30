@@ -25,11 +25,18 @@ final class SpeechRecognizer: NSObject, ObservableObject {
     private var recognitionFinished = false
     private var startGeneration = UUID()
     private var recognitionGeneration = UUID()
+    private let isUITesting = ProcessInfo.processInfo.arguments.contains("--ui-testing")
 
     var isListening: Bool { phase == .listening }
 
     func start() {
         guard phase != .requestingPermission, phase != .listening else { return }
+        if isUITesting {
+            transcription = "Haus"
+            confidence = 1
+            phase = .listening
+            return
+        }
         let generation = UUID()
         startGeneration = generation
         Task {
@@ -50,6 +57,10 @@ final class SpeechRecognizer: NSObject, ObservableObject {
     }
 
     func stop() {
+        if isUITesting, phase == .listening {
+            phase = .guess
+            return
+        }
         if phase == .requestingPermission {
             startGeneration = UUID()
             phase = .idle

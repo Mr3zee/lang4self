@@ -4,6 +4,13 @@ import Lang4SelfCore
 struct ReviewView: View {
     @EnvironmentObject private var state: AppState
     @State private var revealed = false
+    @FocusState private var focusedAction: FocusedAction?
+
+    private enum FocusedAction: Hashable {
+        case reveal
+        case rating(Int)
+        case restart
+    }
 
     private var current: PersonalCard? { state.reviewCards.first }
 
@@ -32,6 +39,9 @@ struct ReviewView: View {
                             .buttonStyle(.borderedProminent)
                             .controlSize(.large)
                             .keyboardShortcut(.space, modifiers: [])
+                            .focusable()
+                            .focused($focusedAction, equals: .reveal)
+                            .accessibilityIdentifier("review.reveal")
                     }
                     Spacer()
 
@@ -52,6 +62,10 @@ struct ReviewView: View {
                         .buttonStyle(.borderedProminent)
                         .controlSize(.large)
                         .padding(.bottom, 40)
+                        .keyboardShortcut(.space, modifiers: [])
+                        .focusable()
+                        .focused($focusedAction, equals: .restart)
+                        .accessibilityIdentifier("review.restart")
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -60,10 +74,19 @@ struct ReviewView: View {
         .navigationTitle("Review")
         .onAppear {
             Task { await state.refreshStudyData() }
+            focusPrimaryAction()
         }
-        .onChange(of: current?.id) { _, _ in revealed = false }
+        .onChange(of: current?.id) { _, _ in
+            revealed = false
+            focusPrimaryAction()
+        }
         .onChange(of: state.selectedListID) { _, _ in revealed = false }
         .onChange(of: state.isReviewingAll) { _, _ in revealed = false }
+        .onChange(of: revealed) { _, isRevealed in
+            DispatchQueue.main.async {
+                focusedAction = isRevealed ? .rating(ReviewRating.allCases.first?.rawValue ?? 1) : .reveal
+            }
+        }
     }
 
     private var statsBar: some View {
@@ -77,6 +100,7 @@ struct ReviewView: View {
             .labelsHidden()
             .pickerStyle(.menu)
             .frame(maxWidth: 180)
+            .accessibilityIdentifier("review.list-picker")
 
             stat(state.stats.dueCards, "Due")
             stat(state.stats.reviewsToday, "Today")
@@ -87,6 +111,7 @@ struct ReviewView: View {
                 else { state.startReviewAll() }
             }
             .disabled(state.stats.totalCards == 0)
+            .accessibilityIdentifier("review.scope")
             Text("Space reveal · 1–4 rate")
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -124,6 +149,9 @@ struct ReviewView: View {
                 .buttonStyle(.bordered)
                 .tint(rating == .again ? .red : rating == .easy ? .green : .accentColor)
                 .keyboardShortcut(KeyEquivalent(Character(String(rating.rawValue))), modifiers: [])
+                .focusable()
+                .focused($focusedAction, equals: .rating(rating.rawValue))
+                .accessibilityIdentifier("review.rating.\(rating.rawValue)")
             }
         }
         .padding(.bottom, 12)
@@ -157,5 +185,11 @@ struct ReviewView: View {
     private func rate(_ card: PersonalCard, _ rating: ReviewRating) {
         revealed = false
         state.rate(card, rating)
+    }
+
+    private func focusPrimaryAction() {
+        DispatchQueue.main.async {
+            focusedAction = current == nil ? .restart : .reveal
+        }
     }
 }

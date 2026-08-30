@@ -3,7 +3,9 @@ import Lang4SelfCore
 
 struct DictionaryView: View {
     @EnvironmentObject private var state: AppState
-    @FocusState private var searchFocused: Bool
+    @FocusState private var focusedArea: FocusArea?
+
+    private enum FocusArea: Hashable { case search, results }
 
     var body: some View {
         HSplitView {
@@ -12,16 +14,23 @@ struct DictionaryView: View {
                     Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
                     TextField("German, English, or Russian", text: $state.searchQuery)
                         .textFieldStyle(.plain)
-                        .focused($searchFocused)
-                        .onSubmit {
-                            if let first = state.searchResults.first { state.selectedEntry = first }
+                        .focused($focusedArea, equals: .search)
+                        .accessibilityIdentifier("dictionary.search")
+                        .onSubmit(focusFirstResult)
+                        .onKeyPress(.downArrow) {
+                            focusFirstResult()
+                            return state.searchResults.isEmpty ? .ignored : .handled
                         }
+                        .onExitCommand(perform: clearSearch)
                     if !state.searchQuery.isEmpty {
                         Button {
-                            state.search("")
+                            clearSearch()
                         } label: { Image(systemName: "xmark.circle.fill") }
                             .buttonStyle(.plain)
                             .foregroundStyle(.secondary)
+                            .help("Clear search")
+                            .accessibilityLabel("Clear search")
+                            .accessibilityIdentifier("dictionary.clear-search")
                     }
                 }
                 .padding(9)
@@ -45,6 +54,8 @@ struct DictionaryView: View {
                             }
                     }
                     .listStyle(.inset)
+                    .focused($focusedArea, equals: .results)
+                    .accessibilityIdentifier("dictionary.results")
                 }
             }
             .frame(minWidth: 285, idealWidth: 340)
@@ -62,15 +73,26 @@ struct DictionaryView: View {
         .onChange(of: state.searchQuery) { _, query in state.search(query) }
         .onReceive(NotificationCenter.default.publisher(for: .focusDictionarySearch)) { _ in
             state.route = .dictionary
-            searchFocused = true
+            focusedArea = .search
         }
         .onAppear {
-            if state.searchQuery.isEmpty { searchFocused = true }
+            DispatchQueue.main.async { focusedArea = .search }
         }
     }
 
     private var addLabel: String {
         "Add to \(state.selectedWordList?.name ?? "My words")"
+    }
+
+    private func focusFirstResult() {
+        guard let first = state.searchResults.first else { return }
+        state.selectedEntry = first
+        focusedArea = .results
+    }
+
+    private func clearSearch() {
+        state.search("")
+        focusedArea = .search
     }
 }
 

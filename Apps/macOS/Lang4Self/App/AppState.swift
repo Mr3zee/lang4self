@@ -67,6 +67,7 @@ final class AppState: ObservableObject {
     @Published private(set) var installedLMStudioModels: [LMStudioModel] = []
     @Published private(set) var isRefreshingLMStudioModels = false
     @Published private(set) var lmStudioSettings = LMStudioSettings.load()
+    @Published var isShowingKeyboardShortcuts = false
 
     let store: LocalStore
     private var searchTask: Task<Void, Never>?
@@ -74,11 +75,14 @@ final class AppState: ObservableObject {
     private var sentenceGenerationTask: Task<Void, Never>?
     private var bannerDismissTask: Task<Void, Never>?
     private let lmStudio = LMStudioService.shared
+    private let isUITesting: Bool
 
     var selectedWordList: WordList? { wordLists.first { $0.id == selectedListID } }
 
     init(store: LocalStore? = nil) throws {
         self.store = try store ?? LocalStore()
+        self.isUITesting = ProcessInfo.processInfo.arguments.contains("--ui-testing")
+        if isUITesting { lmStudioSettings = .defaults }
         lmStudio.progressDidChange = { [weak self] progress in
             self?.lmStudioProgress = progress
         }
@@ -88,6 +92,7 @@ final class AppState: ObservableObject {
     func bootstrap() async {
         do {
             try await store.seedStarterDictionaryIfNeeded()
+            if isUITesting { try await seedUITestDataIfNeeded() }
             async let count = store.dictionaryCount()
             async let complete = store.hasCompleteDictionary()
             async let languages = store.installedTranslationLanguages()
@@ -110,6 +115,47 @@ final class AppState: ObservableObject {
         } catch {
             show(error)
         }
+    }
+
+    private func seedUITestDataIfNeeded() async throws {
+        guard try await store.cards().isEmpty else { return }
+
+        var fixtureCards: [PersonalCard] = []
+        for term in ["Haus", "lernen"] {
+            if let entry = try await store.searchDictionary(term, limit: 1).first {
+                fixtureCards.append(try await store.addCard(from: entry))
+            }
+        }
+
+        let travel = try await store.createWordList(name: "Travel")
+        if let house = fixtureCards.first {
+            try await store.addCard(house.id, toList: travel.id)
+        }
+
+        let savedGerman = "Das Kind liest ein Buch."
+        let saved = SentenceDraft(
+            german: savedGerman,
+            translation: "The child reads a book.",
+            tokens: SentenceTokenizer.tokens(in: savedGerman)
+        )
+        _ = try await store.saveSentences([saved], sourceList: travel)
+
+        let generatedGerman = "Das Haus ist groß."
+        let generatedLearning = "Wir lernen jeden Tag."
+        generatedSentences = [
+            SentenceDraft(
+                german: generatedGerman,
+                translation: "The house is big.",
+                tokens: SentenceTokenizer.tokens(in: generatedGerman)
+            ),
+            SentenceDraft(
+                german: generatedLearning,
+                translation: "We learn every day.",
+                tokens: SentenceTokenizer.tokens(in: generatedLearning)
+            )
+        ]
+        selectedGeneratedSentenceIDs = Set(generatedSentences.map(\.id))
+        generatedSourceList = WordList(id: WordList.defaultID, name: "My words")
     }
 
     func search(_ value: String, immediate: Bool = false) {
@@ -353,6 +399,30 @@ final class AppState: ObservableObject {
 
     func generateSentences(count: Int) {
         guard !isGeneratingSentences, let sourceList = selectedWordList else { return }
+        if isUITesting {
+            let examples = [
+                ("Das Haus hat ein rotes Dach.", "The house has a red roof."),
+                ("Wir lernen jeden Morgen Deutsch.", "We learn German every morning."),
+                ("Das Kind liest ein interessantes Buch.", "The child reads an interesting book."),
+                ("Heute ist das Wetter sehr schön.", "The weather is very nice today."),
+                ("Ich trinke gern heißen Tee.", "I like drinking hot tea."),
+                ("Der Zug kommt pünktlich an.", "The train arrives on time."),
+                ("Sie kauft frisches Brot.", "She buys fresh bread."),
+                ("Am Abend kochen wir zusammen.", "In the evening we cook together."),
+                ("Mein Freund wohnt in Berlin.", "My friend lives in Berlin."),
+                ("Morgen besuchen wir das Museum.", "Tomorrow we visit the museum.")
+            ]
+            generatedSentences = examples.prefix(count).map { german, translation in
+                SentenceDraft(
+                    german: german,
+                    translation: translation,
+                    tokens: SentenceTokenizer.tokens(in: german)
+                )
+            }
+            selectedGeneratedSentenceIDs = Set(generatedSentences.map(\.id))
+            generatedSourceList = sourceList
+            return
+        }
         sentenceGenerationTask?.cancel()
         isGeneratingSentences = true
         sentenceGenerationTask = Task {
@@ -419,6 +489,20 @@ final class AppState: ObservableObject {
 
     func refreshLMStudioModels() {
         guard !isRefreshingLMStudioModels else { return }
+        if isUITesting {
+            installedLMStudioModels = [
+                LMStudioModel(
+                    type: "llm",
+                    modelKey: "lang4self/ui-test-model",
+                    displayName: "UI Test Model",
+                    sizeBytes: 1_000_000_000,
+                    paramsString: "1B",
+                    quantization: nil,
+                    maxContextLength: 131_072
+                )
+            ]
+            return
+        }
         isRefreshingLMStudioModels = true
         Task {
             do {
@@ -432,7 +516,7 @@ final class AppState: ObservableObject {
 
     func updateLMStudioSettings(_ settings: LMStudioSettings) {
         lmStudioSettings = settings.sanitized
-        lmStudioSettings.save()
+        if !isUITesting { lmStudioSettings.save() }
     }
 
     var configuredLMStudioModel: LMStudioModel? {
