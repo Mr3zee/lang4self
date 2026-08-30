@@ -19,6 +19,7 @@ struct Lang4SelfApp: App {
             }
             let initialState = try AppState(store: testStore)
             _state = StateObject(wrappedValue: initialState)
+            appDelegate.appState = initialState
         } catch {
             fatalError("Lang4Self could not start: \(error.localizedDescription)")
         }
@@ -38,6 +39,7 @@ struct Lang4SelfApp: App {
 }
 
 private final class Lang4SelfAppDelegate: NSObject, NSApplicationDelegate {
+    weak var appState: AppState?
     private var shortcutHotKey: EventHotKeyRef?
     private var shortcutHotKeyHandler: EventHandlerRef?
 
@@ -71,8 +73,8 @@ private final class Lang4SelfAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        Task { @MainActor in
-            await LMStudioService.shared.shutdown()
+        Task { @MainActor [weak appState] in
+            await appState?.shutdown()
             sender.reply(toApplicationShouldTerminate: true)
         }
         return .terminateLater

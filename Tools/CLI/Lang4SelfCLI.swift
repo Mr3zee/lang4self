@@ -82,10 +82,10 @@ enum Lang4SelfCLI {
 
     private static func importDictionary(_ source: URL) async throws {
         guard FileManager.default.fileExists(atPath: source.path) else { throw CLIError.fileNotFound(source.path) }
-        let prepared = try prepare(source)
-        defer { if let directory = prepared.temporaryDirectory { try? FileManager.default.removeItem(at: directory) } }
+        let prepared = try await DictionaryArchive.prepare(source)
+        defer { prepared.cleanUp() }
         let store = try LocalStore()
-        let imported = try await store.importDictionary(from: prepared.file) { progress in
+        let imported = try await store.importDictionary(from: prepared.url) { progress in
             if progress.imported % 100_000 < 15_000 {
                 FileHandle.standardError.write(Data("Imported \(progress.imported.formatted())…\n".utf8))
             }
@@ -102,31 +102,6 @@ enum Lang4SelfCLI {
             }
         }
         print("Imported \(imported.formatted()) explanations.")
-    }
-
-    private static func prepare(_ source: URL) throws -> (file: URL, temporaryDirectory: URL?) {
-        guard source.pathExtension.lowercased() == "zip" else { return (source, nil) }
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("Lang4Self-CLI-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        do {
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
-            process.arguments = ["-x", "-k", source.path, directory.path]
-            process.standardOutput = FileHandle.nullDevice
-            process.standardError = FileHandle.nullDevice
-            try process.run()
-            process.waitUntilExit()
-            guard process.terminationStatus == 0 else { throw CLIError.extractionFailed }
-            let contents = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
-            guard let text = contents.first(where: { $0.pathExtension.lowercased() == "txt" }) else {
-                throw CLIError.noTextFile
-            }
-            return (text, directory)
-        } catch {
-            try? FileManager.default.removeItem(at: directory)
-            throw error
-        }
     }
 
     private static func printHelp() {
@@ -152,8 +127,6 @@ enum Lang4SelfCLI {
         case missingSearchTerm
         case missingImportPath
         case fileNotFound(String)
-        case extractionFailed
-        case noTextFile
 
         var errorDescription: String? {
             switch self {
@@ -161,8 +134,6 @@ enum Lang4SelfCLI {
             case .missingSearchTerm: "Provide a German, English, or Russian search term."
             case .missingImportPath: "Provide a dict.cc ZIP or text-file path."
             case .fileNotFound(let path): "File not found: \(path)"
-            case .extractionFailed: "Could not extract the ZIP archive."
-            case .noTextFile: "No text dictionary was found inside the ZIP archive."
             }
         }
     }

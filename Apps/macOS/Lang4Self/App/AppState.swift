@@ -66,30 +66,41 @@ final class AppState: ObservableObject {
     @Published private(set) var isGeneratingSentences = false
     @Published private(set) var installedLMStudioModels: [LMStudioModel] = []
     @Published private(set) var isRefreshingLMStudioModels = false
-    @Published private(set) var lmStudioSettings = LMStudioSettings.load()
+    @Published private(set) var lmStudioSettings: LMStudioSettings
     @Published var isShowingKeyboardShortcuts = false
 
-    let store: LocalStore
+    let store: any AppDataStore
     private var searchTask: Task<Void, Never>?
     private var libraryTask: Task<Void, Never>?
     private var sentenceGenerationTask: Task<Void, Never>?
     private var bannerDismissTask: Task<Void, Never>?
-    private let lmStudio = LMStudioService.shared
+    private var hasBootstrapped = false
+    private let lmStudio: any SentenceGenerating
+    private let settingsDefaults: UserDefaults
     private let isUITesting: Bool
 
     var selectedWordList: WordList? { wordLists.first { $0.id == selectedListID } }
 
-    init(store: LocalStore? = nil) throws {
-        self.store = try store ?? LocalStore()
-        self.isUITesting = ProcessInfo.processInfo.arguments.contains("--ui-testing")
-        if isUITesting { lmStudioSettings = .defaults }
+    init(
+        store: (any AppDataStore)? = nil,
+        sentenceGenerator: (any SentenceGenerating)? = nil,
+        settingsDefaults: UserDefaults = .standard,
+        isUITesting: Bool? = nil
+    ) throws {
+        if let store { self.store = store }
+        else { self.store = try LocalStore() }
+        self.lmStudio = sentenceGenerator ?? LMStudioService()
+        self.settingsDefaults = settingsDefaults
+        self.isUITesting = isUITesting ?? ProcessInfo.processInfo.arguments.contains("--ui-testing")
+        self.lmStudioSettings = self.isUITesting ? .defaults : LMStudioSettings.load(from: settingsDefaults)
         lmStudio.progressDidChange = { [weak self] progress in
             self?.lmStudioProgress = progress
         }
-        Task { await bootstrap() }
     }
 
     func bootstrap() async {
+        guard !hasBootstrapped else { return }
+        hasBootstrapped = true
         do {
             try await store.seedStarterDictionaryIfNeeded()
             if isUITesting { try await seedUITestDataIfNeeded() }
@@ -516,7 +527,12 @@ final class AppState: ObservableObject {
 
     func updateLMStudioSettings(_ settings: LMStudioSettings) {
         lmStudioSettings = settings.sanitized
-        if !isUITesting { lmStudioSettings.save() }
+        if !isUITesting { lmStudioSettings.save(to: settingsDefaults) }
+    }
+
+    func shutdown() async {
+        sentenceGenerationTask?.cancel()
+        await lmStudio.shutdown()
     }
 
     var configuredLMStudioModel: LMStudioModel? {

@@ -2,7 +2,7 @@
 
 `Lang4SelfCore` owns domain models, dict.cc parsing, morphology, SQLite storage, FTS search, and spaced repetition. It contains no UI or speech code.
 
-`Apps/macOS/Lang4Self` owns SwiftUI views, the macOS on-device speech adapter, and the localhost-only LM Studio adapter. `AppState` is the UI boundary around the actor-isolated local store.
+`Apps/macOS/Lang4Self` owns SwiftUI views, the macOS on-device speech adapter, and the localhost-only LM Studio adapter. `AppState` is the UI boundary around the actor-isolated local store. Production dependencies are created in `Lang4SelfApp`; `AppState` talks to storage and sentence generation through `AppDataStore` and `SentenceGenerating`, so tests can provide isolated substitutes.
 
 `Templates/iOS` and `Templates/Server` are intentionally disconnected. They document the later entry points without enabling sync or adding a server dependency today.
 
@@ -26,3 +26,10 @@ The personal card stores a snapshot of the German word and its available English
 Wiktionary explanations are imported into a separate table and joined to dict.cc results by the exact German spelling and part of speech. This avoids pretending that the two sources' senses align one-to-one. Explanations identical to an existing translation are suppressed in the UI.
 
 Morphology is computed locally. Common irregular verbs/adjectives are explicit; other forms use German regular-form rules and are marked **estimated** in the UI.
+
+## Evolution boundaries
+
+- Shared import preparation lives in `Lang4SelfCore`; the app, CLI, and importer use the same implementation.
+- SQLite uses ordered `PRAGMA user_version` migrations. A newer database is rejected instead of being opened by code that cannot understand it.
+- SwiftUI views contain presentation and interaction only. Filesystem, process, database, and model-server behavior stays behind injected adapters.
+- Large coordinators are not extension points. New capabilities belong in focused types and are exposed through narrow protocols.

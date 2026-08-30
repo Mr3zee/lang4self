@@ -74,6 +74,9 @@ struct RootView: View {
         .onReceive(NotificationCenter.default.publisher(for: .showKeyboardShortcuts)) { _ in
             state.isShowingKeyboardShortcuts = true
         }
+        .task {
+            await state.bootstrap()
+        }
     }
 
     @ViewBuilder

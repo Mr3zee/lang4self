@@ -146,8 +146,20 @@ enum LMStudioError: LocalizedError {
 }
 
 @MainActor
-final class LMStudioService {
-    static let shared = LMStudioService()
+protocol SentenceGenerating: AnyObject {
+    var progressDidChange: ((LMStudioProgress) -> Void)? { get set }
+
+    func generate(
+        vocabulary: [PersonalCard],
+        count requestedCount: Int,
+        settings requestedSettings: LMStudioSettings
+    ) async throws -> [SentenceDraft]
+    func installedModels() async throws -> [LMStudioModel]
+    func shutdown() async
+}
+
+@MainActor
+final class LMStudioService: SentenceGenerating {
 
     static let modelIdentifier = "lang4self-sentences"
     static let serverURL = URL(string: "http://127.0.0.1:1234")!
@@ -172,7 +184,7 @@ final class LMStudioService {
         return URLSession(configuration: configuration)
     }()
 
-    private init() {}
+    init() {}
 
     func generate(
         vocabulary: [PersonalCard],

@@ -4,6 +4,55 @@ import XCTest
 @testable import Lang4SelfCore
 
 final class LocalStoreTests: XCTestCase {
+    func testAdoptsLegacyDatabaseAndRecordsSchemaVersion() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let databaseURL = directory.appendingPathComponent("legacy.sqlite3")
+        try executeSQLite(at: databaseURL, sql: """
+            CREATE TABLE dictionary_entries (
+              id INTEGER PRIMARY KEY,
+              german TEXT NOT NULL,
+              english TEXT NOT NULL,
+              normalized_german TEXT NOT NULL,
+              normalized_english TEXT NOT NULL,
+              raw_german TEXT NOT NULL,
+              raw_english TEXT NOT NULL,
+              kind TEXT NOT NULL,
+              gender TEXT NOT NULL,
+              usage TEXT,
+              source TEXT NOT NULL,
+              UNIQUE(raw_german, raw_english)
+            );
+            INSERT INTO dictionary_entries (
+              german, english, normalized_german, normalized_english,
+              raw_german, raw_english, kind, gender, source
+            ) VALUES ('Haus', 'house', 'haus', 'house', 'Haus {n}', 'house', 'noun', 'neuter', 'starter');
+            """)
+
+        let store = try LocalStore(url: databaseURL)
+        let count = try await store.dictionaryCount()
+
+        XCTAssertEqual(count, 1)
+        XCTAssertEqual(try readSchemaVersion(at: databaseURL), LocalStore.latestSchemaVersion)
+    }
+
+    func testRejectsDatabaseFromNewerAppVersion() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let databaseURL = directory.appendingPathComponent("future.sqlite3")
+        try executeSQLite(at: databaseURL, sql: "PRAGMA user_version = 999")
+
+        XCTAssertThrowsError(try LocalStore(url: databaseURL)) { error in
+            guard case LocalStoreError.unsupportedSchema(let found, let latest) = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+            XCTAssertEqual(found, 999)
+            XCTAssertEqual(latest, LocalStore.latestSchemaVersion)
+        }
+    }
+
     func testSearchCardsAndReviewPersistLocally() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -280,4 +329,37 @@ private func createLectorFixture(at url: URL) throws {
         sqlite3_free(error)
         throw NSError(domain: "LocalStoreTests", code: 2, userInfo: [NSLocalizedDescriptionKey: message])
     }
+}
+
+private func executeSQLite(at url: URL, sql: String) throws {
+    var database: OpaquePointer?
+    guard sqlite3_open(url.path, &database) == SQLITE_OK else {
+        sqlite3_close(database)
+        throw NSError(domain: "LocalStoreTests", code: 3)
+    }
+    defer { sqlite3_close(database) }
+    var error: UnsafeMutablePointer<CChar>?
+    guard sqlite3_exec(database, sql, nil, nil, &error) == SQLITE_OK else {
+        let message = error.map { String(cString: $0) } ?? "unknown SQLite error"
+        sqlite3_free(error)
+        throw NSError(domain: "LocalStoreTests", code: 4, userInfo: [NSLocalizedDescriptionKey: message])
+    }
+}
+
+private func readSchemaVersion(at url: URL) throws -> Int {
+    var database: OpaquePointer?
+    guard sqlite3_open_v2(url.path, &database, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else {
+        sqlite3_close(database)
+        throw NSError(domain: "LocalStoreTests", code: 5)
+    }
+    defer { sqlite3_close(database) }
+    var statement: OpaquePointer?
+    guard sqlite3_prepare_v2(database, "PRAGMA user_version", -1, &statement, nil) == SQLITE_OK else {
+        throw NSError(domain: "LocalStoreTests", code: 6)
+    }
+    defer { sqlite3_finalize(statement) }
+    guard sqlite3_step(statement) == SQLITE_ROW else {
+        throw NSError(domain: "LocalStoreTests", code: 7)
+    }
+    return Int(sqlite3_column_int(statement, 0))
 }

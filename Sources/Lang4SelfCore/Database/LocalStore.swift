@@ -41,6 +41,7 @@ public enum LocalStoreError: LocalizedError {
     case duplicateListName
     case cannotDeleteDefaultList
     case invalidExplanationDatabase
+    case unsupportedSchema(found: Int, latest: Int)
 
     public var errorDescription: String? {
         switch self {
@@ -51,11 +52,15 @@ public enum LocalStoreError: LocalizedError {
         case .duplicateListName: "A list with that name already exists."
         case .cannotDeleteDefaultList: "The My words list cannot be deleted."
         case .invalidExplanationDatabase: "This is not a supported Lector German dictionary database."
+        case .unsupportedSchema(let found, let latest):
+            "This database uses schema version \(found), but this app supports up to version \(latest)."
         }
     }
 }
 
 public actor LocalStore {
+    static let latestSchemaVersion = 1
+
     private var database: OpaquePointer?
     public nonisolated let databaseURL: URL
     private static let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
@@ -727,7 +732,19 @@ public actor LocalStore {
         try execute(database, "PRAGMA synchronous = NORMAL")
         try execute(database, "PRAGMA foreign_keys = ON")
         try execute(database, "PRAGMA temp_store = MEMORY")
-        try execute(database, """
+        let installedVersion = try schemaVersion(in: database)
+        guard installedVersion <= latestSchemaVersion else {
+            throw LocalStoreError.unsupportedSchema(found: installedVersion, latest: latestSchemaVersion)
+        }
+        guard installedVersion < latestSchemaVersion else { return }
+
+        try execute(database, "BEGIN IMMEDIATE")
+        do {
+            var migratedVersion = installedVersion
+            // Version 1 adopts pre-versioning databases as well as creating new ones.
+            // Keep future changes in their own `if migratedVersion < N` block.
+            if migratedVersion < 1 {
+                try execute(database, """
             CREATE TABLE IF NOT EXISTS dictionary_entries (
               id INTEGER PRIMARY KEY,
               german TEXT NOT NULL,
@@ -813,17 +830,28 @@ public actor LocalStore {
             );
             CREATE INDEX IF NOT EXISTS saved_sentences_created ON saved_sentences(created_at DESC);
             """)
-        if try !table("dictionary_entries", hasColumn: "translation_language", in: database) {
-            try execute(database, "ALTER TABLE dictionary_entries ADD COLUMN translation_language TEXT NOT NULL DEFAULT 'en'")
+                if try !table("dictionary_entries", hasColumn: "translation_language", in: database) {
+                    try execute(database, "ALTER TABLE dictionary_entries ADD COLUMN translation_language TEXT NOT NULL DEFAULT 'en'")
+                }
+                if try !table("dictionary_entries", hasColumn: "explanation", in: database) {
+                    try execute(database, "ALTER TABLE dictionary_entries ADD COLUMN explanation TEXT")
+                }
+                try execute(database, "CREATE INDEX IF NOT EXISTS dictionary_source_language ON dictionary_entries(source, translation_language)")
+                let defaultName = "My words".replacingOccurrences(of: "'", with: "''")
+                try execute(database, "INSERT OR IGNORE INTO word_lists (id, name, created_at) VALUES (\(WordList.defaultID), '\(defaultName)', strftime('%s', 'now'))")
+                try execute(database, "INSERT OR IGNORE INTO card_lists (card_id, list_id, added_at) SELECT id, \(WordList.defaultID), created_at FROM personal_cards WHERE NOT EXISTS (SELECT 1 FROM card_lists)")
+                try createDictionaryTriggers(database)
+                migratedVersion = 1
+            }
+            guard migratedVersion == latestSchemaVersion else {
+                throw LocalStoreError.sqlite("Missing migration to schema version \(latestSchemaVersion)")
+            }
+            try execute(database, "PRAGMA user_version = \(migratedVersion)")
+            try execute(database, "COMMIT")
+        } catch {
+            try? execute(database, "ROLLBACK")
+            throw error
         }
-        if try !table("dictionary_entries", hasColumn: "explanation", in: database) {
-            try execute(database, "ALTER TABLE dictionary_entries ADD COLUMN explanation TEXT")
-        }
-        try execute(database, "CREATE INDEX IF NOT EXISTS dictionary_source_language ON dictionary_entries(source, translation_language)")
-        let defaultName = "My words".replacingOccurrences(of: "'", with: "''")
-        try execute(database, "INSERT OR IGNORE INTO word_lists (id, name, created_at) VALUES (\(WordList.defaultID), '\(defaultName)', strftime('%s', 'now'))")
-        try execute(database, "INSERT OR IGNORE INTO card_lists (card_id, list_id, added_at) SELECT id, \(WordList.defaultID), created_at FROM personal_cards WHERE NOT EXISTS (SELECT 1 FROM card_lists)")
-        try createDictionaryTriggers(database)
     }
 
     private func insertDictionaryEntry(_ entry: DictionaryEntry) throws {
@@ -1138,6 +1166,18 @@ public actor LocalStore {
             if String(cString: value) == column { return true }
         }
         return false
+    }
+
+    private static func schemaVersion(in database: OpaquePointer?) throws -> Int {
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(database, "PRAGMA user_version", -1, &statement, nil) == SQLITE_OK else {
+            throw LocalStoreError.sqlite(database.map { String(cString: sqlite3_errmsg($0)) } ?? "unknown error")
+        }
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW else {
+            throw LocalStoreError.sqlite("Could not read the database schema version")
+        }
+        return Int(sqlite3_column_int(statement, 0))
     }
 
     private static func createDictionaryTriggers(_ database: OpaquePointer?) throws {
