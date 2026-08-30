@@ -488,7 +488,9 @@ final class Lang4SelfUITests: XCTestCase {
         XCTAssertTrue(app.buttons["settings.import-explanations"].waitForExistence(timeout: 3))
 
         let model = element("settings.model")
-        scrollToHittable(model, in: app.scrollViews.firstMatch)
+        let settingsScroll = app.scrollViews["settings.scroll"]
+        XCTAssertTrue(settingsScroll.exists)
+        scrollToHittable(model, in: settingsScroll)
         model.click()
         app.menuItems["UI Test Model — 1B · 1 GB"].click()
 

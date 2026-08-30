@@ -238,6 +238,7 @@ struct SettingsView: View {
             .frame(maxWidth: 800, alignment: .leading)
             .padding(28)
         }
+        .accessibilityIdentifier("settings.scroll")
         .navigationTitle("Settings")
         .onAppear {
             guard automaticallyFocusContent else { return }

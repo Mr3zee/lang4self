@@ -215,17 +215,25 @@ private struct Lang4SelfCommands: Commands {
 
     private func focusSearch() {
         let notification: Notification.Name
+        let routeIsChanging: Bool
         if state.route == .library {
             notification = .focusLibrarySearch
+            routeIsChanging = false
         } else {
+            routeIsChanging = state.route != .dictionary
             state.route = .dictionary
             notification = .focusDictionarySearch
         }
 
-        // Route changes mount their destination asynchronously. A short delay
-        // prevents the notification from racing the new view on slower Macs.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+        let postFocusNotification = {
             NotificationCenter.default.post(name: notification, object: nil)
+        }
+        if routeIsChanging {
+            // Route changes mount their destination asynchronously. A short
+            // delay prevents the notification from racing the new view.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: postFocusNotification)
+        } else {
+            DispatchQueue.main.async(execute: postFocusNotification)
         }
     }
 }
