@@ -26,6 +26,23 @@ final class DictCCParserTests: XCTestCase {
         XCTAssertEqual(values, ["gut", "besser", "am besten"])
     }
 
+    func testTranslationSummaryUsesMiddleDots() {
+        let entry = DictionaryEntry(
+            german: "recht",
+            english: "all right",
+            kind: .adverb,
+            meanings: [
+                DictionaryMeaning(english: "all right"),
+                DictionaryMeaning(english: "okay"),
+                DictionaryMeaning(english: "well")
+            ]
+        )
+
+        let translationRow = GermanMorphology.info(for: entry).rows.first { $0.label == "Translations" }
+
+        XCTAssertEqual(translationRow?.value, "all right · okay · well")
+    }
+
     func testParsesEnglishFirstFile() throws {
         let entry = try XCTUnwrap(DictCCParser.parse(line: "cat\tKatze {f}", germanFirst: false))
         XCTAssertEqual(entry.german, "Katze")

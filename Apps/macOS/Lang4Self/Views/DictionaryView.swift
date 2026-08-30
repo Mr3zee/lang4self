@@ -188,6 +188,15 @@ struct DictionaryView: View {
                 .frame(minWidth: 260, idealWidth: 310)
                 .focused($focusedControl, equals: .results)
                 .accessibilityIdentifier("dictionary.results")
+                .onKeyPress(.return) {
+                    guard let selectedEntry = state.selectedEntry,
+                          state.addedListID(for: selectedEntry) == nil
+                    else {
+                        return .ignored
+                    }
+                    state.addToPersonalDictionary(selectedEntry)
+                    return .handled
+                }
                 .onKeyPress(.rightArrow) {
                     guard isVoiceResult,
                           let addedListID = state.addedListID(for: entry),

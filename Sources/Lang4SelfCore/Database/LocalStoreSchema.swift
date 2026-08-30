@@ -1,7 +1,7 @@
 import SQLite3
 
 enum LocalStoreSchema {
-    static let latestSchemaVersion = 2
+    static let latestSchemaVersion = 6
 
     static func configure(_ database: OpaquePointer) throws {
         let installedVersion = try schemaVersion(in: database)
@@ -138,6 +138,53 @@ enum LocalStoreSchema {
                     """)
                 migratedVersion = 2
             }
+            if migratedVersion < 3 {
+                try rebuildDictionarySearchIndex(database)
+                migratedVersion = 3
+            }
+            if migratedVersion < 4 {
+                try execute(database, """
+                    CREATE TABLE dictionary_inflections (
+                      id INTEGER PRIMARY KEY,
+                      lemma_key TEXT NOT NULL,
+                      form TEXT NOT NULL,
+                      tags TEXT NOT NULL,
+                      source TEXT NOT NULL,
+                      UNIQUE(lemma_key, form, tags, source)
+                    );
+                    CREATE INDEX dictionary_inflections_lemma
+                      ON dictionary_inflections(lemma_key);
+                    """)
+                migratedVersion = 4
+            }
+            if migratedVersion < 5 {
+                try execute(database, """
+                    CREATE INDEX dictionary_inflections_form
+                      ON dictionary_inflections(form, lemma_key);
+                    """)
+                migratedVersion = 5
+            }
+            if migratedVersion < 6 {
+                try execute(database, """
+                    CREATE TABLE IF NOT EXISTS saved_sentences (
+                      id INTEGER PRIMARY KEY,
+                      german TEXT NOT NULL,
+                      translation TEXT NOT NULL,
+                      source_list_id INTEGER REFERENCES word_lists(id) ON DELETE SET NULL,
+                      source_list_name TEXT NOT NULL,
+                      tokens_json TEXT NOT NULL,
+                      analysis_json TEXT,
+                      created_at REAL NOT NULL,
+                      UNIQUE(german, translation)
+                    );
+                    CREATE INDEX IF NOT EXISTS saved_sentences_created
+                      ON saved_sentences(created_at DESC);
+                    """)
+                if try !table("saved_sentences", hasColumn: "analysis_json", in: database) {
+                    try execute(database, "ALTER TABLE saved_sentences ADD COLUMN analysis_json TEXT")
+                }
+                migratedVersion = 6
+            }
             guard migratedVersion == latestSchemaVersion else {
                 throw LocalStoreError.sqlite("Missing migration to schema version \(latestSchemaVersion)")
             }
@@ -161,6 +208,15 @@ enum LocalStoreSchema {
               INSERT INTO dictionary_fts(dictionary_fts, rowid, german, english) VALUES ('delete', old.id, old.normalized_german, old.normalized_english);
               INSERT INTO dictionary_fts(rowid, german, english) VALUES (new.id, new.normalized_german, new.normalized_english);
             END;
+            """)
+    }
+
+    static func rebuildDictionarySearchIndex(_ database: OpaquePointer?) throws {
+        try execute(database, "INSERT INTO dictionary_fts(dictionary_fts) VALUES ('delete-all')")
+        try execute(database, """
+            INSERT INTO dictionary_fts(rowid, german, english)
+            SELECT id, normalized_german, normalized_english
+            FROM dictionary_entries
             """)
     }
 

@@ -32,6 +32,94 @@ enum AppRoute: String, CaseIterable, Identifiable {
     }
 }
 
+private enum AppUndoError: LocalizedError {
+    case mutationNoLongerAvailable
+
+    var errorDescription: String? {
+        "That change can no longer be undone."
+    }
+}
+
+@MainActor
+final class AppUndoOperation {
+    typealias Perform = @MainActor () async throws -> AppUndoOperation
+
+    let name: String
+    private let performBlock: Perform
+
+    init(name: String, perform: @escaping Perform) {
+        self.name = name
+        self.performBlock = perform
+    }
+
+    func perform() async throws -> AppUndoOperation {
+        try await performBlock()
+    }
+}
+
+@MainActor
+final class AppUndoHistory: ObservableObject {
+    @Published private(set) var undoActionName: String?
+    @Published private(set) var redoActionName: String?
+    @Published private(set) var isPerforming = false
+
+    private var undoStack: [AppUndoOperation] = []
+    private var redoStack: [AppUndoOperation] = []
+
+    var canUndo: Bool { !isPerforming && !undoStack.isEmpty }
+    var canRedo: Bool { !isPerforming && !redoStack.isEmpty }
+
+    func record(_ operation: AppUndoOperation) {
+        guard !isPerforming else { return }
+        undoStack.append(operation)
+        redoStack.removeAll()
+        publishNames()
+    }
+
+    @discardableResult
+    func undo() async throws -> String? {
+        guard !isPerforming, let operation = undoStack.popLast() else { return nil }
+        isPerforming = true
+        publishNames()
+        do {
+            let inverse = try await operation.perform()
+            redoStack.append(inverse)
+            isPerforming = false
+            publishNames()
+            return operation.name
+        } catch {
+            undoStack.append(operation)
+            isPerforming = false
+            publishNames()
+            throw error
+        }
+    }
+
+    @discardableResult
+    func redo() async throws -> String? {
+        guard !isPerforming, let operation = redoStack.popLast() else { return nil }
+        isPerforming = true
+        publishNames()
+        do {
+            let inverse = try await operation.perform()
+            undoStack.append(inverse)
+            isPerforming = false
+            publishNames()
+            return operation.name
+        } catch {
+            redoStack.append(operation)
+            isPerforming = false
+            publishNames()
+            throw error
+        }
+    }
+
+    private func publishNames() {
+        undoActionName = undoStack.last?.name
+        redoActionName = redoStack.last?.name
+    }
+}
+
 @MainActor
 final class AppState: ObservableObject {
     private struct AddedDictionaryEntryPlacement {
@@ -73,6 +161,8 @@ final class AppState: ObservableObject {
     @Published var isShowingKeyboardShortcuts = false
     @Published private var addedDictionaryEntryPlacements: [DictionaryEntry.ID: AddedDictionaryEntryPlacement] = [:]
 
+    let undoHistory = AppUndoHistory()
+
     private let store: any AppDataStore
     private var searchTask: Task<Void, Never>?
     private var searchGeneration = UUID()
@@ -81,9 +171,11 @@ final class AppState: ObservableObject {
     private var bannerDismissTask: Task<Void, Never>?
     private var hasBootstrapped = false
     private let lmStudio: any SentenceGenerating
+    private let sentenceAnalyzer: any SentenceAnalyzing
     private let dictionaryFilePreparer: any DictionaryFilePreparing
     private let settingsStore: any LMStudioSettingsStoring
     private let isUITesting: Bool
+    private let uiTestingDictionaryURLs: [URL]
     private let now: () -> Date
     private let calendar: Calendar
 
@@ -93,17 +185,21 @@ final class AppState: ObservableObject {
     init(
         store: any AppDataStore,
         sentenceGenerator: any SentenceGenerating,
+        sentenceAnalyzer: any SentenceAnalyzing,
         dictionaryFilePreparer: any DictionaryFilePreparing,
         settingsStore: any LMStudioSettingsStoring,
         isUITesting: Bool,
+        uiTestingDictionaryURLs: [URL],
         now: @escaping () -> Date,
         calendar: Calendar
     ) {
         self.store = store
         self.lmStudio = sentenceGenerator
+        self.sentenceAnalyzer = sentenceAnalyzer
         self.dictionaryFilePreparer = dictionaryFilePreparer
         self.settingsStore = settingsStore
         self.isUITesting = isUITesting
+        self.uiTestingDictionaryURLs = uiTestingDictionaryURLs
         self.now = now
         self.calendar = calendar
         self.lmStudioSettings = isUITesting ? .defaults : settingsStore.load()
@@ -146,6 +242,10 @@ final class AppState: ObservableObject {
     private func seedUITestDataIfNeeded() async throws {
         guard try await store.cards().isEmpty else { return }
 
+        for url in uiTestingDictionaryURLs {
+            _ = try await store.importDictionary(from: url)
+        }
+
         var fixtureCards: [PersonalCard] = []
         for term in ["Haus", "lernen"] {
             if let entry = try await store.searchDictionary(term, limit: 1).first {
@@ -168,6 +268,15 @@ final class AppState: ObservableObject {
 
         let generatedGerman = "Das Haus ist groß."
         let generatedLearning = "Wir lernen jeden Tag."
+        let generatedSeparable = "Das Blatt fällt ab."
+        let separableTokens = SentenceTokenizer.tokens(in: generatedSeparable).map { token in
+            guard token.surface == "fällt" else { return token }
+            return SentenceToken(
+                index: token.index,
+                surface: token.surface,
+                lookupTerm: "abfallen"
+            )
+        }
         generatedSentences = [
             SentenceDraft(
                 german: generatedGerman,
@@ -178,6 +287,11 @@ final class AppState: ObservableObject {
                 german: generatedLearning,
                 translation: "We learn every day.",
                 tokens: SentenceTokenizer.tokens(in: generatedLearning)
+            ),
+            SentenceDraft(
+                german: generatedSeparable,
+                translation: "The leaf falls off.",
+                tokens: separableTokens
             )
         ]
         selectedGeneratedSentenceIDs = Set(generatedSentences.map(\.id))
@@ -217,13 +331,23 @@ final class AppState: ObservableObject {
     }
 
     func addToPersonalDictionary(_ entry: DictionaryEntry, announce: Bool = true) {
+        guard !undoHistory.isPerforming else { return }
         let listID = selectedListID
         let listName = wordLists.first { $0.id == listID }?.name ?? "My words"
         Task {
             do {
-                let card = try await store.addCard(from: entry, listID: listID)
+                let addition = try await store.addCardRecordingChange(from: entry, listID: listID)
+                let card = addition.card
                 addedDictionaryEntryPlacements[entry.id] = .init(cardID: card.id, listID: listID)
                 await refreshStudyData()
+                if addition.didAddToList {
+                    undoHistory.record(removeCardOperation(
+                        cardID: card.id,
+                        listID: listID,
+                        actionName: "Add “\(entry.german)”",
+                        dictionaryEntryID: entry.id
+                    ))
+                }
                 if announce { showBanner("Added “\(entry.german)” to \(listName)") }
             } catch {
                 show(error)
@@ -242,6 +366,7 @@ final class AppState: ObservableObject {
         _ entry: DictionaryEntry,
         to destinationListID: WordList.ID
     ) async -> Bool {
+        guard !undoHistory.isPerforming else { return false }
         guard let placement = addedDictionaryEntryPlacements[entry.id],
               placement.listID != destinationListID,
               let destination = wordLists.first(where: { $0.id == destinationListID })
@@ -260,6 +385,13 @@ final class AppState: ObservableObject {
                 cardID: placement.cardID,
                 listID: destinationListID
             )
+            undoHistory.record(moveCardOperation(
+                cardID: placement.cardID,
+                fromListID: destinationListID,
+                toListID: placement.listID,
+                actionName: "Move “\(entry.german)”",
+                dictionaryEntryID: entry.id
+            ))
             if selectedListID == destinationListID {
                 await refreshStudyData()
             } else {
@@ -308,6 +440,7 @@ final class AppState: ObservableObject {
     }
 
     func createWordList(name: String) {
+        guard !undoHistory.isPerforming else { return }
         Task {
             do {
                 let list = try await store.createWordList(name: name)
@@ -320,6 +453,10 @@ final class AppState: ObservableObject {
                 reviewCards = []
                 stats = StudyStats()
                 await refreshStudyData()
+                undoHistory.record(deleteWordListOperation(
+                    listID: list.id,
+                    actionName: "Create “\(list.name)”"
+                ))
                 showBanner("Created “\(list.name)”")
             } catch { show(error) }
         }
@@ -336,11 +473,12 @@ final class AppState: ObservableObject {
     }
 
     func deleteSelectedWordList() {
+        guard !undoHistory.isPerforming else { return }
         let listID = selectedListID
         guard listID != WordList.defaultID else { return }
         Task {
             do {
-                try await store.deleteWordList(id: listID)
+                let mutation = try await store.deleteWordListRecordingChange(id: listID)
                 wordLists = try await store.wordLists()
                 selectedListID = WordList.defaultID
                 isReviewingAll = false
@@ -350,6 +488,11 @@ final class AppState: ObservableObject {
                 reviewCards = []
                 stats = StudyStats()
                 await refreshStudyData()
+                savedSentences = try await store.savedSentences()
+                undoHistory.record(restoreWordListOperation(
+                    mutation,
+                    actionName: "Delete “\(mutation.list.name)”"
+                ))
                 showBanner("Deleted list")
             } catch { show(error) }
         }
@@ -366,22 +509,40 @@ final class AppState: ObservableObject {
     }
 
     func removeCardFromSelectedList(_ card: PersonalCard) {
+        guard !undoHistory.isPerforming else { return }
         let listID = selectedListID
         let listName = selectedWordList?.name ?? "list"
         Task {
             do {
-                try await store.removeCard(card.id, fromList: listID)
+                guard let mutation = try await store.removeCardRecordingChange(
+                    card.id,
+                    fromList: listID
+                ) else { return }
                 if selectedListID == listID { cards.removeAll { $0.id == card.id } }
                 await refreshStudyData()
+                undoHistory.record(restoreCardOperation(
+                    mutation,
+                    actionName: "Remove “\(card.german)”",
+                    dictionaryEntryID: nil
+                ))
                 showBanner("Removed “\(card.german)” from \(listName)")
             } catch { show(error) }
         }
     }
 
     func addCard(_ card: PersonalCard, to list: WordList) {
+        guard !undoHistory.isPerforming else { return }
         Task {
             do {
-                try await store.addCard(card.id, toList: list.id)
+                let didAdd = try await store.addCardRecordingChange(card.id, toList: list.id)
+                if didAdd {
+                    undoHistory.record(removeCardOperation(
+                        cardID: card.id,
+                        listID: list.id,
+                        actionName: "Add “\(card.german)” to “\(list.name)”",
+                        dictionaryEntryID: nil
+                    ))
+                }
                 showBanner("Added “\(card.german)” to \(list.name)")
             } catch { show(error) }
         }
@@ -465,7 +626,7 @@ final class AppState: ObservableObject {
                 isImportingExplanations = false
                 explanationImportProgress = nil
                 if !searchQuery.isEmpty { search(searchQuery, immediate: true) }
-                showBanner("Imported \(imported.formatted()) explanations")
+                showBanner("Imported \(imported.formatted()) explanations and available word forms")
             } catch {
                 isImportingExplanations = false
                 explanationImportProgress = nil
@@ -474,9 +635,10 @@ final class AppState: ObservableObject {
         }
     }
 
-    func generateSentences(count: Int) {
+    func generateSentences(count: Int, options: SentenceGenerationOptions) {
         guard !isGeneratingSentences, let sourceList = selectedWordList else { return }
         let count = min(max(count, 1), 10)
+        let options = options.sanitized
         if isUITesting {
             let examples = [
                 ("Das Haus hat ein rotes Dach.", "The house has a red roof."),
@@ -510,11 +672,23 @@ final class AppState: ObservableObject {
                 let drafts = try await lmStudio.generate(
                     vocabulary: vocabulary,
                     count: count,
+                    options: options,
                     settings: lmStudioSettings
                 )
                 try Task.checkCancellation()
-                generatedSentences = drafts
-                selectedGeneratedSentenceIDs = Set(drafts.map(\.id))
+                let analyses = try await sentenceAnalyzer.analyze(sentences: drafts.map(\.german))
+                try Task.checkCancellation()
+                guard analyses.count == drafts.count else {
+                    throw CoNLLUParsingError.sentenceCount(
+                        expected: drafts.count,
+                        actual: analyses.count
+                    )
+                }
+                let analyzedDrafts = zip(drafts, analyses).map { draft, analysis in
+                    draft.withAnalysis(analysis)
+                }
+                generatedSentences = analyzedDrafts
+                selectedGeneratedSentenceIDs = Set(analyzedDrafts.map(\.id))
                 generatedSourceList = sourceList
             } catch is CancellationError {
                 // Closing the app or replacing the task is an expected cancellation.
@@ -536,16 +710,29 @@ final class AppState: ObservableObject {
     }
 
     func saveSelectedGeneratedSentences() {
+        guard !undoHistory.isPerforming else { return }
         guard let sourceList = generatedSourceList else { return }
         let selected = generatedSentences.filter { selectedGeneratedSentenceIDs.contains($0.id) }
         guard !selected.isEmpty else { return }
         let selectedIDs = Set(selected.map(\.id))
+        let generatedBeforeSave = generatedSentences
+        let selectionBeforeSave = selectedGeneratedSentenceIDs
         Task {
             do {
                 let inserted = try await store.saveSentences(selected, sourceList: sourceList)
                 savedSentences = try await store.savedSentences()
                 generatedSentences.removeAll { selectedIDs.contains($0.id) }
                 selectedGeneratedSentenceIDs.subtract(selectedIDs)
+                if !inserted.isEmpty {
+                    undoHistory.record(deleteSavedSentencesOperation(
+                        inserted,
+                        actionName: "Save \(inserted.count) sentence\(inserted.count == 1 ? "" : "s")",
+                        generatedBefore: generatedBeforeSave,
+                        selectionBefore: selectionBeforeSave,
+                        generatedAfter: generatedSentences,
+                        selectionAfter: selectedGeneratedSentenceIDs
+                    ))
+                }
                 if inserted.isEmpty {
                     showBanner("These sentences were already saved")
                 } else {
@@ -556,10 +743,19 @@ final class AppState: ObservableObject {
     }
 
     func deleteSentence(_ sentence: SavedSentence) {
+        guard !undoHistory.isPerforming else { return }
         Task {
             do {
                 try await store.deleteSentence(id: sentence.id)
                 savedSentences.removeAll { $0.id == sentence.id }
+                undoHistory.record(restoreSavedSentencesOperation(
+                    [sentence],
+                    actionName: "Delete sentence",
+                    generatedBefore: generatedSentences,
+                    selectionBefore: selectedGeneratedSentenceIDs,
+                    generatedAfter: generatedSentences,
+                    selectionAfter: selectedGeneratedSentenceIDs
+                ))
                 showBanner("Deleted sentence")
             } catch { show(error) }
         }
@@ -607,28 +803,56 @@ final class AppState: ObservableObject {
         return installedLMStudioModels.first { $0.modelKey == lmStudioSettings.modelKey }
     }
 
-    func translationEntries(for token: SentenceToken) async -> [DictionaryEntry] {
+    func translationEntries(
+        for selectedToken: SentenceToken,
+        sentence: String,
+        in sentenceTokens: [SentenceToken],
+        analysis: SentenceAnalysis?,
+        nounTokenIndices: Set<Int>
+    ) async -> [DictionaryEntry] {
         do {
-            var entries: [DictionaryEntry] = []
-            if let cardID = token.cardID, let card = try await store.personalCard(id: cardID) {
-                entries.append(.init(
-                    id: card.dictionaryEntryID ?? 0,
-                    german: card.german,
-                    english: card.english,
-                    rawGerman: card.rawGerman,
-                    kind: card.kind,
-                    gender: card.gender,
-                    source: "My words"
-                ))
+            let relatedToken = SentenceRelations.contextualLookupToken(
+                for: selectedToken,
+                sentence: sentence,
+                tokens: sentenceTokens,
+                analysis: analysis,
+                nounTokenIndices: nounTokenIndices
+            )
+            let fallbackToken = SentenceTokenizer.contextualLookupToken(
+                for: selectedToken,
+                in: sentenceTokens,
+                nounTokenIndices: nounTokenIndices
+            )
+            var lookupTokens = [relatedToken]
+            if SentenceTokenizer.normalized(fallbackToken.lookupTerm) !=
+                SentenceTokenizer.normalized(relatedToken.lookupTerm) {
+                lookupTokens.append(fallbackToken)
             }
-            let dictionaryEntries = try await store.searchDictionary(token.lookupTerm, limit: 12)
-            for entry in dictionaryEntries where !entries.contains(where: {
-                $0.id == entry.id ||
-                (SentenceTokenizer.normalized($0.german) == SentenceTokenizer.normalized(entry.german) && $0.english == entry.english)
-            }) {
-                entries.append(entry)
+
+            for token in lookupTokens {
+                var entries: [DictionaryEntry] = []
+                if let cardID = token.cardID, let card = try await store.personalCard(id: cardID) {
+                    entries.append(.init(
+                        id: card.dictionaryEntryID ?? 0,
+                        german: card.german,
+                        english: card.english,
+                        rawGerman: card.rawGerman,
+                        kind: card.kind,
+                        gender: card.gender,
+                        source: "My words",
+                        forms: card.forms
+                    ))
+                }
+                let dictionaryEntries = try await store.searchDictionary(token.lookupTerm, limit: 12)
+                for entry in dictionaryEntries where !entries.contains(where: {
+                    $0.id == entry.id ||
+                    (SentenceTokenizer.normalized($0.german) == SentenceTokenizer.normalized(entry.german) && $0.english == entry.english)
+                }) {
+                    entries.append(entry)
+                }
+                if !entries.isEmpty { return entries }
             }
-            return entries
+            return []
         } catch {
             show(error)
             return []
@@ -665,6 +889,210 @@ final class AppState: ObservableObject {
             }
         }
         return result
+    }
+
+    func undo() {
+        guard undoHistory.canUndo else { return }
+        Task {
+            do {
+                if let name = try await undoHistory.undo() {
+                    showBanner("Undo: \(name)")
+                }
+            } catch {
+                show(error)
+            }
+        }
+    }
+
+    func redo() {
+        guard undoHistory.canRedo else { return }
+        Task {
+            do {
+                if let name = try await undoHistory.redo() {
+                    showBanner("Redo: \(name)")
+                }
+            } catch {
+                show(error)
+            }
+        }
+    }
+
+    private func removeCardOperation(
+        cardID: PersonalCard.ID,
+        listID: WordList.ID,
+        actionName: String,
+        dictionaryEntryID: DictionaryEntry.ID?
+    ) -> AppUndoOperation {
+        AppUndoOperation(name: actionName) { [weak self] in
+            guard let self else { throw CancellationError() }
+            guard let mutation = try await self.store.removeCardRecordingChange(
+                cardID,
+                fromList: listID
+            ) else {
+                throw AppUndoError.mutationNoLongerAvailable
+            }
+            if let dictionaryEntryID,
+               self.addedDictionaryEntryPlacements[dictionaryEntryID]?.cardID == cardID,
+               self.addedDictionaryEntryPlacements[dictionaryEntryID]?.listID == listID {
+                self.addedDictionaryEntryPlacements[dictionaryEntryID] = nil
+            }
+            await self.refreshStudyData()
+            return self.restoreCardOperation(
+                mutation,
+                actionName: actionName,
+                dictionaryEntryID: dictionaryEntryID
+            )
+        }
+    }
+
+    private func restoreCardOperation(
+        _ mutation: RemovedCardMutation,
+        actionName: String,
+        dictionaryEntryID: DictionaryEntry.ID?
+    ) -> AppUndoOperation {
+        AppUndoOperation(name: actionName) { [weak self] in
+            guard let self else { throw CancellationError() }
+            try await self.store.restoreRemovedCard(mutation)
+            if let dictionaryEntryID {
+                self.addedDictionaryEntryPlacements[dictionaryEntryID] = .init(
+                    cardID: mutation.card.id,
+                    listID: mutation.listID
+                )
+            }
+            await self.refreshStudyData()
+            return self.removeCardOperation(
+                cardID: mutation.card.id,
+                listID: mutation.listID,
+                actionName: actionName,
+                dictionaryEntryID: dictionaryEntryID
+            )
+        }
+    }
+
+    private func moveCardOperation(
+        cardID: PersonalCard.ID,
+        fromListID: WordList.ID,
+        toListID: WordList.ID,
+        actionName: String,
+        dictionaryEntryID: DictionaryEntry.ID
+    ) -> AppUndoOperation {
+        AppUndoOperation(name: actionName) { [weak self] in
+            guard let self else { throw CancellationError() }
+            try await self.store.moveCard(
+                cardID,
+                fromList: fromListID,
+                toList: toListID
+            )
+            self.addedDictionaryEntryPlacements[dictionaryEntryID] = .init(
+                cardID: cardID,
+                listID: toListID
+            )
+            await self.activateWordList(toListID)
+            return self.moveCardOperation(
+                cardID: cardID,
+                fromListID: toListID,
+                toListID: fromListID,
+                actionName: actionName,
+                dictionaryEntryID: dictionaryEntryID
+            )
+        }
+    }
+
+    private func deleteWordListOperation(
+        listID: WordList.ID,
+        actionName: String
+    ) -> AppUndoOperation {
+        AppUndoOperation(name: actionName) { [weak self] in
+            guard let self else { throw CancellationError() }
+            let mutation = try await self.store.deleteWordListRecordingChange(id: listID)
+            self.wordLists = try await self.store.wordLists()
+            self.savedSentences = try await self.store.savedSentences()
+            if self.selectedListID == listID {
+                await self.activateWordList(WordList.defaultID)
+            } else {
+                await self.refreshStudyData()
+            }
+            return self.restoreWordListOperation(mutation, actionName: actionName)
+        }
+    }
+
+    private func restoreWordListOperation(
+        _ mutation: DeletedWordListMutation,
+        actionName: String
+    ) -> AppUndoOperation {
+        AppUndoOperation(name: actionName) { [weak self] in
+            guard let self else { throw CancellationError() }
+            try await self.store.restoreDeletedWordList(mutation)
+            self.wordLists = try await self.store.wordLists()
+            self.savedSentences = try await self.store.savedSentences()
+            await self.activateWordList(mutation.list.id)
+            return self.deleteWordListOperation(
+                listID: mutation.list.id,
+                actionName: actionName
+            )
+        }
+    }
+
+    private func deleteSavedSentencesOperation(
+        _ sentences: [SavedSentence],
+        actionName: String,
+        generatedBefore: [SentenceDraft],
+        selectionBefore: Set<SentenceDraft.ID>,
+        generatedAfter: [SentenceDraft],
+        selectionAfter: Set<SentenceDraft.ID>
+    ) -> AppUndoOperation {
+        AppUndoOperation(name: actionName) { [weak self] in
+            guard let self else { throw CancellationError() }
+            try await self.store.deleteSentences(ids: sentences.map(\.id))
+            self.savedSentences = try await self.store.savedSentences()
+            self.generatedSentences = generatedBefore
+            self.selectedGeneratedSentenceIDs = selectionBefore
+            return self.restoreSavedSentencesOperation(
+                sentences,
+                actionName: actionName,
+                generatedBefore: generatedBefore,
+                selectionBefore: selectionBefore,
+                generatedAfter: generatedAfter,
+                selectionAfter: selectionAfter
+            )
+        }
+    }
+
+    private func restoreSavedSentencesOperation(
+        _ sentences: [SavedSentence],
+        actionName: String,
+        generatedBefore: [SentenceDraft],
+        selectionBefore: Set<SentenceDraft.ID>,
+        generatedAfter: [SentenceDraft],
+        selectionAfter: Set<SentenceDraft.ID>
+    ) -> AppUndoOperation {
+        AppUndoOperation(name: actionName) { [weak self] in
+            guard let self else { throw CancellationError() }
+            try await self.store.restoreSentences(sentences)
+            self.savedSentences = try await self.store.savedSentences()
+            self.generatedSentences = generatedAfter
+            self.selectedGeneratedSentenceIDs = selectionAfter
+            return self.deleteSavedSentencesOperation(
+                sentences,
+                actionName: actionName,
+                generatedBefore: generatedBefore,
+                selectionBefore: selectionBefore,
+                generatedAfter: generatedAfter,
+                selectionAfter: selectionAfter
+            )
+        }
+    }
+
+    private func activateWordList(_ listID: WordList.ID) async {
+        selectedListID = listID
+        isReviewingAll = false
+        libraryQuery = ""
+        cards = []
+        dueCards = []
+        reviewCards = []
+        stats = StudyStats()
+        libraryTask?.cancel()
+        await refreshStudyData()
     }
 
     func refreshStudyData() async {

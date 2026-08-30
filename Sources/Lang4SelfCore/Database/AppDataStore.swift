@@ -46,13 +46,36 @@ public protocol StudyStoring: Sendable {
     func stats(listID: Int64, now: Date, calendar: Calendar) async throws -> StudyStats
 }
 
+/// Persistence operations that return enough data to reverse user-facing
+/// additions and removals without losing IDs, timestamps, or study history.
+public protocol ReversibleMutationStoring: Sendable {
+    func addCardRecordingChange(
+        from entry: DictionaryEntry,
+        listID: WordList.ID
+    ) async throws -> AddedCardMutation
+    func addCardRecordingChange(
+        _ cardID: PersonalCard.ID,
+        toList listID: WordList.ID
+    ) async throws -> Bool
+    func removeCardRecordingChange(
+        _ cardID: PersonalCard.ID,
+        fromList listID: WordList.ID
+    ) async throws -> RemovedCardMutation?
+    func restoreRemovedCard(_ mutation: RemovedCardMutation) async throws
+    func deleteWordListRecordingChange(id: WordList.ID) async throws -> DeletedWordListMutation
+    func restoreDeletedWordList(_ mutation: DeletedWordListMutation) async throws
+    func deleteSentences(ids: [SavedSentence.ID]) async throws
+    func restoreSentences(_ sentences: [SavedSentence]) async throws
+}
+
 /// The composed boundary needed by the top-level app coordinator. Feature services should
 /// depend on one of the narrower capability protocols above whenever possible.
 public protocol AppDataStore:
     DictionaryStoring,
     WordLibraryStoring,
     SentenceStoring,
-    StudyStoring
+    StudyStoring,
+    ReversibleMutationStoring
 {}
 
 public extension DictionaryStoring {

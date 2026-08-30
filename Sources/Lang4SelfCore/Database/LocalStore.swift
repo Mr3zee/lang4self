@@ -176,8 +176,12 @@ public actor LocalStore {
     }
 
     public func searchDictionary(_ query: String, limit: Int = 80) throws -> [DictionaryEntry] {
-        let lookupTerms = GermanMorphology.lookupTerms(for: query)
+        var lookupTerms = GermanMorphology.lookupTerms(for: query)
         guard !lookupTerms.isEmpty, limit > 0 else { return [] }
+        let inflectionLinks = try dictionaryInflectionSearchLinks(for: query)
+        for link in inflectionLinks where !lookupTerms.contains(link.searchTerm) {
+            lookupTerms.append(link.searchTerm)
+        }
         var hitsByGroup: [DictionaryGroupKey: DictionarySearchHit] = [:]
         var ordinal = 0
         for (termIndex, term) in lookupTerms.prefix(16).enumerated() {
@@ -188,7 +192,8 @@ public actor LocalStore {
                     preference: searchPreference(
                         for: entry,
                         literalTerm: lookupTerms[0],
-                        lookupTerms: lookupTerms
+                        lookupTerms: lookupTerms,
+                        inflectionLinks: inflectionLinks
                     ),
                     termIndex: termIndex,
                     ordinal: ordinal
@@ -199,10 +204,61 @@ public actor LocalStore {
             }
         }
 
-        let representatives = hitsByGroup.values
-            .sorted { $0.sortsBefore($1) }
-            .prefix(limit)
-        return try representatives.map { try dictionaryGroup(representedBy: $0.entry) }
+        var seenGroups = Set<DictionaryGroupKey>()
+        var groups: [DictionaryEntry] = []
+        for hit in hitsByGroup.values.sorted(by: { $0.sortsBefore($1) }) {
+            for group in try dictionaryGroups(representedBy: hit.entry) {
+                guard seenGroups.insert(DictionaryGroupKey(group)).inserted else { continue }
+                groups.append(group)
+                if groups.count == limit { return groups }
+            }
+        }
+        return groups
+    }
+
+    private func dictionaryInflectionSearchLinks(
+        for query: String
+    ) throws -> [DictionaryInflectionSearchLink] {
+        let queryForm = dictionaryGroupingTerm(
+            DictCCParser.cleanedTerm(query).replacingOccurrences(of: "|", with: "")
+        )
+        guard !queryForm.isEmpty else { return [] }
+        var forms = [queryForm]
+        let words = queryForm.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+        if words.count == 2, words[0] == "am" {
+            forms.append(words[1])
+        }
+
+        let statement = try prepare("""
+            SELECT DISTINCT lemma_key, tags
+            FROM dictionary_inflections
+            WHERE form = ?
+            ORDER BY lemma_key, tags
+            """)
+        defer { sqlite3_finalize(statement) }
+        var result: [DictionaryInflectionSearchLink] = []
+        for form in forms {
+            sqlite3_reset(statement)
+            sqlite3_clear_bindings(statement)
+            bind(form, to: 1, in: statement)
+            while true {
+                let step = sqlite3_step(statement)
+                if step == SQLITE_DONE { break }
+                guard step == SQLITE_ROW else { throw sqliteError() }
+                let tags = lectorTags(text(statement, 1))
+                guard let kind = searchKind(forInflectionTags: tags) else { continue }
+                let lemmaKey = text(statement, 0)
+                let link = DictionaryInflectionSearchLink(
+                    lemmaKey: lemmaKey,
+                    searchTerm: DictCCParser.normalized(lemmaKey),
+                    kind: kind
+                )
+                if !link.searchTerm.isEmpty, !result.contains(link) {
+                    result.append(link)
+                }
+            }
+        }
+        return result
     }
 
     private func dictionaryMatches(for normalized: String, limit: Int) throws -> [DictionaryEntry] {
@@ -240,9 +296,16 @@ public actor LocalStore {
     private func searchPreference(
         for entry: DictionaryEntry,
         literalTerm: String,
-        lookupTerms: [String]
+        lookupTerms: [String],
+        inflectionLinks: [DictionaryInflectionSearchLink]
     ) -> Int {
         let german = DictCCParser.normalized(entry.german)
+        let groupingTerm = dictionaryGroupingTerm(entry.german)
+        if inflectionLinks.contains(where: {
+            $0.lemmaKey == groupingTerm && $0.kind == entry.kind
+        }) {
+            return -1
+        }
         guard let exactIndex = lookupTerms.firstIndex(of: german) else { return 10 }
         let isSingularNoun = entry.kind == .noun
             && entry.gender != .plural
@@ -319,7 +382,7 @@ public actor LocalStore {
                 imported += 1
             }
             guard validLines > 0 else { throw LocalStoreError.invalidDictionaryFile }
-            try Self.execute(database, "INSERT INTO dictionary_fts(dictionary_fts) VALUES ('rebuild')")
+            try LocalStoreSchema.rebuildDictionarySearchIndex(database)
             try LocalStoreSchema.createDictionaryTriggers(database)
             try Self.execute(database, "COMMIT")
             try Self.execute(database, "PRAGMA optimize")
@@ -373,6 +436,65 @@ public actor LocalStore {
         }
         defer { sqlite3_finalize(sourceStatement) }
 
+        var sourceInflectionStatement: OpaquePointer?
+        if try Self.sourceTableExists("inflections", in: sourceDatabase) {
+            let inflectionSQL = """
+                SELECT i.inflected_form, i.lemma, i.type,
+                       EXISTS (
+                         SELECT 1 FROM senses AS noun_sense
+                         WHERE noun_sense.word = i.lemma AND lower(noun_sense.pos) = 'noun'
+                       )
+                       AND EXISTS (
+                         SELECT 1 FROM senses AS noun_form_sense
+                         WHERE noun_form_sense.word = i.inflected_form
+                           AND lower(noun_form_sense.pos) = 'noun'
+                       ) AS is_noun_relation
+                FROM inflections AS i
+                WHERE type = 'auxiliary'
+                   OR type = 'past'
+                   OR (
+                        instr(',' || type || ',', ',participle,') > 0
+                    AND instr(',' || type || ',', ',past,') > 0
+                   )
+                   OR (
+                        instr(',' || type || ',', ',present,') > 0
+                    AND (
+                         instr(',' || type || ',', ',first-person,') > 0
+                      OR instr(',' || type || ',', ',second-person,') > 0
+                      OR instr(',' || type || ',', ',third-person,') > 0
+                    )
+                   )
+                   OR (
+                        instr(',' || type || ',', ',preterite,') > 0
+                    AND instr(',' || type || ',', ',first-person,') > 0
+                    AND instr(',' || type || ',', ',singular,') > 0
+                   )
+                   OR (
+                        instr(',' || type || ',', ',plural,') > 0
+                    AND EXISTS (
+                         SELECT 1 FROM senses AS noun_sense
+                         WHERE noun_sense.word = i.lemma AND lower(noun_sense.pos) = 'noun'
+                    )
+                    AND EXISTS (
+                         SELECT 1 FROM senses AS noun_form_sense
+                         WHERE noun_form_sense.word = i.inflected_form
+                           AND lower(noun_form_sense.pos) = 'noun'
+                    )
+                   )
+                ORDER BY i.lemma, i.type, i.inflected_form
+                """
+            guard sqlite3_prepare_v2(
+                sourceDatabase,
+                inflectionSQL,
+                -1,
+                &sourceInflectionStatement,
+                nil
+            ) == SQLITE_OK else {
+                throw LocalStoreError.invalidExplanationDatabase
+            }
+        }
+        defer { sqlite3_finalize(sourceInflectionStatement) }
+
         try Self.execute(database, "BEGIN IMMEDIATE")
         do {
             let sourceName = "Wiktionary via Lector"
@@ -381,12 +503,37 @@ public actor LocalStore {
             defer { sqlite3_finalize(deleteStatement) }
             try stepDone(deleteStatement)
 
+            let deleteInflections = try prepare("DELETE FROM dictionary_inflections WHERE source = ?")
+            bind(sourceName, to: 1, in: deleteInflections)
+            defer { sqlite3_finalize(deleteInflections) }
+            try stepDone(deleteInflections)
+
             let insertStatement = try prepare("""
                 INSERT OR IGNORE INTO dictionary_explanations
                   (german_key, kind, explanation, source, sort_order)
                 VALUES (?, ?, ?, ?, ?)
                 """)
             defer { sqlite3_finalize(insertStatement) }
+
+            let insertInflection = try prepare("""
+                INSERT OR IGNORE INTO dictionary_inflections
+                  (lemma_key, form, tags, source)
+                VALUES (?, ?, ?, ?)
+                """)
+            defer { sqlite3_finalize(insertInflection) }
+
+            func storeInflection(lemma: String, form: String, tags: Set<String>) throws {
+                let lemmaKey = dictionaryGroupingTerm(lemma)
+                let cleanForm = form.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !lemmaKey.isEmpty, !cleanForm.isEmpty, !tags.isEmpty else { return }
+                sqlite3_reset(insertInflection)
+                sqlite3_clear_bindings(insertInflection)
+                bind(lemmaKey, to: 1, in: insertInflection)
+                bind(cleanForm, to: 2, in: insertInflection)
+                bind(tags.sorted().joined(separator: ","), to: 3, in: insertInflection)
+                bind(sourceName, to: 4, in: insertInflection)
+                try stepDone(insertInflection)
+            }
 
             var imported = 0
             while true {
@@ -397,7 +544,8 @@ public actor LocalStore {
                       let glossValue = sqlite3_column_text(sourceStatement, 2) else {
                     throw LocalStoreError.invalidExplanationDatabase
                 }
-                let word = dictionaryGroupingTerm(String(cString: wordValue))
+                let sourceWord = String(cString: wordValue).trimmingCharacters(in: .whitespacesAndNewlines)
+                let word = dictionaryGroupingTerm(sourceWord)
                 let gloss = String(cString: glossValue).trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !word.isEmpty, !gloss.isEmpty else { continue }
                 let position = sqlite3_column_int(sourceStatement, 3)
@@ -411,9 +559,36 @@ public actor LocalStore {
                 bind(sourceName, to: 4, in: insertStatement)
                 sqlite3_bind_int(insertStatement, 5, position)
                 try stepDone(insertStatement)
+                if let degree = lectorDegreeInflection(word: sourceWord, gloss: gloss) {
+                    try storeInflection(lemma: degree.lemma, form: sourceWord, tags: [degree.tag])
+                }
                 imported += 1
                 if imported % 5_000 == 0 {
                     progress(.init(imported: imported, total: total))
+                }
+            }
+            if let sourceInflectionStatement {
+                while true {
+                    let step = sqlite3_step(sourceInflectionStatement)
+                    if step == SQLITE_DONE { break }
+                    guard step == SQLITE_ROW,
+                          let formValue = sqlite3_column_text(sourceInflectionStatement, 0),
+                          let lemmaValue = sqlite3_column_text(sourceInflectionStatement, 1),
+                          let typeValue = sqlite3_column_text(sourceInflectionStatement, 2) else {
+                        throw LocalStoreError.invalidExplanationDatabase
+                    }
+                    var tags = lectorTags(String(cString: typeValue))
+                    let isNounPlural = shouldImportLectorNounPlural(
+                        tags,
+                        isNounRelation: sqlite3_column_int(sourceInflectionStatement, 3) != 0
+                    )
+                    guard isNounPlural || shouldImportLectorVerbInflection(tags) else { continue }
+                    if isNounPlural { tags.insert("noun") }
+                    try storeInflection(
+                        lemma: String(cString: lemmaValue),
+                        form: String(cString: formValue),
+                        tags: tags
+                    )
                 }
             }
             let stored: Int
@@ -435,6 +610,13 @@ public actor LocalStore {
 
     @discardableResult
     public func addCard(from entry: DictionaryEntry, listID: Int64 = WordList.defaultID) throws -> PersonalCard {
+        try addCardRecordingChange(from: entry, listID: listID).card
+    }
+
+    public func addCardRecordingChange(
+        from entry: DictionaryEntry,
+        listID: WordList.ID
+    ) throws -> AddedCardMutation {
         try Self.execute(database, "BEGIN IMMEDIATE")
         do {
             let card: PersonalCard
@@ -465,9 +647,9 @@ public actor LocalStore {
                 }
                 card = inserted
             }
-            try addCard(card.id, toList: listID)
+            let didAddToList = try insertCard(card.id, toList: listID, addedAt: now())
             try Self.execute(database, "COMMIT")
-            return card
+            return AddedCardMutation(card: card, didAddToList: didAddToList)
         } catch {
             try? Self.execute(database, "ROLLBACK")
             throw error
@@ -574,9 +756,21 @@ public actor LocalStore {
     }
 
     public func deleteWordList(id: Int64) throws {
+        _ = try deleteWordListRecordingChange(id: id)
+    }
+
+    public func deleteWordListRecordingChange(id: WordList.ID) throws -> DeletedWordListMutation {
         guard id != WordList.defaultID else { throw LocalStoreError.cannotDeleteDefaultList }
         try Self.execute(database, "BEGIN IMMEDIATE")
         do {
+            guard let list = try wordList(id: id) else {
+                throw LocalStoreError.sqlite("Could not find the list to delete")
+            }
+            let cardIDs = try cardIDs(inList: id)
+            let cardMutations = try cardIDs.compactMap {
+                try removedCardMutation(cardID: $0, listID: id)
+            }
+            let linkedSentenceIDs = try sentenceIDs(sourceListID: id)
             let statement = try prepare("DELETE FROM word_lists WHERE id = ?")
             sqlite3_bind_int64(statement, 1, id)
             let step = sqlite3_step(statement)
@@ -584,6 +778,11 @@ public actor LocalStore {
             guard step == SQLITE_DONE else { throw sqliteError() }
             try Self.execute(database, "DELETE FROM personal_cards WHERE NOT EXISTS (SELECT 1 FROM card_lists WHERE card_lists.card_id = personal_cards.id)")
             try Self.execute(database, "COMMIT")
+            return DeletedWordListMutation(
+                list: list,
+                cards: cardMutations,
+                linkedSentenceIDs: linkedSentenceIDs
+            )
         } catch {
             try? Self.execute(database, "ROLLBACK")
             throw error
@@ -591,17 +790,30 @@ public actor LocalStore {
     }
 
     public func addCard(_ cardID: Int64, toList listID: Int64) throws {
-        let statement = try prepare("INSERT OR IGNORE INTO card_lists (card_id, list_id, added_at) VALUES (?, ?, ?)")
-        defer { sqlite3_finalize(statement) }
-        sqlite3_bind_int64(statement, 1, cardID)
-        sqlite3_bind_int64(statement, 2, listID)
-        sqlite3_bind_double(statement, 3, now().timeIntervalSince1970)
-        try stepDone(statement)
+        _ = try insertCard(cardID, toList: listID, addedAt: now())
+    }
+
+    public func addCardRecordingChange(
+        _ cardID: PersonalCard.ID,
+        toList listID: WordList.ID
+    ) throws -> Bool {
+        try insertCard(cardID, toList: listID, addedAt: now())
     }
 
     public func removeCard(_ cardID: Int64, fromList listID: Int64) throws {
+        _ = try removeCardRecordingChange(cardID, fromList: listID)
+    }
+
+    public func removeCardRecordingChange(
+        _ cardID: PersonalCard.ID,
+        fromList listID: WordList.ID
+    ) throws -> RemovedCardMutation? {
         try Self.execute(database, "BEGIN IMMEDIATE")
         do {
+            guard let mutation = try removedCardMutation(cardID: cardID, listID: listID) else {
+                try Self.execute(database, "COMMIT")
+                return nil
+            }
             let statement = try prepare("DELETE FROM card_lists WHERE card_id = ? AND list_id = ?")
             sqlite3_bind_int64(statement, 1, cardID)
             sqlite3_bind_int64(statement, 2, listID)
@@ -614,6 +826,65 @@ public actor LocalStore {
             let shouldDelete = try readScalarInt(orphan) != 0
             sqlite3_finalize(orphan)
             if shouldDelete { try deleteCard(id: cardID) }
+            try Self.execute(database, "COMMIT")
+            return mutation
+        } catch {
+            try? Self.execute(database, "ROLLBACK")
+            throw error
+        }
+    }
+
+    public func restoreRemovedCard(_ mutation: RemovedCardMutation) throws {
+        try Self.execute(database, "BEGIN IMMEDIATE")
+        do {
+            try restoreCard(mutation.card)
+            try restoreReviews(mutation.reviews, cardID: mutation.card.id)
+            _ = try insertCard(
+                mutation.card.id,
+                toList: mutation.listID,
+                addedAt: mutation.addedAt
+            )
+            try Self.execute(database, "COMMIT")
+        } catch {
+            try? Self.execute(database, "ROLLBACK")
+            throw error
+        }
+    }
+
+    public func restoreDeletedWordList(_ mutation: DeletedWordListMutation) throws {
+        try Self.execute(database, "BEGIN IMMEDIATE")
+        do {
+            let listStatement = try prepare(
+                "INSERT INTO word_lists (id, name, created_at) VALUES (?, ?, ?)"
+            )
+            sqlite3_bind_int64(listStatement, 1, mutation.list.id)
+            bind(mutation.list.name, to: 2, in: listStatement)
+            sqlite3_bind_double(listStatement, 3, mutation.list.createdAt.timeIntervalSince1970)
+            let listStep = sqlite3_step(listStatement)
+            sqlite3_finalize(listStatement)
+            guard listStep == SQLITE_DONE else { throw sqliteError() }
+
+            for cardMutation in mutation.cards {
+                try restoreCard(cardMutation.card)
+                try restoreReviews(cardMutation.reviews, cardID: cardMutation.card.id)
+                _ = try insertCard(
+                    cardMutation.card.id,
+                    toList: mutation.list.id,
+                    addedAt: cardMutation.addedAt
+                )
+            }
+
+            let sentenceStatement = try prepare(
+                "UPDATE saved_sentences SET source_list_id = ? WHERE id = ?"
+            )
+            defer { sqlite3_finalize(sentenceStatement) }
+            for sentenceID in mutation.linkedSentenceIDs {
+                sqlite3_reset(sentenceStatement)
+                sqlite3_clear_bindings(sentenceStatement)
+                sqlite3_bind_int64(sentenceStatement, 1, mutation.list.id)
+                sqlite3_bind_int64(sentenceStatement, 2, sentenceID)
+                try stepDone(sentenceStatement)
+            }
             try Self.execute(database, "COMMIT")
         } catch {
             try? Self.execute(database, "ROLLBACK")
@@ -714,7 +985,8 @@ public actor LocalStore {
     public func savedSentences(limit: Int = 500) throws -> [SavedSentence] {
         guard limit > 0 else { return [] }
         let statement = try prepare("""
-            SELECT id, german, translation, source_list_id, source_list_name, tokens_json, created_at
+            SELECT id, german, translation, source_list_id, source_list_name,
+                   tokens_json, analysis_json, created_at
             FROM saved_sentences
             ORDER BY created_at DESC, id DESC
             LIMIT ?
@@ -737,8 +1009,8 @@ public actor LocalStore {
         do {
             let sql = """
                 INSERT OR IGNORE INTO saved_sentences
-                  (german, translation, source_list_id, source_list_name, tokens_json, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                  (german, translation, source_list_id, source_list_name, tokens_json, analysis_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """
             let statement = try prepare(sql)
             defer { sqlite3_finalize(statement) }
@@ -757,8 +1029,17 @@ public actor LocalStore {
                     throw LocalStoreError.sqlite("Could not encode sentence words")
                 }
                 bind(tokenJSON, to: 5, in: statement)
+                if let analysis = draft.analysis {
+                    let analysisData = try encoder.encode(analysis)
+                    guard let analysisJSON = String(data: analysisData, encoding: .utf8) else {
+                        throw LocalStoreError.sqlite("Could not encode sentence analysis")
+                    }
+                    bind(analysisJSON, to: 6, in: statement)
+                } else {
+                    sqlite3_bind_null(statement, 6)
+                }
                 let createdAt = now()
-                sqlite3_bind_double(statement, 6, createdAt.timeIntervalSince1970)
+                sqlite3_bind_double(statement, 7, createdAt.timeIntervalSince1970)
                 try stepDone(statement)
 
                 if sqlite3_changes(database) > 0 {
@@ -769,6 +1050,7 @@ public actor LocalStore {
                         sourceListID: sourceList.id,
                         sourceListName: sourceList.name,
                         tokens: draft.tokens,
+                        analysis: draft.analysis,
                         createdAt: createdAt
                     ))
                 }
@@ -786,6 +1068,72 @@ public actor LocalStore {
         defer { sqlite3_finalize(statement) }
         sqlite3_bind_int64(statement, 1, id)
         try stepDone(statement)
+    }
+
+    public func deleteSentences(ids: [SavedSentence.ID]) throws {
+        guard !ids.isEmpty else { return }
+        try Self.execute(database, "BEGIN IMMEDIATE")
+        do {
+            let statement = try prepare("DELETE FROM saved_sentences WHERE id = ?")
+            defer { sqlite3_finalize(statement) }
+            for id in ids {
+                sqlite3_reset(statement)
+                sqlite3_clear_bindings(statement)
+                sqlite3_bind_int64(statement, 1, id)
+                try stepDone(statement)
+            }
+            try Self.execute(database, "COMMIT")
+        } catch {
+            try? Self.execute(database, "ROLLBACK")
+            throw error
+        }
+    }
+
+    public func restoreSentences(_ sentences: [SavedSentence]) throws {
+        guard !sentences.isEmpty else { return }
+        try Self.execute(database, "BEGIN IMMEDIATE")
+        do {
+            let statement = try prepare("""
+                INSERT INTO saved_sentences
+                  (id, german, translation, source_list_id, source_list_name, tokens_json, analysis_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """)
+            defer { sqlite3_finalize(statement) }
+            let encoder = JSONEncoder()
+            for sentence in sentences {
+                sqlite3_reset(statement)
+                sqlite3_clear_bindings(statement)
+                sqlite3_bind_int64(statement, 1, sentence.id)
+                bind(sentence.german, to: 2, in: statement)
+                bind(sentence.translation, to: 3, in: statement)
+                if let sourceListID = sentence.sourceListID {
+                    sqlite3_bind_int64(statement, 4, sourceListID)
+                } else {
+                    sqlite3_bind_null(statement, 4)
+                }
+                bind(sentence.sourceListName, to: 5, in: statement)
+                let tokenData = try encoder.encode(sentence.tokens)
+                guard let tokenJSON = String(data: tokenData, encoding: .utf8) else {
+                    throw LocalStoreError.sqlite("Could not encode sentence words")
+                }
+                bind(tokenJSON, to: 6, in: statement)
+                if let analysis = sentence.analysis {
+                    let analysisData = try encoder.encode(analysis)
+                    guard let analysisJSON = String(data: analysisData, encoding: .utf8) else {
+                        throw LocalStoreError.sqlite("Could not encode sentence analysis")
+                    }
+                    bind(analysisJSON, to: 7, in: statement)
+                } else {
+                    sqlite3_bind_null(statement, 7)
+                }
+                sqlite3_bind_double(statement, 8, sentence.createdAt.timeIntervalSince1970)
+                try stepDone(statement)
+            }
+            try Self.execute(database, "COMMIT")
+        } catch {
+            try? Self.execute(database, "ROLLBACK")
+            throw error
+        }
     }
 
     public func stats(listID: Int64 = WordList.defaultID, now: Date = .now, calendar: Calendar = .current) throws -> StudyStats {
@@ -872,6 +1220,173 @@ public actor LocalStore {
         return try readCards(statement).first
     }
 
+    private func wordList(id: WordList.ID) throws -> WordList? {
+        let statement = try prepare("SELECT id, name, created_at FROM word_lists WHERE id = ?")
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_int64(statement, 1, id)
+        let step = sqlite3_step(statement)
+        if step == SQLITE_DONE { return nil }
+        guard step == SQLITE_ROW else { throw sqliteError() }
+        return WordList(
+            id: sqlite3_column_int64(statement, 0),
+            name: text(statement, 1),
+            createdAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 2))
+        )
+    }
+
+    private func cardIDs(inList listID: WordList.ID) throws -> [PersonalCard.ID] {
+        let statement = try prepare(
+            "SELECT card_id FROM card_lists WHERE list_id = ? ORDER BY card_id"
+        )
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_int64(statement, 1, listID)
+        var result: [PersonalCard.ID] = []
+        while true {
+            let step = sqlite3_step(statement)
+            if step == SQLITE_DONE { return result }
+            guard step == SQLITE_ROW else { throw sqliteError() }
+            result.append(sqlite3_column_int64(statement, 0))
+        }
+    }
+
+    private func sentenceIDs(sourceListID: WordList.ID) throws -> [SavedSentence.ID] {
+        let statement = try prepare(
+            "SELECT id FROM saved_sentences WHERE source_list_id = ? ORDER BY id"
+        )
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_int64(statement, 1, sourceListID)
+        var result: [SavedSentence.ID] = []
+        while true {
+            let step = sqlite3_step(statement)
+            if step == SQLITE_DONE { return result }
+            guard step == SQLITE_ROW else { throw sqliteError() }
+            result.append(sqlite3_column_int64(statement, 0))
+        }
+    }
+
+    private func removedCardMutation(
+        cardID: PersonalCard.ID,
+        listID: WordList.ID
+    ) throws -> RemovedCardMutation? {
+        guard let card = try card(id: cardID) else { return nil }
+        let membership = try prepare(
+            "SELECT added_at FROM card_lists WHERE card_id = ? AND list_id = ?"
+        )
+        defer { sqlite3_finalize(membership) }
+        sqlite3_bind_int64(membership, 1, cardID)
+        sqlite3_bind_int64(membership, 2, listID)
+        let membershipStep = sqlite3_step(membership)
+        if membershipStep == SQLITE_DONE { return nil }
+        guard membershipStep == SQLITE_ROW else { throw sqliteError() }
+        return RemovedCardMutation(
+            card: card,
+            listID: listID,
+            addedAt: Date(timeIntervalSince1970: sqlite3_column_double(membership, 0)),
+            reviews: try reviews(cardID: cardID)
+        )
+    }
+
+    private func reviews(cardID: PersonalCard.ID) throws -> [CardReviewSnapshot] {
+        let statement = try prepare("""
+            SELECT id, rating, reviewed_at, interval_days
+            FROM review_log
+            WHERE card_id = ?
+            ORDER BY id
+            """)
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_int64(statement, 1, cardID)
+        var result: [CardReviewSnapshot] = []
+        while true {
+            let step = sqlite3_step(statement)
+            if step == SQLITE_DONE { return result }
+            guard step == SQLITE_ROW else { throw sqliteError() }
+            result.append(.init(
+                id: sqlite3_column_int64(statement, 0),
+                rating: Int(sqlite3_column_int(statement, 1)),
+                reviewedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 2)),
+                intervalDays: sqlite3_column_double(statement, 3)
+            ))
+        }
+    }
+
+    @discardableResult
+    private func insertCard(
+        _ cardID: PersonalCard.ID,
+        toList listID: WordList.ID,
+        addedAt: Date
+    ) throws -> Bool {
+        let statement = try prepare(
+            "INSERT OR IGNORE INTO card_lists (card_id, list_id, added_at) VALUES (?, ?, ?)"
+        )
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_int64(statement, 1, cardID)
+        sqlite3_bind_int64(statement, 2, listID)
+        sqlite3_bind_double(statement, 3, addedAt.timeIntervalSince1970)
+        try stepDone(statement)
+        return sqlite3_changes(database) > 0
+    }
+
+    private func restoreCard(_ card: PersonalCard) throws {
+        guard try self.card(id: card.id) == nil else { return }
+        let statement = try prepare("""
+            INSERT INTO personal_cards
+              (id, dictionary_entry_id, german, english, raw_german, kind, gender, notes, tags,
+               created_at, due_at, last_reviewed_at, interval_days, ease_factor, repetitions,
+               lapses, is_starred, is_suspended)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """)
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_int64(statement, 1, card.id)
+        if let dictionaryEntryID = card.dictionaryEntryID {
+            sqlite3_bind_int64(statement, 2, dictionaryEntryID)
+        } else {
+            sqlite3_bind_null(statement, 2)
+        }
+        bind(card.german, to: 3, in: statement)
+        bind(card.english, to: 4, in: statement)
+        bind(card.rawGerman, to: 5, in: statement)
+        bind(card.kind.rawValue, to: 6, in: statement)
+        bind(card.gender.rawValue, to: 7, in: statement)
+        bind(card.notes, to: 8, in: statement)
+        bind(card.tags, to: 9, in: statement)
+        sqlite3_bind_double(statement, 10, card.createdAt.timeIntervalSince1970)
+        sqlite3_bind_double(statement, 11, card.dueAt.timeIntervalSince1970)
+        if let lastReviewedAt = card.lastReviewedAt {
+            sqlite3_bind_double(statement, 12, lastReviewedAt.timeIntervalSince1970)
+        } else {
+            sqlite3_bind_null(statement, 12)
+        }
+        sqlite3_bind_double(statement, 13, card.intervalDays)
+        sqlite3_bind_double(statement, 14, card.easeFactor)
+        sqlite3_bind_int(statement, 15, Int32(clamping: card.repetitions))
+        sqlite3_bind_int(statement, 16, Int32(clamping: card.lapses))
+        sqlite3_bind_int(statement, 17, card.isStarred ? 1 : 0)
+        sqlite3_bind_int(statement, 18, card.isSuspended ? 1 : 0)
+        try stepDone(statement)
+    }
+
+    private func restoreReviews(
+        _ reviews: [CardReviewSnapshot],
+        cardID: PersonalCard.ID
+    ) throws {
+        let statement = try prepare("""
+            INSERT OR IGNORE INTO review_log
+              (id, card_id, rating, reviewed_at, interval_days)
+            VALUES (?, ?, ?, ?, ?)
+            """)
+        defer { sqlite3_finalize(statement) }
+        for review in reviews {
+            sqlite3_reset(statement)
+            sqlite3_clear_bindings(statement)
+            sqlite3_bind_int64(statement, 1, review.id)
+            sqlite3_bind_int64(statement, 2, cardID)
+            sqlite3_bind_int(statement, 3, Int32(clamping: review.rating))
+            sqlite3_bind_double(statement, 4, review.reviewedAt.timeIntervalSince1970)
+            sqlite3_bind_double(statement, 5, review.intervalDays)
+            try stepDone(statement)
+        }
+    }
+
     private func card(forDictionaryEntryID id: Int64) throws -> PersonalCard? {
         let statement = try prepare("SELECT \(cardColumns) FROM personal_cards WHERE dictionary_entry_id = ?")
         defer { sqlite3_finalize(statement) }
@@ -909,6 +1424,12 @@ public actor LocalStore {
         }
     }
 
+    private func dictionaryGroups(representedBy representative: DictionaryEntry) throws -> [DictionaryEntry] {
+        let singularEntries = try dictionarySingularEntries(for: representative)
+        let representatives = singularEntries.isEmpty ? [representative] : singularEntries
+        return try representatives.map(dictionaryGroup)
+    }
+
     private func dictionaryGroup(representedBy representative: DictionaryEntry) throws -> DictionaryEntry {
         let sql = """
             SELECT id, german, english, raw_german, raw_english,
@@ -926,10 +1447,21 @@ public actor LocalStore {
         let entries = try readEntries(statement).filter {
             dictionaryGroupingTerm($0.german) == groupTerm
         }
-        guard let canonical = entries.first else { return representative }
+        guard let canonical = entries.first(where: { $0.gender != .plural }) ?? entries.first else {
+            return representative
+        }
+        let singularEntries = entries.filter { $0.gender != .plural }
+        let sameSpellingPluralEntries = entries.filter { $0.gender == .plural }
+        let linkedPluralEntries = try dictionaryPluralEntries(for: canonical)
+        var seenEntryIDs = Set<Int64>()
+        let pluralEntries = (sameSpellingPluralEntries + linkedPluralEntries).filter {
+            seenEntryIDs.insert($0.id).inserted
+        }
+        let baseEntries = singularEntries.isEmpty ? entries : singularEntries
+        let meaningEntries = baseEntries + pluralEntries
 
         var seenMeanings = Set<String>()
-        let meanings = entries.compactMap { entry -> DictionaryMeaning? in
+        let meanings = meaningEntries.compactMap { entry -> DictionaryMeaning? in
             let meaning = DictionaryMeaning(
                 english: entry.english,
                 rawEnglish: entry.rawEnglish,
@@ -940,15 +1472,21 @@ public actor LocalStore {
             )
             return seenMeanings.insert(meaning.id).inserted ? meaning : nil
         }
-        let genders = Set(entries.map(\.gender))
-        let usages = Set(entries.map(\.usage))
-        let sources = entries.map(\.source).reduce(into: [String]()) { result, source in
+        let genders = Set(baseEntries.map(\.gender))
+        let usages = Set(baseEntries.map(\.usage))
+        let sources = meaningEntries.map(\.source).reduce(into: [String]()) { result, source in
             if !result.contains(source) { result.append(source) }
         }
         let explanations = try dictionaryExplanations(for: canonical)
-        let pluralForms = try dictionaryPluralForms(for: canonical)
+        let forms = try dictionaryForms(for: canonical.german, kind: canonical.kind)
+        let pluralForms = pluralEntries.reduce(into: [String]()) { forms, entry in
+            if !forms.contains(entry.german) { forms.append(entry.german) }
+        }
         let allSources = explanations.reduce(into: sources) { result, explanation in
             if !result.contains(explanation.source) { result.append(explanation.source) }
+        }
+        let sourcesWithForms = forms.reduce(into: allSources) { result, form in
+            if !result.contains(form.source) { result.append(form.source) }
         }
 
         return DictionaryEntry(
@@ -960,35 +1498,107 @@ public actor LocalStore {
             kind: canonical.kind,
             gender: genders.count == 1 ? canonical.gender : .unknown,
             usage: usages.count == 1 ? canonical.usage : nil,
-            source: allSources.joined(separator: ", "),
+            source: sourcesWithForms.joined(separator: ", "),
             pluralForms: pluralForms,
             meanings: meanings,
-            explanations: explanations
+            explanations: explanations,
+            forms: forms
         )
     }
 
-    private func dictionaryPluralForms(for entry: DictionaryEntry) throws -> [String] {
-        guard entry.kind == .noun, entry.gender != .plural else { return [] }
-        let statement = try prepare("""
+    private func dictionarySingularEntries(for entry: DictionaryEntry) throws -> [DictionaryEntry] {
+        guard entry.kind == .noun, entry.gender == .plural else { return [] }
+        let relationStatement = try prepare("""
+            SELECT DISTINCT lemma_key
+            FROM dictionary_inflections
+            WHERE form = ?
+              AND instr(',' || tags || ',', ',noun,') > 0
+              AND instr(',' || tags || ',', ',plural,') > 0
+            ORDER BY lemma_key
+            """)
+        defer { sqlite3_finalize(relationStatement) }
+        bind(dictionaryGroupingTerm(entry.german), to: 1, in: relationStatement)
+        var singularKeys: [String] = []
+        while true {
+            let step = sqlite3_step(relationStatement)
+            if step == SQLITE_DONE { break }
+            guard step == SQLITE_ROW else { throw sqliteError() }
+            singularKeys.append(text(relationStatement, 0))
+        }
+        guard singularKeys.count == 1 else { return [] }
+
+        let entrySQL = """
             SELECT id, german, english, raw_german, raw_english,
                    kind, gender, usage, source, translation_language,
                    explanation
             FROM dictionary_entries
-            WHERE kind = 'noun' AND gender = 'plural'
-              AND normalized_german >= ? AND normalized_german < ?
-            ORDER BY length(normalized_german), id
-            LIMIT 32
-            """)
-        defer { sqlite3_finalize(statement) }
-        let prefix = DictCCParser.normalized(entry.german)
-        bind(prefix, to: 1, in: statement)
-        bind(prefix + "\u{10FFFF}", to: 2, in: statement)
-        return try readEntries(statement).reduce(into: [String]()) { forms, candidate in
-            if GermanMorphology.isPluralForm(candidate.german, of: entry.german),
-               !forms.contains(candidate.german) {
-                forms.append(candidate.german)
+            WHERE kind = 'noun' AND gender != 'plural' AND normalized_german = ?
+            ORDER BY id
+            """
+        var result: [DictionaryEntry] = []
+        var seenGroups = Set<DictionaryGroupKey>()
+        for singularKey in singularKeys {
+            let statement = try prepare(entrySQL)
+            defer { sqlite3_finalize(statement) }
+            bind(DictCCParser.normalized(singularKey), to: 1, in: statement)
+            for singular in try readEntries(statement)
+            where dictionaryGroupingTerm(singular.german) == singularKey {
+                if seenGroups.insert(DictionaryGroupKey(singular)).inserted {
+                    result.append(singular)
+                }
             }
         }
+        return result
+    }
+
+    private func dictionaryPluralEntries(for entry: DictionaryEntry) throws -> [DictionaryEntry] {
+        guard entry.kind == .noun, entry.gender != .plural else { return [] }
+        let relationStatement = try prepare("""
+            SELECT DISTINCT candidate.form
+            FROM dictionary_inflections AS candidate
+            WHERE candidate.lemma_key = ?
+              AND instr(',' || candidate.tags || ',', ',noun,') > 0
+              AND instr(',' || candidate.tags || ',', ',plural,') > 0
+              AND NOT EXISTS (
+                SELECT 1
+                FROM dictionary_inflections AS other
+                WHERE other.form = candidate.form
+                  AND other.lemma_key != candidate.lemma_key
+                  AND instr(',' || other.tags || ',', ',noun,') > 0
+                  AND instr(',' || other.tags || ',', ',plural,') > 0
+              )
+            ORDER BY candidate.form
+            """)
+        defer { sqlite3_finalize(relationStatement) }
+        bind(dictionaryGroupingTerm(entry.german), to: 1, in: relationStatement)
+        var pluralKeys: [String] = []
+        while true {
+            let step = sqlite3_step(relationStatement)
+            if step == SQLITE_DONE { break }
+            guard step == SQLITE_ROW else { throw sqliteError() }
+            pluralKeys.append(text(relationStatement, 0))
+        }
+
+        let entrySQL = """
+            SELECT id, german, english, raw_german, raw_english,
+                   kind, gender, usage, source, translation_language,
+                   explanation
+            FROM dictionary_entries
+            WHERE kind = 'noun' AND gender = 'plural' AND normalized_german = ?
+            ORDER BY id
+            """
+        var result: [DictionaryEntry] = []
+        var seenIDs = Set<Int64>()
+        for pluralKey in pluralKeys {
+            let statement = try prepare(entrySQL)
+            defer { sqlite3_finalize(statement) }
+            bind(DictCCParser.normalized(pluralKey), to: 1, in: statement)
+            for plural in try readEntries(statement)
+            where dictionaryGroupingTerm(plural.german) == pluralKey {
+                if seenIDs.insert(plural.id).inserted { result.append(plural) }
+            }
+        }
+        return result
     }
 
     private func dictionaryExplanations(for entry: DictionaryEntry) throws -> [DictionaryExplanation] {
@@ -1010,6 +1620,31 @@ public actor LocalStore {
         }
     }
 
+    private func dictionaryForms(for german: String, kind: WordKind) throws -> [DictionaryForm] {
+        guard kind == .verb || kind == .adjective else { return [] }
+        let lemmaKey = dictionaryGroupingTerm(GermanMorphology.inflectionLemma(for: german))
+        guard !lemmaKey.isEmpty else { return [] }
+        let statement = try prepare("""
+            SELECT form, tags, source
+            FROM dictionary_inflections
+            WHERE lemma_key = ?
+            ORDER BY tags, form, source
+            """)
+        defer { sqlite3_finalize(statement) }
+        bind(lemmaKey, to: 1, in: statement)
+        var result: [DictionaryForm] = []
+        while true {
+            let step = sqlite3_step(statement)
+            if step == SQLITE_DONE { return result }
+            guard step == SQLITE_ROW else { throw sqliteError() }
+            result.append(.init(
+                form: text(statement, 0),
+                tags: lectorTags(text(statement, 1)),
+                source: text(statement, 2)
+            ))
+        }
+    }
+
     private func readCards(_ statement: OpaquePointer?) throws -> [PersonalCard] {
         var result: [PersonalCard] = []
         while true {
@@ -1018,12 +1653,14 @@ public actor LocalStore {
             guard step == SQLITE_ROW else { throw sqliteError() }
             let dictionaryID = sqlite3_column_type(statement, 1) == SQLITE_NULL ? nil : sqlite3_column_int64(statement, 1)
             let lastReviewed = sqlite3_column_type(statement, 11) == SQLITE_NULL ? nil : Date(timeIntervalSince1970: sqlite3_column_double(statement, 11))
+            let german = text(statement, 2)
+            let kind = WordKind(rawValue: text(statement, 5)) ?? .other
             result.append(.init(
                 id: sqlite3_column_int64(statement, 0),
                 dictionaryEntryID: dictionaryID,
-                german: text(statement, 2),
+                german: german,
                 english: text(statement, 3),
-                kind: WordKind(rawValue: text(statement, 5)) ?? .other,
+                kind: kind,
                 gender: Gender(rawValue: text(statement, 6)) ?? .unknown,
                 rawGerman: text(statement, 4),
                 notes: text(statement, 7),
@@ -1036,7 +1673,8 @@ public actor LocalStore {
                 repetitions: Int(sqlite3_column_int(statement, 14)),
                 lapses: Int(sqlite3_column_int(statement, 15)),
                 isStarred: sqlite3_column_int(statement, 16) != 0,
-                isSuspended: sqlite3_column_int(statement, 17) != 0
+                isSuspended: sqlite3_column_int(statement, 17) != 0,
+                forms: try dictionaryForms(for: german, kind: kind)
             ))
         }
     }
@@ -1054,6 +1692,9 @@ public actor LocalStore {
             let tokenData = Data(text(statement, 5).utf8)
             let tokens = (try? decoder.decode([SentenceToken].self, from: tokenData))
                 ?? SentenceTokenizer.tokens(in: text(statement, 1))
+            let analysis = nullableText(statement, 6).flatMap {
+                try? decoder.decode(SentenceAnalysis.self, from: Data($0.utf8))
+            }
             result.append(.init(
                 id: sqlite3_column_int64(statement, 0),
                 german: text(statement, 1),
@@ -1061,7 +1702,8 @@ public actor LocalStore {
                 sourceListID: sourceListID,
                 sourceListName: text(statement, 4),
                 tokens: tokens,
-                createdAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 6))
+                analysis: analysis,
+                createdAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 7))
             ))
         }
     }
@@ -1156,6 +1798,26 @@ public actor LocalStore {
         }
     }
 
+    private static func sourceTableExists(_ table: String, in database: OpaquePointer?) throws -> Bool {
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(
+            database,
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
+            -1,
+            &statement,
+            nil
+        ) == SQLITE_OK else {
+            throw LocalStoreError.invalidExplanationDatabase
+        }
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_text(statement, 1, table, -1, transient)
+        let step = sqlite3_step(statement)
+        guard step == SQLITE_ROW || step == SQLITE_DONE else {
+            throw LocalStoreError.invalidExplanationDatabase
+        }
+        return step == SQLITE_ROW
+    }
+
 }
 
 private struct DictionaryGroupKey: Hashable {
@@ -1179,6 +1841,12 @@ private struct DictionarySearchHit {
         if termIndex != other.termIndex { return termIndex < other.termIndex }
         return ordinal < other.ordinal
     }
+}
+
+private struct DictionaryInflectionSearchLink: Equatable {
+    let lemmaKey: String
+    let searchTerm: String
+    let kind: WordKind
 }
 
 private struct DictionaryFormat {
@@ -1210,4 +1878,61 @@ private func dictionaryGroupingTerm(_ value: String) -> String {
         .precomposedStringWithCanonicalMapping
         .lowercased(with: Locale(identifier: "de_DE"))
         .trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
+private func lectorTags(_ value: String) -> Set<String> {
+    Set(value.split(separator: ",").map {
+        $0.trimmingCharacters(in: .whitespacesAndNewlines)
+    }.filter { !$0.isEmpty })
+}
+
+private func shouldImportLectorVerbInflection(_ tags: Set<String>) -> Bool {
+    if tags == ["auxiliary"] || tags == ["past"] { return true }
+    if tags.isSuperset(of: ["participle", "past"]) { return true }
+    if tags.contains("present"),
+       !tags.isDisjoint(with: ["first-person", "second-person", "third-person"]) {
+        return true
+    }
+    return tags.contains("preterite")
+        && tags.contains("first-person")
+        && tags.contains("singular")
+}
+
+private func shouldImportLectorNounPlural(
+    _ tags: Set<String>,
+    isNounRelation: Bool
+) -> Bool {
+    guard isNounRelation, tags.contains("plural") else { return false }
+    let verbTags: Set<String> = [
+        "first-person", "second-person", "third-person",
+        "present", "preterite", "future", "past",
+        "indicative", "subjunctive", "imperative", "participle"
+    ]
+    return tags.isDisjoint(with: verbTags)
+}
+
+private func searchKind(forInflectionTags tags: Set<String>) -> WordKind? {
+    if !tags.isDisjoint(with: ["comparative", "superlative"]) {
+        return .adjective
+    }
+    if tags.contains("noun") { return nil }
+    if tags != ["auxiliary"], shouldImportLectorVerbInflection(tags) {
+        return .verb
+    }
+    return nil
+}
+
+private func lectorDegreeInflection(word: String, gloss: String) -> (lemma: String, tag: String)? {
+    let prefixes = [
+        ("comparative degree of ", "comparative"),
+        ("superlative degree of ", "superlative")
+    ]
+    guard let (prefix, tag) = prefixes.first(where: { gloss.hasPrefix($0.0) }) else { return nil }
+    let remainder = gloss.dropFirst(prefix.count)
+    let terminators = CharacterSet(charactersIn: ";:()\"“”")
+    let lemma = remainder.prefix { character in
+        character.unicodeScalars.allSatisfy { !terminators.contains($0) }
+    }.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !lemma.isEmpty else { return nil }
+    return (lemma, tag)
 }

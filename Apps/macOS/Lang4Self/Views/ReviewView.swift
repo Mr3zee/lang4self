@@ -181,7 +181,8 @@ struct ReviewView: View {
             rawGerman: card.rawGerman,
             kind: card.kind,
             gender: card.gender,
-            source: "My words"
+            source: "My words",
+            forms: card.forms
         )
     }
 

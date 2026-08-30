@@ -4,9 +4,10 @@ import Lang4SelfCore
 extension Gender {
     var color: Color {
         switch self {
-        case .masculine: Color(red: 0.38, green: 0.68, blue: 1.0)
-        case .feminine, .plural: Color(red: 1.0, green: 0.52, blue: 0.68)
-        case .neuter: .yellow
+        case .masculine: Color(red: 0.47, green: 0.65, blue: 0.82)
+        case .feminine: Color(red: 0.85, green: 0.56, blue: 0.64)
+        case .neuter: Color(red: 0.82, green: 0.73, blue: 0.43)
+        case .plural: Color(red: 0.49, green: 0.71, blue: 0.54)
         case .unknown: .secondary
         }
     }
@@ -34,13 +35,10 @@ struct TranslationLanguageBadge: View {
     var body: some View {
         Text(language.shortLabel)
             .font(.caption2.weight(.bold))
-            .foregroundStyle(language == .english ? Color.blue : Color.purple)
+            .foregroundStyle(.secondary)
             .padding(.horizontal, 5)
             .padding(.vertical, 2)
-            .background(
-                (language == .english ? Color.blue : Color.purple).opacity(0.12),
-                in: Capsule()
-            )
+            .background(.quaternary, in: Capsule())
             .accessibilityLabel(language.label)
     }
 }
@@ -179,8 +177,33 @@ struct EntryRow: View {
     }
 }
 
+struct EntryMeaningSections {
+    static let englishPreviewLimit = 3
+
+    let englishPreview: [DictionaryMeaning]
+    let additionalEnglish: [DictionaryMeaning]
+    let russian: [DictionaryMeaning]
+
+    init(meanings: [DictionaryMeaning]) {
+        let english = meanings.filter { $0.language == .english }
+        englishPreview = Array(english.prefix(Self.englishPreviewLimit))
+        additionalEnglish = Array(english.dropFirst(Self.englishPreviewLimit))
+        russian = meanings.filter { $0.language == .russian }
+    }
+}
+
+struct EntryDetailInfoRows {
+    static func supplemental(from rows: [WordInfo.Row]) -> [WordInfo.Row] {
+        rows.filter { row in
+            row.label != "German" && row.label != "Translations"
+        }
+    }
+}
+
 struct EntryDetailView: View {
     @State private var isShowingInternalListSelection = false
+    @State private var isShowingAdditionalEnglishMeanings = false
+    @State private var isShowingRussianMeanings = false
     let entry: DictionaryEntry
     var addLabel = "Add to My words"
     var addShortcut: ShortcutPresentation?
@@ -194,6 +217,12 @@ struct EntryDetailView: View {
     var addAction: (() -> Void)?
 
     private var info: WordInfo { GermanMorphology.info(for: entry) }
+    private var meaningSections: EntryMeaningSections {
+        EntryMeaningSections(meanings: entry.meanings)
+    }
+    private var supplementalInfoRows: [WordInfo.Row] {
+        EntryDetailInfoRows.supplemental(from: info.rows)
+    }
 
     var body: some View {
         ScrollView {
@@ -294,7 +323,7 @@ struct EntryDetailView: View {
 
                 if entry.kind == .adjective {
                     adjectiveScale
-                } else {
+                } else if !supplementalInfoRows.isEmpty {
                     infoTable
                 }
 
@@ -305,9 +334,11 @@ struct EntryDetailView: View {
                 }
 
                 if info.isEstimated {
-                    Label("Regular forms are estimated locally. Check irregular forms before memorising.", systemImage: "exclamationmark.triangle")
-                        .font(.callout)
-                        .foregroundStyle(.orange)
+                    Label(generatedFormsDescription, systemImage: "info.circle")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .accessibilityLabel(generatedFormsDescription)
+                        .accessibilityIdentifier("entry.generated-forms")
                 }
 
                 Text("Source: \(entry.source)")
@@ -318,10 +349,25 @@ struct EntryDetailView: View {
             .padding(28)
         }
         .accessibilityIdentifier("entry.detail")
+        .onChange(of: entry) { _, _ in
+            isShowingAdditionalEnglishMeanings = false
+            isShowingRussianMeanings = false
+        }
     }
 
     private var listSelectionBinding: Binding<Bool> {
         isShowingListSelection ?? $isShowingInternalListSelection
+    }
+
+    private var generatedFormsDescription: String {
+        switch entry.kind {
+        case .verb:
+            "Conjugation generated using regular verb rules."
+        case .adjective:
+            "Comparative and superlative generated using regular adjective rules."
+        default:
+            "Forms generated using regular grammar rules."
+        }
     }
 
     private func hasAlternativeList(to listID: WordList.ID) -> Bool {
@@ -330,41 +376,55 @@ struct EntryDetailView: View {
 
     private var meanings: some View {
         VStack(alignment: .leading, spacing: 12) {
-            ForEach(TranslationLanguage.allCases, id: \.self) { language in
-                let languageMeanings = entry.meanings.filter { $0.language == language }
-                if !languageMeanings.isEmpty {
-                    VStack(alignment: .leading, spacing: 7) {
-                        Text(language.label.uppercased())
-                            .font(.caption.weight(.bold))
-                            .foregroundStyle(.tertiary)
-                        ForEach(Array(languageMeanings.enumerated()), id: \.element.id) { index, meaning in
-                            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                                if languageMeanings.count > 1 {
-                                    Text("\(index + 1).")
-                                        .foregroundStyle(.tertiary)
-                                }
-                                VStack(alignment: .leading, spacing: 4) {
-                                    HStack(alignment: .firstTextBaseline, spacing: 8) {
-                                        Text(meaning.translation)
-                                            .textSelection(.enabled)
-                                        if entry.gender == .unknown, meaning.gender != .unknown {
-                                            GenderBadge(gender: meaning.gender)
-                                        }
-                                        if let usage = meaning.usage {
-                                            Text(usage)
-                                                .font(.caption)
-                                                .foregroundStyle(.secondary)
-                                        }
-                                    }
-                                    if let explanation = meaning.distinctExplanation {
-                                        Text(explanation)
-                                            .font(.body)
-                                            .foregroundStyle(.secondary)
-                                            .textSelection(.enabled)
-                                    }
-                                }
-                            }
+            if !meaningSections.englishPreview.isEmpty {
+                VStack(alignment: .leading, spacing: 7) {
+                    meaningSectionTitle("English")
+                    meaningRows(
+                        meaningSections.englishPreview,
+                        startingAt: 1,
+                        totalCount: englishMeaningCount
+                    )
+
+                    if !meaningSections.additionalEnglish.isEmpty {
+                        meaningDisclosureButton(
+                            title: isShowingAdditionalEnglishMeanings
+                                ? "Show fewer English translations"
+                                : "\(meaningSections.additionalEnglish.count) more English translations",
+                            isExpanded: isShowingAdditionalEnglishMeanings,
+                            accessibilityIdentifier: "entry.meanings.english.toggle"
+                        ) {
+                            isShowingAdditionalEnglishMeanings.toggle()
                         }
+
+                        if isShowingAdditionalEnglishMeanings {
+                            meaningRows(
+                                meaningSections.additionalEnglish,
+                                startingAt: EntryMeaningSections.englishPreviewLimit + 1,
+                                totalCount: englishMeaningCount
+                            )
+                        }
+                    }
+                }
+            }
+
+            if !meaningSections.russian.isEmpty {
+                VStack(alignment: .leading, spacing: 7) {
+                    meaningDisclosureButton(
+                        title: isShowingRussianMeanings
+                            ? "Hide Russian translations"
+                            : "Russian translations (\(meaningSections.russian.count))",
+                        isExpanded: isShowingRussianMeanings,
+                        accessibilityIdentifier: "entry.meanings.russian.toggle"
+                    ) {
+                        isShowingRussianMeanings.toggle()
+                    }
+
+                    if isShowingRussianMeanings {
+                        meaningRows(
+                            meaningSections.russian,
+                            startingAt: 1,
+                            totalCount: meaningSections.russian.count
+                        )
                     }
                 }
             }
@@ -394,7 +454,7 @@ struct EntryDetailView: View {
 
     private var infoTable: some View {
         Grid(alignment: .leading, horizontalSpacing: 24, verticalSpacing: 12) {
-            ForEach(info.rows) { row in
+            ForEach(supplementalInfoRows) { row in
                 GridRow {
                     Text(row.label)
                         .foregroundStyle(.secondary)
@@ -406,6 +466,73 @@ struct EntryDetailView: View {
                 }
             }
         }
+    }
+
+    private var englishMeaningCount: Int {
+        meaningSections.englishPreview.count + meaningSections.additionalEnglish.count
+    }
+
+    private func meaningSectionTitle(_ title: String) -> some View {
+        Text(title.uppercased())
+            .font(.caption.weight(.bold))
+            .foregroundStyle(.tertiary)
+    }
+
+    private func meaningRows(
+        _ meanings: [DictionaryMeaning],
+        startingAt firstNumber: Int,
+        totalCount: Int
+    ) -> some View {
+        ForEach(Array(meanings.enumerated()), id: \.element.id) { index, meaning in
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                if totalCount > 1 {
+                    Text("\(firstNumber + index).")
+                        .foregroundStyle(.tertiary)
+                }
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(meaning.translation)
+                            .textSelection(.enabled)
+                        if entry.gender == .unknown, meaning.gender != .unknown {
+                            GenderBadge(gender: meaning.gender)
+                        }
+                        if let usage = meaning.usage {
+                            Text(usage)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    if let explanation = meaning.distinctExplanation {
+                        Text(explanation)
+                            .font(.body)
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    }
+                }
+            }
+        }
+    }
+
+    private func meaningDisclosureButton(
+        title: String,
+        isExpanded: Bool,
+        accessibilityIdentifier: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Image(systemName: "chevron.right")
+                    .font(.caption2.weight(.bold))
+                    .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                    .accessibilityHidden(true)
+                Text(title)
+            }
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(.secondary)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier(accessibilityIdentifier)
     }
 
     private func infoColor(for row: WordInfo.Row) -> Color {
@@ -714,15 +841,16 @@ struct AppShortcut: Identifiable {
         .init(id: "global.voice-search", group: .global, shortcut: .init(chords: [.init(.space)], hold: true), action: "Open Dictionary and search by voice when not typing"),
         .init(id: "global.focus", group: .global, shortcut: .init(chords: [.init(.tab), .init(.shift, .tab)]), action: "Move focus forward or backward"),
         .init(id: "dictionary.navigate", group: .dictionary, shortcut: .init(chords: [.init(.up), .init(.down)]), action: "Move through search results"),
-        .init(id: "dictionary.results", group: .dictionary, shortcut: .returnKey, action: "Move from search into its results"),
+        .init(id: "dictionary.results", group: .dictionary, shortcut: .returnKey, action: "Move from search into its results; press again to add"),
         .init(id: "dictionary.add", group: .dictionary, shortcut: .init(chords: [.init(.command, .returnKey)]), action: "Add the selected dictionary entry"),
         .init(id: "dictionary.clear", group: .dictionary, shortcut: .init(chords: [.init(.escape)]), action: "Clear the focused search field"),
         .init(id: "dictionary.voice-search", group: .dictionary, shortcut: .init(chords: [.init(.space)], hold: true), action: "Search spoken German when focus is outside the text field"),
         .init(id: "review.reveal", group: .review, shortcut: .init(chords: [.init(.space)]), action: "Reveal the current answer or restart after completion"),
         .init(id: "review.rate", group: .review, shortcut: .init(chords: [.init(.digit(1)), .init(.digit(4))], separator: .range), action: "Rate Again, Hard, Good, or Easy after revealing"),
         .init(id: "lists.navigate", group: .lists, shortcut: .init(chords: [.init(.up), .init(.down)]), action: "Move through results, cards, and sentences"),
-        .init(id: "lists.words", group: .lists, shortcut: .init(chords: [.init(.left), .init(.right)]), action: "Move through words in the sentence inspector"),
-        .init(id: "lists.open", group: .lists, shortcut: .returnKey, action: "Edit a selected card or inspect a selected sentence"),
+        .init(id: "lists.words", group: .lists, shortcut: .init(chords: [.init(.left), .init(.right)]), action: "Move between the sentence list and its words, or through words"),
+        .init(id: "lists.toggle-sentence", group: .lists, shortcut: .init(chords: [.init(.letter("X"))]), action: "Toggle the selected generated sentence"),
+        .init(id: "lists.open", group: .lists, shortcut: .returnKey, action: "Edit a selected card or save selected generated sentences"),
         .init(id: "lists.new", group: .lists, shortcut: .init(chords: [.init(.command, .letter("N"))]), action: "Create a new list while My Words is open"),
         .init(id: "lists.delete", group: .lists, shortcut: .init(chords: [.init(.delete)]), action: "Remove the selected card or saved sentence"),
         .init(id: "dialogs.accept", group: .dialogs, shortcut: .returnKey, action: "Activate the default button or save an editor"),
@@ -732,7 +860,7 @@ struct AppShortcut: Identifiable {
         .init(id: "macos.quit", group: .macOS, shortcut: .init(chords: [.init(.command, .letter("Q"))]), action: "Quit Lang4Self"),
         .init(id: "macos.clipboard", group: .macOS, shortcut: .init(chords: [.init(.command, .letter("X")), .init(.command, .letter("C")), .init(.command, .letter("V"))]), action: "Cut, copy, or paste in an editable field"),
         .init(id: "macos.select-all", group: .macOS, shortcut: .init(chords: [.init(.command, .letter("A"))]), action: "Select all text in the active editable field"),
-        .init(id: "macos.undo", group: .macOS, shortcut: .init(chords: [.init(.command, .letter("Z")), .init(.shift, .command, .letter("Z"))]), action: "Undo or redo an edit"),
+        .init(id: "macos.undo", group: .macOS, shortcut: .init(chords: [.init(.command, .letter("Z")), .init(.shift, .command, .letter("Z"))]), action: "Undo or redo the last add, remove, or text edit"),
         .init(id: "macos.window", group: .macOS, shortcut: .init(chords: [.init(.command, .letter("M")), .init(.control, .command, .letter("F"))]), action: "Minimize the window or enter full screen")
     ]
 }

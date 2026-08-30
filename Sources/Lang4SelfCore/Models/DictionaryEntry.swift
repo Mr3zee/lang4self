@@ -122,6 +122,19 @@ public struct DictionaryExplanation: Identifiable, Hashable, Codable, Sendable {
     }
 }
 
+public struct DictionaryForm: Identifiable, Hashable, Codable, Sendable {
+    public var id: String { "\(source):\(form):\(tags.sorted().joined(separator: ","))" }
+    public let form: String
+    public let tags: Set<String>
+    public let source: String
+
+    public init(form: String, tags: Set<String>, source: String = "Wiktionary via Lector") {
+        self.form = form
+        self.tags = tags
+        self.source = source
+    }
+}
+
 public struct DictionaryEntry: Identifiable, Hashable, Codable, Sendable {
     public let id: Int64
     public let german: String
@@ -135,6 +148,7 @@ public struct DictionaryEntry: Identifiable, Hashable, Codable, Sendable {
     public let pluralForms: [String]
     public let meanings: [DictionaryMeaning]
     public let explanations: [DictionaryExplanation]
+    public let forms: [DictionaryForm]
 
     public var translations: String { english }
     public var distinctExplanations: [DictionaryExplanation] {
@@ -164,7 +178,8 @@ public struct DictionaryEntry: Identifiable, Hashable, Codable, Sendable {
         explanation: String? = nil,
         translationLanguage: TranslationLanguage = .english,
         meanings: [DictionaryMeaning]? = nil,
-        explanations: [DictionaryExplanation] = []
+        explanations: [DictionaryExplanation] = [],
+        forms: [DictionaryForm] = []
     ) {
         let resolvedMeanings = meanings ?? [DictionaryMeaning(
             english: english,
@@ -186,6 +201,7 @@ public struct DictionaryEntry: Identifiable, Hashable, Codable, Sendable {
         self.pluralForms = pluralForms
         self.meanings = resolvedMeanings
         self.explanations = explanations
+        self.forms = forms
     }
 }
 

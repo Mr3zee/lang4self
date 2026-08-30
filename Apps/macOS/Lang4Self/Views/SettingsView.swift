@@ -62,9 +62,9 @@ struct SettingsView: View {
 
                     HStack(alignment: .top, spacing: 18) {
                         VStack(alignment: .leading, spacing: 6) {
-                            Text("Wiktionary explanations")
+                            Text("Wiktionary reference data")
                                 .font(.headline)
-                            Text("\(state.explanationCount.formatted()) English explanations available locally")
+                            Text("\(state.explanationCount.formatted()) English explanations, plus verified noun, verb, and adjective forms")
                                 .foregroundStyle(.secondary)
                             Text("Derived from Wiktionary through kaikki.org and Lector; licensed CC BY-SA 4.0.")
                                 .font(.callout)
@@ -77,7 +77,7 @@ struct SettingsView: View {
                             Button {
                                 showingExplanationImporter = true
                             } label: {
-                                Label("Import explanation database…", systemImage: "text.book.closed")
+                                Label("Import Lector database…", systemImage: "text.book.closed")
                             }
                             .buttonStyle(.borderedProminent)
                             .disabled(state.isImportingExplanations)
@@ -88,7 +88,7 @@ struct SettingsView: View {
                     if state.isImportingExplanations, let progress = state.explanationImportProgress {
                         VStack(alignment: .leading, spacing: 6) {
                             ProgressView(value: progress.fraction)
-                            Text("Imported \(progress.imported.formatted()) of \(progress.total.formatted()) explanations…")
+                            Text("Processed \(progress.imported.formatted()) of \(progress.total.formatted()) dictionary senses…")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }

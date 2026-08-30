@@ -269,7 +269,7 @@ struct LibraryView: View {
     }
 
     private func entry(for card: PersonalCard) -> DictionaryEntry {
-        .init(id: card.dictionaryEntryID ?? 0, german: card.german, english: card.english, rawGerman: card.rawGerman, kind: card.kind, gender: card.gender, source: "My words")
+        .init(id: card.dictionaryEntryID ?? 0, german: card.german, english: card.english, rawGerman: card.rawGerman, kind: card.kind, gender: card.gender, source: "My words", forms: card.forms)
     }
 }
 

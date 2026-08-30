@@ -72,13 +72,17 @@ public enum GermanMorphology {
             return .init(headline: term, kind: .noun, gender: entry.gender, separablePrefix: nil, stem: term, rows: rows, isEstimated: false)
 
         case .verb:
-            return verbInfo(for: term, raw: entry.rawGerman, gender: entry.gender)
+            return verbInfo(for: term, raw: entry.rawGerman, gender: entry.gender, importedForms: entry.forms)
 
         case .adjective:
             let base = term.lowercased()
             let known = adjectiveForms[base]
-            let comparative = known?.0 ?? base + "er"
-            let superlative = known?.1 ?? "am " + base + (needsExtraE(base) ? "esten" : "sten")
+            let importedComparative = preferredDegreeForm("comparative", in: entry.forms)
+            let importedSuperlative = preferredDegreeForm("superlative", in: entry.forms)
+            let comparative = importedComparative ?? known?.0 ?? base + "er"
+            let superlative = importedSuperlative.map { "am " + $0 }
+                ?? known?.1
+                ?? "am " + base + (needsExtraE(base) ? "esten" : "sten")
             return .init(
                 headline: term,
                 kind: .adjective,
@@ -86,11 +90,12 @@ public enum GermanMorphology {
                 separablePrefix: nil,
                 stem: term,
                 rows: [.init("Positive", base), .init("Comparative", comparative), .init("Superlative", superlative)],
-                isEstimated: known == nil
+                isEstimated: (importedComparative == nil || importedSuperlative == nil) && known == nil
             )
 
         default:
-            var rows = [WordInfo.Row("German", term), .init("Translations", entry.translations)]
+            let translations = entry.meanings.map(\.translation).joined(separator: " · ")
+            var rows = [WordInfo.Row("German", term), .init("Translations", translations)]
             if let usage = entry.usage { rows.append(.init("Usage", usage)) }
             return .init(headline: term, kind: entry.kind, gender: entry.gender, separablePrefix: nil, stem: term, rows: rows, isEstimated: false)
         }
@@ -105,10 +110,15 @@ public enum GermanMorphology {
             if !prefix.isEmpty, !stem.isEmpty { return (prefix, stem) }
         }
         let term = canonicalGerman(entry.german).lowercased().replacingOccurrences(of: "|", with: "")
-        for prefix in separablePrefixes where term.hasPrefix(prefix) && term.dropFirst(prefix.count).count >= 3 {
-            return (prefix, String(term.dropFirst(prefix.count)))
+        guard let prefix = separablePrefix(in: term) else { return nil }
+        return (prefix, String(term.dropFirst(prefix.count)))
+    }
+
+    public static func separablePrefix(in infinitive: String) -> String? {
+        let term = canonicalGerman(infinitive).lowercased().replacingOccurrences(of: "|", with: "")
+        return separablePrefixes.first {
+            term.hasPrefix($0) && term.dropFirst($0.count).count >= 3
         }
-        return nil
     }
 
     /// Terms worth trying when a German lookup contains an article or an inflected word.
@@ -165,17 +175,59 @@ public enum GermanMorphology {
         return candidateKey == singularKey || nounBaseCandidates(for: candidateKey).contains(singularKey)
     }
 
-    private static func verbInfo(for termValue: String, raw: String, gender: Gender) -> WordInfo {
+    private static func verbInfo(
+        for termValue: String,
+        raw: String,
+        gender: Gender,
+        importedForms: [DictionaryForm]
+    ) -> WordInfo {
         let infinitive = termValue.lowercased().replacingOccurrences(of: "|", with: "")
         let synthetic = DictionaryEntry(german: termValue, english: "", rawGerman: raw, kind: .verb, gender: gender)
         let parts = separableParts(for: synthetic)
         let root = parts.map { String(infinitive.dropFirst($0.prefix.count)) } ?? infinitive
         let known = irregularVerbs[infinitive] ?? irregularVerbs[root]
-        let forms = known ?? regularForms(infinitive: infinitive, parts: parts)
-        let present = known.flatMap { parts == nil ? $0.present : compoundPresent(prefix: parts!.prefix, rootForms: $0.present) } ?? forms.present
-        let past = known.map { parts == nil ? $0.past : $0.past + " " + parts!.prefix } ?? forms.past
-        let participle = known.map { parts == nil ? $0.participle : parts!.prefix + $0.participle } ?? forms.participle
-        let auxiliary = known?.auxiliary ?? forms.auxiliary
+        let generated = regularForms(infinitive: infinitive, parts: parts)
+        let fallback = known ?? generated
+        let fallbackPresent = known.flatMap {
+            parts == nil ? $0.present : compoundPresent(prefix: parts!.prefix, rootForms: $0.present)
+        } ?? fallback.present
+        let fallbackPast = known.map {
+            parts == nil ? $0.past : $0.past + " " + parts!.prefix
+        } ?? fallback.past
+        let fallbackParticiple = known.map {
+            parts == nil ? $0.participle : parts!.prefix + $0.participle
+        } ?? fallback.participle
+
+        let importedPresent = importedPresentParadigm(
+            in: importedForms,
+            infinitive: infinitive,
+            separablePrefix: parts?.prefix
+        )
+        let importedPast = importedSimplePast(in: importedForms).map {
+            separatedFiniteForm($0, prefix: parts?.prefix)
+        }
+        let importedParticiple = matchingForm(
+            in: importedForms,
+            requiring: ["participle", "past"]
+        )
+        let importedAuxiliaries = importedForms
+            .filter { $0.tags.contains("auxiliary") }
+            .map(\.form)
+            .uniqued()
+            .sorted()
+
+        let present = importedPresent ?? fallbackPresent
+        let past = importedPast ?? fallbackPast
+        let participle = importedParticiple ?? fallbackParticiple
+        let auxiliary = importedAuxiliaries.isEmpty
+            ? fallback.auxiliary
+            : importedAuxiliaries.joined(separator: "/")
+        let usedGeneratedFallback = known == nil && (
+            importedPresent == nil
+                || importedPast == nil
+                || importedParticiple == nil
+                || importedAuxiliaries.isEmpty
+        )
 
         return .init(
             headline: infinitive,
@@ -190,8 +242,65 @@ public enum GermanMorphology {
                 .init("Perfect", auxiliary + " " + participle),
                 .init("Future I", "werden + " + infinitive)
             ],
-            isEstimated: known == nil
+            isEstimated: usedGeneratedFallback
         )
+    }
+
+    private static func importedPresentParadigm(
+        in forms: [DictionaryForm],
+        infinitive: String,
+        separablePrefix: String?
+    ) -> String? {
+        let ich = matchingForm(in: forms, requiring: ["present", "first-person", "singular"])
+        let du = matchingForm(in: forms, requiring: ["present", "second-person", "singular"])
+        let third = matchingForm(in: forms, requiring: ["present", "third-person", "singular"])
+        guard let ich, let du, let third else { return nil }
+
+        let firstPlural = matchingForm(in: forms, requiring: ["present", "first-person", "plural"])
+        let secondPlural = matchingForm(in: forms, requiring: ["present", "second-person", "plural"])
+        let thirdPlural = matchingForm(in: forms, requiring: ["present", "third-person", "plural"])
+        let values = [
+            ("ich", ich),
+            ("du", du),
+            ("er/sie", third),
+            ("wir", firstPlural ?? infinitive),
+            ("ihr", secondPlural ?? third),
+            ("sie", thirdPlural ?? firstPlural ?? infinitive)
+        ]
+        return values.map { pronoun, form in
+            "\(pronoun) \(separatedFiniteForm(form, prefix: separablePrefix))"
+        }.joined(separator: " · ")
+    }
+
+    private static func importedSimplePast(in forms: [DictionaryForm]) -> String? {
+        matchingForm(in: forms, requiring: ["past"], exact: true)
+            ?? matchingForm(in: forms, requiring: ["preterite", "first-person", "singular"])
+    }
+
+    private static func matchingForm(
+        in forms: [DictionaryForm],
+        requiring tags: Set<String>,
+        exact: Bool = false
+    ) -> String? {
+        forms.first {
+            exact ? $0.tags == tags : $0.tags.isSuperset(of: tags)
+        }?.form
+    }
+
+    private static func separatedFiniteForm(_ form: String, prefix: String?) -> String {
+        guard let prefix, form.lowercased().hasPrefix(prefix.lowercased()), form.count > prefix.count else {
+            return form
+        }
+        return String(form.dropFirst(prefix.count)) + " " + prefix
+    }
+
+    private static func preferredDegreeForm(_ tag: String, in forms: [DictionaryForm]) -> String? {
+        let candidates = forms.filter { $0.tags.contains(tag) }.map(\.form).uniqued()
+        if tag == "superlative",
+           let declined = candidates.first(where: { $0.lowercased().hasSuffix("sten") }) {
+            return declined
+        }
+        return candidates.first
     }
 
     private static func regularForms(infinitive: String, parts: (prefix: String, stem: String)?) -> VerbForms {
@@ -224,6 +333,10 @@ public enum GermanMorphology {
             .split(separator: "·")
             .map { $0.trimmingCharacters(in: .whitespaces) + " " + prefix }
             .joined(separator: " · ")
+    }
+
+    static func inflectionLemma(for value: String) -> String {
+        canonicalGerman(value).replacingOccurrences(of: "|", with: "")
     }
 
     private static func canonicalGerman(_ value: String) -> String {
@@ -339,5 +452,12 @@ public enum GermanMorphology {
 
     private static func appendUnique(_ value: String, to values: inout [String]) {
         if !value.isEmpty, !values.contains(value) { values.append(value) }
+    }
+}
+
+private extension Sequence where Element: Hashable {
+    func uniqued() -> [Element] {
+        var seen = Set<Element>()
+        return filter { seen.insert($0).inserted }
     }
 }

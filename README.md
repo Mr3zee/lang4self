@@ -57,7 +57,7 @@ dict.cc does not permit its translation data to be redistributed with this repos
 
 Keep downloaded exports outside this checkout. Common dict.cc filenames, archives, and SQLite databases are ignored as an extra safeguard, and CI rejects local data files if they become tracked.
 
-For richer German definitions, optionally download Lector's [free German SQLite dictionary](https://lector.dev/free/german-dictionary/). Import the `.db` file using **Settings → German explanations → Import Explanations**. The data remains on your Mac.
+For richer German definitions and verified noun, verb, and adjective forms, optionally download Lector's [free German SQLite dictionary](https://lector.dev/free/german-dictionary/). Import the `.db` file using **Settings → Offline dictionary → Import Lector database**. The data remains on your Mac; generated grammar rules are used only when imported forms are unavailable.
 
 ### Enable local sentence generation
 

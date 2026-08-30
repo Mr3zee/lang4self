@@ -60,14 +60,28 @@ private final class Lang4SelfDependencies: ObservableObject {
         do {
             let databaseURL = processInfo.environment["LANG4SELF_UI_TEST_DATABASE"]
                 .map(URL.init(fileURLWithPath:))
+            let uiTestingDictionaryURLs = [
+                processInfo.environment["LANG4SELF_UI_TEST_ENGLISH_DICTIONARY"],
+                processInfo.environment["LANG4SELF_UI_TEST_RUSSIAN_DICTIONARY"]
+            ]
+                .compactMap { $0 }
+                .map(URL.init(fileURLWithPath:))
             let store = try LocalStore(url: databaseURL, now: { .now })
             let settingsStore = UserDefaultsLMStudioSettingsStore(defaults: settingsDefaults)
+            let udpipeConfiguration = URLSessionConfiguration.ephemeral
+            udpipeConfiguration.timeoutIntervalForRequest = 60
+            udpipeConfiguration.timeoutIntervalForResource = 90
+            udpipeConfiguration.waitsForConnectivity = false
             let state = AppState(
                 store: store,
                 sentenceGenerator: LMStudioService(),
+                sentenceAnalyzer: UDPipeSentenceAnalyzer(
+                    session: URLSession(configuration: udpipeConfiguration)
+                ),
                 dictionaryFilePreparer: SystemDictionaryFilePreparer(),
                 settingsStore: settingsStore,
                 isUITesting: isUITesting,
+                uiTestingDictionaryURLs: uiTestingDictionaryURLs,
                 now: { .now },
                 calendar: .autoupdatingCurrent
             )
@@ -185,20 +199,74 @@ private final class Lang4SelfAppDelegate: NSObject, NSApplicationDelegate {
 
     private func installShortcutKeyMonitor() {
         guard shortcutKeyMonitor == nil else { return }
-        shortcutKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-            guard modifiers.contains(.command),
-                  modifiers.intersection([.control, .option]).isEmpty,
-                  event.charactersIgnoringModifiers.map({ $0 == "/" || $0 == "?" }) == true
-            else { return event }
-
-            if !event.isARepeat {
-                NotificationCenter.default.post(name: .showKeyboardShortcuts, object: nil)
-            }
-            return nil
+        shortcutKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            AppShortcutKeyHandler(
+                openSettings: { [weak self] in self?.appState?.route = .settings },
+                showKeyboardShortcuts: {
+                    NotificationCenter.default.post(name: .showKeyboardShortcuts, object: nil)
+                },
+                undo: { [weak self] in
+                    guard let state = self?.appState, state.undoHistory.canUndo else { return false }
+                    state.undo()
+                    return true
+                },
+                redo: { [weak self] in
+                    guard let state = self?.appState, state.undoHistory.canRedo else { return false }
+                    state.redo()
+                    return true
+                },
+                isEditingText: { event.window?.firstResponder is NSTextView }
+            )
+            .handle(event)
         }
     }
 
+}
+
+@MainActor
+struct AppShortcutKeyHandler {
+    let openSettings: () -> Void
+    let showKeyboardShortcuts: () -> Void
+    let undo: () -> Bool
+    let redo: () -> Bool
+    let isEditingText: () -> Bool
+
+    init(
+        openSettings: @escaping () -> Void,
+        showKeyboardShortcuts: @escaping () -> Void,
+        undo: @escaping () -> Bool = { false },
+        redo: @escaping () -> Bool = { false },
+        isEditingText: @escaping () -> Bool = { false }
+    ) {
+        self.openSettings = openSettings
+        self.showKeyboardShortcuts = showKeyboardShortcuts
+        self.undo = undo
+        self.redo = redo
+        self.isEditingText = isEditingText
+    }
+
+    func handle(_ event: NSEvent) -> NSEvent? {
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        guard modifiers.contains(.command),
+              modifiers.intersection([.control, .option]).isEmpty,
+              let characters = event.charactersIgnoringModifiers
+        else { return event }
+
+        switch characters.lowercased() {
+        case "," where !modifiers.contains(.shift):
+            if !event.isARepeat { openSettings() }
+            return nil
+        case "/", "?":
+            if !event.isARepeat { showKeyboardShortcuts() }
+            return nil
+        case "z" where !isEditingText():
+            guard !event.isARepeat else { return nil }
+            let handled = modifiers.contains(.shift) ? redo() : undo()
+            return handled ? nil : event
+        default:
+            return event
+        }
+    }
 }
 
 private struct UITestingCommands: Commands {

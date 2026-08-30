@@ -4,6 +4,10 @@ import Lang4SelfCore
 struct SentencesView: View {
     @EnvironmentObject private var state: AppState
     @State private var generationCount = 5
+    @State private var generationCountText = "5"
+    @State private var generationOptions = SentenceGenerationOptions.defaults
+    @State private var minimumWordsText = "5"
+    @State private var maximumWordsText = "14"
     @State private var selection: SentenceSelection?
     @FocusState private var sentenceListFocused: Bool
     let automaticallyFocusContent: Bool
@@ -61,20 +65,74 @@ struct SentencesView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .accessibilityIdentifier("sentences.list-picker")
 
-                Stepper(value: $generationCount, in: 1...10) {
-                    Text("\(generationCount)")
-                        .monospacedDigit()
-                        .frame(minWidth: 18)
-                }
+                numericStepper(
+                    title: "Sentence count",
+                    value: generationCountBinding,
+                    text: $generationCountText,
+                    range: 1...10,
+                    fieldIdentifier: "sentences.count-input",
+                    stepperIdentifier: "sentences.count"
+                )
                 .help("Number of sentences (maximum 10)")
-                .accessibilityIdentifier("sentences.count")
 
                 Button("Generate") {
-                    state.generateSentences(count: generationCount)
+                    commitNumericInputs()
+                    state.generateSentences(count: generationCount, options: generationOptions)
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(state.isGeneratingSentences || state.wordLists.isEmpty)
                 .accessibilityIdentifier("sentences.generate")
+            }
+
+            HStack(spacing: 8) {
+                Text("Level")
+                    .foregroundStyle(.secondary)
+                    .fixedSize()
+                Picker("CEFR level", selection: $generationOptions.proficiency) {
+                    ForEach(SentenceProficiencyLevel.allCases) { level in
+                        Text(level.rawValue).tag(level)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .frame(width: 70)
+                .accessibilityLabel("CEFR level")
+                .accessibilityIdentifier("sentences.level")
+
+                Spacer(minLength: 8)
+
+                Text("Words")
+                    .foregroundStyle(.secondary)
+                    .fixedSize()
+                numericStepper(
+                    title: "Minimum words",
+                    value: minimumWordsBinding,
+                    text: $minimumWordsText,
+                    range: 2...generationOptions.maximumWords,
+                    fieldIdentifier: "sentences.minimum-words-input",
+                    stepperIdentifier: "sentences.minimum-words"
+                )
+
+                Text("–")
+                    .foregroundStyle(.secondary)
+
+                numericStepper(
+                    title: "Maximum words",
+                    value: maximumWordsBinding,
+                    text: $maximumWordsText,
+                    range: generationOptions.minimumWords...30,
+                    fieldIdentifier: "sentences.maximum-words-input",
+                    stepperIdentifier: "sentences.maximum-words"
+                )
+            }
+
+            HStack(spacing: 8) {
+                Text("Style")
+                    .foregroundStyle(.secondary)
+                TextField("Sentence style", text: $generationOptions.style)
+                    .textFieldStyle(.roundedBorder)
+                    .accessibilityLabel("Sentence style")
+                    .accessibilityIdentifier("sentences.style")
             }
 
             HStack(spacing: 8) {
@@ -95,6 +153,83 @@ struct SentencesView: View {
             .accessibilityElement(children: .combine)
         }
         .padding(14)
+    }
+
+    private var generationCountBinding: Binding<Int> {
+        Binding(
+            get: { generationCount },
+            set: { generationCount = min(max($0, 1), 10) }
+        )
+    }
+
+    private var minimumWordsBinding: Binding<Int> {
+        Binding(
+            get: { generationOptions.minimumWords },
+            set: {
+                generationOptions.minimumWords = min(
+                    max($0, 2),
+                    generationOptions.maximumWords
+                )
+            }
+        )
+    }
+
+    private var maximumWordsBinding: Binding<Int> {
+        Binding(
+            get: { generationOptions.maximumWords },
+            set: {
+                generationOptions.maximumWords = max(
+                    min($0, 30),
+                    generationOptions.minimumWords
+                )
+            }
+        )
+    }
+
+    private func numericStepper(
+        title: String,
+        value: Binding<Int>,
+        text: Binding<String>,
+        range: ClosedRange<Int>,
+        fieldIdentifier: String,
+        stepperIdentifier: String
+    ) -> some View {
+        HStack(spacing: 4) {
+            TextField(title, text: text)
+                .labelsHidden()
+                .textFieldStyle(.roundedBorder)
+                .multilineTextAlignment(.trailing)
+                .monospacedDigit()
+                .frame(width: 38)
+                .accessibilityLabel(title)
+                .accessibilityIdentifier(fieldIdentifier)
+                .onSubmit { commitNumericInputs() }
+                .onChange(of: text.wrappedValue) { _, newValue in
+                    guard let number = Int(newValue), range.contains(number) else { return }
+                    value.wrappedValue = number
+                }
+
+            Stepper(title, value: value, in: range)
+                .labelsHidden()
+                .accessibilityIdentifier(stepperIdentifier)
+                .onChange(of: value.wrappedValue) { _, newValue in
+                    if Int(text.wrappedValue) != newValue {
+                        text.wrappedValue = String(newValue)
+                    }
+                }
+        }
+    }
+
+    private func commitNumericInputs() {
+        generationCount = min(max(Int(generationCountText) ?? generationCount, 1), 10)
+        var options = generationOptions
+        options.minimumWords = Int(minimumWordsText) ?? options.minimumWords
+        options.maximumWords = Int(maximumWordsText) ?? options.maximumWords
+        generationOptions = options.sanitized
+
+        generationCountText = String(generationCount)
+        minimumWordsText = String(generationOptions.minimumWords)
+        maximumWordsText = String(generationOptions.maximumWords)
     }
 
     private var sentenceList: some View {
@@ -153,14 +288,27 @@ struct SentencesView: View {
                   let sentence = state.savedSentences.first(where: { $0.id == id }) else { return }
             state.deleteSentence(sentence)
         }
-        .onKeyPress(.return) {
+        .focused($sentenceListFocused)
+        .accessibilityIdentifier("sentences.list")
+        .onKeyPress(.rightArrow) {
             guard selectedSentence != nil else { return .ignored }
             sentenceListFocused = false
             NotificationCenter.default.post(name: .focusSentenceInspector, object: nil)
             return .handled
         }
-        .focused($sentenceListFocused)
-        .accessibilityIdentifier("sentences.list")
+        .onKeyPress("x") {
+            guard case .generated(let id) = selection else { return .ignored }
+            state.setGeneratedSentence(
+                id,
+                selected: !state.selectedGeneratedSentenceIDs.contains(id)
+            )
+            return .handled
+        }
+        .onKeyPress(.return) {
+            guard !state.selectedGeneratedSentenceIDs.isEmpty else { return .handled }
+            state.saveSelectedGeneratedSentences()
+            return .handled
+        }
     }
 
     private var saveControls: some View {
@@ -191,6 +339,7 @@ struct SentencesView: View {
                 german: sentence.german,
                 translation: sentence.translation,
                 tokens: sentence.tokens,
+                analysis: sentence.analysis,
                 sourceListName: state.generatedSourceList?.name ?? state.selectedWordList?.name ?? "Selected list"
             )
         case .saved(let id):
@@ -200,6 +349,7 @@ struct SentencesView: View {
                 german: sentence.german,
                 translation: sentence.translation,
                 tokens: sentence.tokens,
+                analysis: sentence.analysis,
                 sourceListName: sentence.sourceListName
             )
         case nil:
@@ -232,7 +382,14 @@ private struct SentencePresentation: Identifiable {
     let german: String
     let translation: String
     let tokens: [SentenceToken]
+    let analysis: SentenceAnalysis?
     let sourceListName: String
+}
+
+private struct SentenceLookupContext: Hashable {
+    let sentenceID: SentenceSelection
+    let token: SentenceToken?
+    let nounTokenIndices: Set<Int>
 }
 
 private struct SentenceRow: View {
@@ -273,6 +430,25 @@ private struct SentenceInspector: View {
         return sentence.tokens[selectedTokenIndex]
     }
 
+    private var selectedTokenIndices: Set<Int> {
+        guard let selectedToken else { return [] }
+        return SentenceRelations.relatedTokenIndices(
+            for: selectedToken,
+            sentence: sentence.german,
+            tokens: sentence.tokens,
+            analysis: sentence.analysis,
+            nounTokenIndices: Set(tokenGenders.keys)
+        )
+    }
+
+    private var lookupContext: SentenceLookupContext {
+        SentenceLookupContext(
+            sentenceID: sentence.id,
+            token: selectedToken,
+            nounTokenIndices: Set(tokenGenders.keys)
+        )
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 14) {
@@ -298,17 +474,18 @@ private struct SentenceInspector: View {
 
                 TokenFlowLayout(spacing: 7) {
                     ForEach(Array(sentence.tokens.enumerated()), id: \.element.id) { offset, token in
+                        let isSelected = selectedTokenIndices.contains(token.index)
                         Button {
                             selectedTokenIndex = offset
                             focusedTokenIndex = offset
                         } label: {
                             Text(token.surface)
-                                .font(.title2.weight(offset == selectedTokenIndex ? .semibold : .regular))
+                                .font(.title2.weight(isSelected ? .semibold : .regular))
                                 .foregroundStyle(tokenGenders[token.index]?.color ?? .primary)
                                 .padding(.horizontal, 7)
                                 .padding(.vertical, 5)
                                 .background(
-                                    offset == selectedTokenIndex ? Color.accentColor.opacity(0.18) : Color.clear,
+                                    isSelected ? Color.accentColor.opacity(0.18) : Color.clear,
                                     in: RoundedRectangle(cornerRadius: 7)
                                 )
                         }
@@ -317,6 +494,7 @@ private struct SentenceInspector: View {
                         .focused($focusedTokenIndex, equals: offset)
                         .onMoveCommand(perform: moveSelection)
                         .accessibilityLabel("Word \(offset + 1) of \(sentence.tokens.count): \(token.surface)")
+                        .accessibilityAddTraits(isSelected ? .isSelected : [])
                         .accessibilityIdentifier("sentence.token.\(offset)")
                     }
                 }
@@ -361,10 +539,17 @@ private struct SentenceInspector: View {
                 }
             }
         }
-        .task(id: selectedToken) {
-            guard let selectedToken else { return }
+        .task(id: lookupContext) {
+            let context = lookupContext
+            guard let selectedToken = context.token else { return }
             isLookingUp = true
-            let foundEntries = await state.translationEntries(for: selectedToken)
+            let foundEntries = await state.translationEntries(
+                for: selectedToken,
+                sentence: sentence.german,
+                in: sentence.tokens,
+                analysis: sentence.analysis,
+                nounTokenIndices: context.nounTokenIndices
+            )
             guard !Task.isCancelled else { return }
             entries = foundEntries
             selectedEntryIndex = 0
@@ -383,17 +568,17 @@ private struct SentenceInspector: View {
             selectedTokenIndex = 0
             focusedTokenIndex = 0
         }
-        .onExitCommand {
-            focusedTokenIndex = nil
-            DispatchQueue.main.async {
-                NotificationCenter.default.post(name: .focusSentenceList, object: nil)
-            }
-        }
     }
 
     private func moveSelection(_ direction: MoveCommandDirection) {
         guard !sentence.tokens.isEmpty else { return }
         switch direction {
+        case .left where selectedTokenIndex == sentence.tokens.startIndex:
+            focusedTokenIndex = nil
+            DispatchQueue.main.async {
+                NotificationCenter.default.post(name: .focusSentenceList, object: nil)
+            }
+            return
         case .left, .up:
             selectedTokenIndex = max(0, selectedTokenIndex - 1)
         case .right, .down:

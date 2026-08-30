@@ -99,7 +99,7 @@ enum Lang4SelfCLI {
                 FileHandle.standardError.write(Data("Imported \(progress.imported.formatted()) of \(progress.total.formatted()) explanations…\n".utf8))
             }
         }
-        print("Imported \(imported.formatted()) explanations.")
+        print("Imported \(imported.formatted()) explanations and available word forms.")
     }
 
     private static func printHelp() {
@@ -115,7 +115,7 @@ enum Lang4SelfCLI {
           lang4self database        Print the SQLite database path
           lang4self import <file>   Import a dict.cc ZIP or text file
           lang4self import-explanations <database-de.db>
-                                    Import Wiktionary explanations
+                                    Import Wiktionary explanations and forms
           lang4self version         Print the CLI version
         """)
     }

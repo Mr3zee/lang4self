@@ -10,7 +10,7 @@
 
 ```text
 dict.cc user download ──stream import────────> SQLite + FTS5
-Lector SQLite download ──explanation import──>      │
+Lector SQLite download ──reference-data import─>    │
 microphone ──local German Speech──────> query ──────┤
                                                     ▼
                                              confirmed card
@@ -23,9 +23,9 @@ Sentence generation reads a bounded snapshot of the selected word list, starts L
 
 The personal card stores a snapshot of the German word and its available English/Russian translations. Re-importing or replacing dictionary rows therefore cannot destroy learned words.
 
-Wiktionary explanations are imported into a separate table and joined to dict.cc results by the exact German spelling and part of speech. This avoids pretending that the two sources' senses align one-to-one. Explanations identical to an existing translation are suppressed in the UI.
+Wiktionary explanations are imported into a separate table and joined to dict.cc results by the exact German spelling and part of speech. Lector noun plurals, verb inflections, and adjective degree forms are stored separately by lemma. Search merges a plural noun into its singular card only when Lector supplies one unambiguous noun relation; ambiguous or unlinked forms stay separate. Existing personal cards resolve forms dynamically, so re-importing Lector data enriches them without changing their saved snapshots. Explanations identical to an existing translation are suppressed in the UI.
 
-Morphology is computed locally. Common irregular verbs/adjectives are explicit; other forms use German regular-form rules and are marked **estimated** in the UI.
+Morphology prefers imported Lector forms, including irregular and separable verbs. Existing curated exceptions come next; German regular-form rules remain the fallback and carry a low-emphasis generated-forms note in the UI.
 
 ## Evolution boundaries
 

@@ -51,6 +51,7 @@ public struct PersonalCard: Identifiable, Hashable, Codable, Sendable {
     public var lapses: Int
     public var isStarred: Bool
     public var isSuspended: Bool
+    public var forms: [DictionaryForm]
 
     public init(
         id: Int64 = 0,
@@ -70,7 +71,8 @@ public struct PersonalCard: Identifiable, Hashable, Codable, Sendable {
         repetitions: Int = 0,
         lapses: Int = 0,
         isStarred: Bool = false,
-        isSuspended: Bool = false
+        isSuspended: Bool = false,
+        forms: [DictionaryForm] = []
     ) {
         self.id = id
         self.dictionaryEntryID = dictionaryEntryID
@@ -90,6 +92,7 @@ public struct PersonalCard: Identifiable, Hashable, Codable, Sendable {
         self.lapses = lapses
         self.isStarred = isStarred
         self.isSuspended = isSuspended
+        self.forms = forms
     }
 }
 
@@ -104,5 +107,64 @@ public struct StudyStats: Hashable, Codable, Sendable {
         self.dueCards = dueCards
         self.reviewsToday = reviewsToday
         self.streakDays = streakDays
+    }
+}
+
+public struct AddedCardMutation: Sendable {
+    public let card: PersonalCard
+    public let didAddToList: Bool
+
+    public init(card: PersonalCard, didAddToList: Bool) {
+        self.card = card
+        self.didAddToList = didAddToList
+    }
+}
+
+public struct CardReviewSnapshot: Sendable {
+    public let id: Int64
+    public let rating: Int
+    public let reviewedAt: Date
+    public let intervalDays: Double
+
+    public init(id: Int64, rating: Int, reviewedAt: Date, intervalDays: Double) {
+        self.id = id
+        self.rating = rating
+        self.reviewedAt = reviewedAt
+        self.intervalDays = intervalDays
+    }
+}
+
+public struct RemovedCardMutation: Sendable {
+    public let card: PersonalCard
+    public let listID: WordList.ID
+    public let addedAt: Date
+    public let reviews: [CardReviewSnapshot]
+
+    public init(
+        card: PersonalCard,
+        listID: WordList.ID,
+        addedAt: Date,
+        reviews: [CardReviewSnapshot]
+    ) {
+        self.card = card
+        self.listID = listID
+        self.addedAt = addedAt
+        self.reviews = reviews
+    }
+}
+
+public struct DeletedWordListMutation: Sendable {
+    public let list: WordList
+    public let cards: [RemovedCardMutation]
+    public let linkedSentenceIDs: [SavedSentence.ID]
+
+    public init(
+        list: WordList,
+        cards: [RemovedCardMutation],
+        linkedSentenceIDs: [SavedSentence.ID]
+    ) {
+        self.list = list
+        self.cards = cards
+        self.linkedSentenceIDs = linkedSentenceIDs
     }
 }
