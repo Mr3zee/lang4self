@@ -16,10 +16,11 @@ struct Lang4SelfApp: App {
         _dependencies = StateObject(wrappedValue: dependencies)
         appDelegate.appState = dependencies.state
         appDelegate.speakShortcut = dependencies.speakShortcut
+        appDelegate.isUITesting = dependencies.isUITesting
     }
 
     var body: some Scene {
-        WindowGroup {
+        Window("Lang4Self", id: "main") {
             if let state = dependencies.state, let speakShortcut = dependencies.speakShortcut {
                 RootView()
                     .environmentObject(state)
@@ -35,12 +36,16 @@ struct Lang4SelfApp: App {
             if let state = dependencies.state {
                 Lang4SelfCommands(state: state)
             }
+            if dependencies.isUITesting {
+                UITestingCommands()
+            }
         }
     }
 }
 
 @MainActor
 private final class Lang4SelfDependencies: ObservableObject {
+    let isUITesting: Bool
     let state: AppState?
     let speech: SpeechRecognizer
     let speakShortcut: SpeakShortcutController?
@@ -48,6 +53,7 @@ private final class Lang4SelfDependencies: ObservableObject {
 
     init(processInfo: ProcessInfo, settingsDefaults: UserDefaults) {
         let isUITesting = processInfo.arguments.contains("--ui-testing")
+        self.isUITesting = isUITesting
         speech = SpeechRecognizer(isUITesting: isUITesting)
         do {
             let databaseURL = processInfo.environment["LANG4SELF_UI_TEST_DATABASE"]
@@ -95,6 +101,7 @@ private struct StartupFailureView: View {
 private final class Lang4SelfAppDelegate: NSObject, NSApplicationDelegate {
     weak var appState: AppState?
     var speakShortcut: SpeakShortcutController?
+    var isUITesting = false
     private var shortcutHotKey: EventHotKeyRef?
     private var shortcutHotKeyHandler: EventHandlerRef?
 
@@ -103,16 +110,16 @@ private final class Lang4SelfAppDelegate: NSObject, NSApplicationDelegate {
         installShortcutHotKeyHandler()
         registerShortcutHotKey()
 
-        guard ProcessInfo.processInfo.arguments.contains("--ui-testing") else { return }
+        guard isUITesting else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
             guard !NSApp.windows.contains(where: \.isVisible),
-                  let newWindow = NSApp.mainMenu?.items
+                  let openMainWindow = NSApp.mainMenu?.items
                     .compactMap(\.submenu)
                     .flatMap(\.items)
-                    .first(where: { $0.title == "New Window" }),
-                  let action = newWindow.action
+                    .first(where: { $0.title == "Open Main Window for UI Testing" }),
+                  let action = openMainWindow.action
             else { return }
-            NSApp.sendAction(action, to: newWindow.target, from: newWindow)
+            NSApp.sendAction(action, to: openMainWindow.target, from: openMainWindow)
         }
     }
 
@@ -180,7 +187,18 @@ private final class Lang4SelfAppDelegate: NSObject, NSApplicationDelegate {
         if let shortcutHotKey { UnregisterEventHotKey(shortcutHotKey) }
         shortcutHotKey = nil
     }
+}
 
+private struct UITestingCommands: Commands {
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some Commands {
+        CommandMenu("UI Testing") {
+            Button("Open Main Window for UI Testing") {
+                openWindow(id: "main")
+            }
+        }
+    }
 }
 
 private struct Lang4SelfCommands: Commands {
@@ -194,11 +212,11 @@ private struct Lang4SelfCommands: Commands {
             .keyboardShortcut(",", modifiers: .command)
         }
 
-        CommandGroup(after: .newItem) {
+        CommandGroup(replacing: .newItem) {
             Button("New List") {
                 NotificationCenter.default.post(name: .createWordList, object: nil)
             }
-            .keyboardShortcut("n", modifiers: [.command, .shift])
+            .keyboardShortcut("n", modifiers: .command)
             .disabled(state.route != .library)
         }
 

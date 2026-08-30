@@ -26,7 +26,7 @@ The app includes a tiny original starter list. The complete dict.cc file stays o
 | ← / → | Navigate words in the sentence inspector |
 | Return | Enter results, edit a card, inspect a sentence, confirm speech, or accept a dialog |
 | ⌘Return | Add the selected dictionary entry |
-| ⌘⇧N | Create a list in My words |
+| ⌘N | Create a list in My words |
 | Hold Space | Open Speak from anywhere and record; release to look it up |
 | Space | Reveal a review or activate a focused control |
 | 1 … 4 | Rate a revealed review: Again, Hard, Good, Easy |

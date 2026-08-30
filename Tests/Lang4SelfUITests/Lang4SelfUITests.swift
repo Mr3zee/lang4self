@@ -90,6 +90,31 @@ final class Lang4SelfUITests: XCTestCase {
         XCTAssertEqual(app.textFields["library.search"].value as? String, "Haus")
     }
 
+    func testCommandNOnlyCreatesAListInMyWords() {
+        let initialWindowCount = app.windows.count
+
+        app.menuBars.menuBarItems["File"].click()
+        XCTAssertFalse(app.menuItems["New Window"].exists)
+        XCTAssertFalse(app.menuItems["New List"].isEnabled)
+        app.typeKey(.escape, modifierFlags: [])
+
+        app.typeKey("n", modifierFlags: .command)
+        XCTAssertEqual(app.windows.count, initialWindowCount)
+        XCTAssertFalse(app.textFields["list-editor.name"].exists)
+
+        openLibrary()
+        app.menuBars.menuBarItems["File"].click()
+        XCTAssertTrue(app.menuItems["New List"].isEnabled)
+        app.typeKey(.escape, modifierFlags: [])
+
+        app.typeKey("n", modifierFlags: [.command, .shift])
+        XCTAssertFalse(app.textFields["list-editor.name"].exists)
+
+        app.typeKey("n", modifierFlags: .command)
+        XCTAssertTrue(app.textFields["list-editor.name"].waitForExistence(timeout: 3))
+        XCTAssertEqual(app.windows.count, initialWindowCount)
+    }
+
     func testDictionaryKeyboardSearchSelectionAddAndClear() {
         assertFocused(app.textFields["dictionary.search"])
         app.typeText("Haus")
@@ -229,7 +254,7 @@ final class Lang4SelfUITests: XCTestCase {
         app.typeKey(.escape, modifierFlags: [])
         XCTAssertTrue(germanField.waitForNonExistence(timeout: 3))
 
-        app.typeKey("n", modifierFlags: [.command, .shift])
+        app.typeKey("n", modifierFlags: .command)
         let nameField = app.textFields["list-editor.name"]
         XCTAssertTrue(nameField.waitForExistence(timeout: 3))
         assertFocused(nameField)
@@ -407,7 +432,7 @@ final class Lang4SelfUITests: XCTestCase {
         XCTAssertGreaterThanOrEqual(app.sliders.count, 2)
         XCTAssertTrue(app.buttons["settings.reset-model-defaults"].exists)
 
-        for shortcut in ["⌘1 … ⌘6", "⌘,", "⌘F", "⌘?", "⌘Return", "⌘⇧N", "1 … 4", "Delete", "⌘Q", "⌘Z / ⇧⌘Z"] {
+        for shortcut in ["⌘1 … ⌘6", "⌘,", "⌘F", "⌘?", "⌘Return", "⌘N", "1 … 4", "Delete", "⌘Q", "⌘Z / ⇧⌘Z"] {
             XCTAssertTrue(app.staticTexts[shortcut].exists, "Settings is missing \(shortcut)")
         }
 
