@@ -6,35 +6,78 @@ import Lang4SelfCore
 @main
 struct Lang4SelfApp: App {
     @NSApplicationDelegateAdaptor(Lang4SelfAppDelegate.self) private var appDelegate
-    @StateObject private var state: AppState
+    @StateObject private var dependencies: Lang4SelfDependencies
 
     init() {
-        do {
-            let environment = ProcessInfo.processInfo.environment
-            let testStore: LocalStore?
-            if let path = environment["LANG4SELF_UI_TEST_DATABASE"] {
-                testStore = try LocalStore(url: URL(fileURLWithPath: path))
-            } else {
-                testStore = nil
-            }
-            let initialState = try AppState(store: testStore)
-            _state = StateObject(wrappedValue: initialState)
-            appDelegate.appState = initialState
-        } catch {
-            fatalError("Lang4Self could not start: \(error.localizedDescription)")
-        }
+        let dependencies = Lang4SelfDependencies(
+            processInfo: .processInfo,
+            settingsDefaults: .standard
+        )
+        _dependencies = StateObject(wrappedValue: dependencies)
+        appDelegate.appState = dependencies.state
     }
 
     var body: some Scene {
         WindowGroup {
-            RootView()
-                .environmentObject(state)
+            if let state = dependencies.state {
+                RootView()
+                    .environmentObject(state)
+                    .environmentObject(dependencies.speech)
+            } else {
+                StartupFailureView(message: dependencies.startupFailure ?? "The application could not start.")
+            }
         }
         .windowStyle(.automatic)
         .defaultSize(width: 1_120, height: 740)
         .commands {
-            Lang4SelfCommands(state: state)
+            if let state = dependencies.state {
+                Lang4SelfCommands(state: state)
+            }
         }
+    }
+}
+
+@MainActor
+private final class Lang4SelfDependencies: ObservableObject {
+    let state: AppState?
+    let speech: SpeechRecognizer
+    let startupFailure: String?
+
+    init(processInfo: ProcessInfo, settingsDefaults: UserDefaults) {
+        let isUITesting = processInfo.arguments.contains("--ui-testing")
+        speech = SpeechRecognizer(isUITesting: isUITesting)
+        do {
+            let databaseURL = processInfo.environment["LANG4SELF_UI_TEST_DATABASE"]
+                .map(URL.init(fileURLWithPath:))
+            let store = try LocalStore(url: databaseURL, now: { .now })
+            let settingsStore = UserDefaultsLMStudioSettingsStore(defaults: settingsDefaults)
+            state = AppState(
+                store: store,
+                sentenceGenerator: LMStudioService(),
+                dictionaryFilePreparer: SystemDictionaryFilePreparer(),
+                settingsStore: settingsStore,
+                isUITesting: isUITesting,
+                now: { .now },
+                calendar: .autoupdatingCurrent
+            )
+            startupFailure = nil
+        } catch {
+            state = nil
+            startupFailure = error.localizedDescription
+        }
+    }
+}
+
+private struct StartupFailureView: View {
+    let message: String
+
+    var body: some View {
+        ContentUnavailableView {
+            Label("Lang4Self could not start", systemImage: "exclamationmark.triangle")
+        } description: {
+            Text(message)
+        }
+        .padding(32)
     }
 }
 

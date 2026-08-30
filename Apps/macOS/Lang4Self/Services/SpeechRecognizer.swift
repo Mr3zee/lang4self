@@ -25,9 +25,14 @@ final class SpeechRecognizer: NSObject, ObservableObject {
     private var recognitionFinished = false
     private var startGeneration = UUID()
     private var recognitionGeneration = UUID()
-    private let isUITesting = ProcessInfo.processInfo.arguments.contains("--ui-testing")
+    private let isUITesting: Bool
 
     var isListening: Bool { phase == .listening }
+
+    init(isUITesting: Bool) {
+        self.isUITesting = isUITesting
+        super.init()
+    }
 
     func start() {
         guard phase != .requestingPermission, phase != .listening else { return }

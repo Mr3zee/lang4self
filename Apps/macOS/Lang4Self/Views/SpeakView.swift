@@ -4,7 +4,7 @@ import Lang4SelfCore
 
 struct SpeakView: View {
     @EnvironmentObject private var state: AppState
-    @StateObject private var speech = SpeechRecognizer()
+    @EnvironmentObject private var speech: SpeechRecognizer
     @State private var spaceMonitor: Any?
     @State private var isSpaceHeld = false
     @State private var isManualRecording = false
@@ -116,12 +116,24 @@ struct SpeakView: View {
         Button(action: toggleManualRecording) {
             Label(holdControlTitle, systemImage: speech.isListening ? "stop.fill" : "mic.fill")
                 .fontWeight(.semibold)
+                .frame(width: 180)
         }
-        .buttonStyle(.borderedProminent)
+        .buttonStyle(SpeakRecordButtonStyle(isListening: speech.isListening))
         .controlSize(.large)
-        .tint(speech.isListening ? .red : .accentColor)
         .focusable()
         .focused($focusedControl, equals: .record)
+        .focusEffectDisabled()
+        .overlay {
+            Capsule()
+                .strokeBorder(
+                    focusedControl == .record && !isSpaceHeld
+                        ? Color(nsColor: .keyboardFocusIndicatorColor)
+                        : .clear,
+                    lineWidth: 3
+                )
+                .padding(2)
+                .allowsHitTesting(false)
+        }
         .accessibilityIdentifier("speak.record")
         .accessibilityLabel(speech.isListening ? "Stop recording" : "Start recording")
         .accessibilityHint("Press the button, or hold Space and release it to stop")
@@ -222,6 +234,20 @@ struct SpeakView: View {
         guard !speech.transcription.isEmpty, state.selectedEntry != nil else { return }
         state.confirmSpokenEntry()
         speech.reset()
+    }
+}
+
+private struct SpeakRecordButtonStyle: ButtonStyle {
+    let isListening: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .foregroundStyle(.white)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 9)
+            .background(isListening ? Color.red : Color.accentColor, in: Capsule())
+            .brightness(configuration.isPressed ? -0.08 : 0)
+            .contentShape(Capsule())
     }
 }
 

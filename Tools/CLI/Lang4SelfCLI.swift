@@ -82,7 +82,7 @@ enum Lang4SelfCLI {
 
     private static func importDictionary(_ source: URL) async throws {
         guard FileManager.default.fileExists(atPath: source.path) else { throw CLIError.fileNotFound(source.path) }
-        let prepared = try await DictionaryArchive.prepare(source)
+        let prepared = try await SystemDictionaryFilePreparer().prepare(source)
         defer { prepared.cleanUp() }
         let store = try LocalStore()
         let imported = try await store.importDictionary(from: prepared.url) { progress in

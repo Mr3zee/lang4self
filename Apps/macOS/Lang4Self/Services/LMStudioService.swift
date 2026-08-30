@@ -50,19 +50,6 @@ struct LMStudioSettings: Codable, Equatable {
 
     static let defaults = LMStudioSettings()
 
-    private static let userDefaultsKey = "lmStudioSentenceSettings"
-
-    static func load(from defaults: UserDefaults = .standard) -> LMStudioSettings {
-        guard let data = defaults.data(forKey: userDefaultsKey),
-              let decoded = try? JSONDecoder().decode(Self.self, from: data) else { return .defaults }
-        return decoded.sanitized
-    }
-
-    func save(to defaults: UserDefaults = .standard) {
-        guard let data = try? JSONEncoder().encode(sanitized) else { return }
-        defaults.set(data, forKey: Self.userDefaultsKey)
-    }
-
     var sanitized: LMStudioSettings {
         var value = self
         value.contextLength = min(max(contextLength, 2_048), 262_144)

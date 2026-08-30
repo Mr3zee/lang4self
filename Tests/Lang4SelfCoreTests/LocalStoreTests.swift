@@ -77,6 +77,106 @@ final class LocalStoreTests: XCTestCase {
         XCTAssertEqual(stats.totalCards, 1)
     }
 
+    func testFailedReviewRollsBackCardUpdate() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let databaseURL = directory.appendingPathComponent("test.sqlite3")
+
+        let store = try LocalStore(url: databaseURL)
+        try await store.seedStarterDictionaryIfNeeded()
+        let houseResults = try await store.searchDictionary("Haus")
+        let house = try XCTUnwrap(houseResults.first)
+        let card = try await store.addCard(from: house)
+        try executeSQLite(at: databaseURL, sql: """
+            CREATE TRIGGER reject_review
+            BEFORE INSERT ON review_log
+            BEGIN
+              SELECT RAISE(ABORT, 'forced review-log failure');
+            END;
+            """)
+
+        do {
+            _ = try await store.review(card: card, rating: .good)
+            XCTFail("Expected the review-log insert to fail")
+        } catch {}
+
+        let persistedCard = try await store.personalCard(id: card.id)
+        let persisted = try XCTUnwrap(persistedCard)
+        XCTAssertNil(persisted.lastReviewedAt)
+        XCTAssertEqual(persisted.repetitions, 0)
+        XCTAssertEqual(persisted.intervalDays, 0)
+    }
+
+    func testStatsUseTheSuppliedCalendarForStreakDays() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let store = try LocalStore(url: directory.appendingPathComponent("test.sqlite3"))
+        try await store.seedStarterDictionaryIfNeeded()
+        let houseResults = try await store.searchDictionary("Haus")
+        let house = try XCTUnwrap(houseResults.first)
+        let card = try await store.addCard(from: house)
+        let reviewedAt = Date(timeIntervalSince1970: 1_704_151_800) // 2024-01-01 23:30 UTC
+        let now = Date(timeIntervalSince1970: 1_704_155_400) // 2024-01-02 00:30 UTC
+        _ = try await store.review(card: card, rating: .good, now: reviewedAt)
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = try XCTUnwrap(TimeZone(secondsFromGMT: 2 * 60 * 60))
+
+        let stats = try await store.stats(now: now, calendar: calendar)
+
+        XCTAssertEqual(stats.reviewsToday, 1)
+        XCTAssertEqual(stats.streakDays, 1)
+    }
+
+    func testStatsExcludeReviewsOutsideTheSuppliedDay() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let store = try LocalStore(url: directory.appendingPathComponent("test.sqlite3"))
+        try await store.seedStarterDictionaryIfNeeded()
+        let houseResults = try await store.searchDictionary("Haus")
+        let house = try XCTUnwrap(houseResults.first)
+        let card = try await store.addCard(from: house)
+        let tomorrow = Date(timeIntervalSince1970: 1_704_240_000)
+        _ = try await store.review(card: card, rating: .good, now: tomorrow)
+        let today = Date(timeIntervalSince1970: 1_704_153_600)
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = try XCTUnwrap(TimeZone(secondsFromGMT: 0))
+
+        let stats = try await store.stats(now: today, calendar: calendar)
+
+        XCTAssertEqual(stats.reviewsToday, 0)
+        XCTAssertEqual(stats.streakDays, 0)
+    }
+
+    func testInjectedClockControlsStoredCreationDates() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixedDate = Date(timeIntervalSince1970: 1_700_000_000)
+
+        let store = try LocalStore(
+            url: directory.appendingPathComponent("test.sqlite3"),
+            now: { fixedDate }
+        )
+        try await store.seedStarterDictionaryIfNeeded()
+        let list = try await store.createWordList(name: "Fixed time")
+        let houseResults = try await store.searchDictionary("Haus")
+        let house = try XCTUnwrap(houseResults.first)
+        let card = try await store.addCard(from: house, listID: list.id)
+
+        XCTAssertEqual(list.createdAt, fixedDate)
+        XCTAssertEqual(card.createdAt, fixedDate)
+        XCTAssertEqual(card.dueAt, fixedDate)
+        let noCards = try await store.cards(listID: list.id, limit: 0)
+        let noDueCards = try await store.dueCards(listID: list.id, limit: -1, now: fixedDate)
+        XCTAssertTrue(noCards.isEmpty)
+        XCTAssertTrue(noDueCards.isEmpty)
+    }
+
     func testImportsTabDelimitedFile() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

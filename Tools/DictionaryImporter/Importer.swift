@@ -11,7 +11,7 @@ enum Lang4SelfDictionaryImporter {
 
         let source = URL(fileURLWithPath: CommandLine.arguments[1])
         do {
-            let prepared = try await DictionaryArchive.prepare(source)
+            let prepared = try await SystemDictionaryFilePreparer().prepare(source)
             defer { prepared.cleanUp() }
 
             let store = try LocalStore()

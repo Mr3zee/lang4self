@@ -10,9 +10,25 @@ public struct PreparedDictionaryFile: Sendable {
         self.temporaryDirectory = temporaryDirectory
     }
 
+    public init(url: URL) {
+        self.init(url: url, temporaryDirectory: nil)
+    }
+
     public func cleanUp() {
         guard let temporaryDirectory else { return }
         try? FileManager.default.removeItem(at: temporaryDirectory)
+    }
+}
+
+public protocol DictionaryFilePreparing: Sendable {
+    func prepare(_ source: URL) async throws -> PreparedDictionaryFile
+}
+
+public struct SystemDictionaryFilePreparer: DictionaryFilePreparing {
+    public init() {}
+
+    public func prepare(_ source: URL) async throws -> PreparedDictionaryFile {
+        try await DictionaryArchive.prepare(source)
     }
 }
 

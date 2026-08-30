@@ -10,6 +10,14 @@
 | Preferences and UI-test detection were hidden globals inside app state. | Made settings storage and UI-test mode injectable while retaining production defaults. |
 | `AppState.init` silently started asynchronous database work. | Moved startup to an explicit, idempotent `bootstrap()` lifecycle call from the root view. |
 | Three coordinator files are already broad (`LocalStore`, `AppState`, `LMStudioService`). | New repository rules prevent adding unrelated responsibilities and require focused types behind capability protocols. |
+| Production fallbacks in `AppState` still hid SQLite, preferences, process arguments, and LM Studio construction. | Made the composition root create and inject every production dependency; moved preference persistence to `LMStudioSettingsStoring`. |
+| Speech test mode read global process arguments inside the speech adapter. | Injected speech configuration from the composition root. |
+| A review updated its card before inserting its log, allowing partial persistence. | Wrapped both writes in one transaction and added a forced-failure rollback test. |
+| Review streaks used UTC epoch days while “reviews today” used the supplied calendar. | Made both calculations calendar-aware and bounded “today” on both sides. |
+| Schema migration code occupied the runtime store coordinator. | Extracted `LocalStoreSchema` as the single migration owner without changing schema version 1. |
+| Creation timestamps and collection limits were hidden or unchecked. | Added an injectable store clock, deterministic tests, and safe non-positive/clamped limits. |
+| Database startup errors terminated the app with `fatalError`. | Added a composition container and a non-destructive startup error screen. |
+| `AppState` invoked the concrete ZIP/process utility directly. | Injected `DictionaryFilePreparing`; app, CLI, and importer compose the system implementation. |
 
 ## Review trigger
 

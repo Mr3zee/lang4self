@@ -52,10 +52,18 @@ Run the core test suite with:
 swift test
 ```
 
+Run the standard architecture/build check with:
+
+```sh
+./scripts/check.sh
+```
+
 Run the macOS UI test suite with the **Lang4Self** scheme in Xcode, or with:
 
 ```sh
-xcodebuild -project Lang4Self.xcodeproj -scheme Lang4Self -destination 'platform=macOS' test
+xcodebuild -quiet -project Lang4Self.xcodeproj -scheme Lang4Self \
+  -destination 'platform=macOS,arch=arm64' \
+  -only-testing:Lang4SelfUITests test
 ```
 
 Build the actual app bundle from Terminal with:

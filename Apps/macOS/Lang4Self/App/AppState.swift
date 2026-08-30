@@ -69,30 +69,39 @@ final class AppState: ObservableObject {
     @Published private(set) var lmStudioSettings: LMStudioSettings
     @Published var isShowingKeyboardShortcuts = false
 
-    let store: any AppDataStore
+    private let store: any AppDataStore
     private var searchTask: Task<Void, Never>?
     private var libraryTask: Task<Void, Never>?
     private var sentenceGenerationTask: Task<Void, Never>?
     private var bannerDismissTask: Task<Void, Never>?
     private var hasBootstrapped = false
     private let lmStudio: any SentenceGenerating
-    private let settingsDefaults: UserDefaults
+    private let dictionaryFilePreparer: any DictionaryFilePreparing
+    private let settingsStore: any LMStudioSettingsStoring
     private let isUITesting: Bool
+    private let now: () -> Date
+    private let calendar: Calendar
 
     var selectedWordList: WordList? { wordLists.first { $0.id == selectedListID } }
+    var databaseURL: URL { store.databaseURL }
 
     init(
-        store: (any AppDataStore)? = nil,
-        sentenceGenerator: (any SentenceGenerating)? = nil,
-        settingsDefaults: UserDefaults = .standard,
-        isUITesting: Bool? = nil
-    ) throws {
-        if let store { self.store = store }
-        else { self.store = try LocalStore() }
-        self.lmStudio = sentenceGenerator ?? LMStudioService()
-        self.settingsDefaults = settingsDefaults
-        self.isUITesting = isUITesting ?? ProcessInfo.processInfo.arguments.contains("--ui-testing")
-        self.lmStudioSettings = self.isUITesting ? .defaults : LMStudioSettings.load(from: settingsDefaults)
+        store: any AppDataStore,
+        sentenceGenerator: any SentenceGenerating,
+        dictionaryFilePreparer: any DictionaryFilePreparing,
+        settingsStore: any LMStudioSettingsStoring,
+        isUITesting: Bool,
+        now: @escaping () -> Date,
+        calendar: Calendar
+    ) {
+        self.store = store
+        self.lmStudio = sentenceGenerator
+        self.dictionaryFilePreparer = dictionaryFilePreparer
+        self.settingsStore = settingsStore
+        self.isUITesting = isUITesting
+        self.now = now
+        self.calendar = calendar
+        self.lmStudioSettings = isUITesting ? .defaults : settingsStore.load()
         lmStudio.progressDidChange = { [weak self] progress in
             self?.lmStudioProgress = progress
         }
@@ -110,8 +119,9 @@ final class AppState: ObservableObject {
             async let explanations = store.explanationCount()
             async let loadedLists = store.wordLists()
             async let loadedCards = store.cards(listID: selectedListID)
-            async let loadedDue = store.dueCards(listID: selectedListID)
-            async let loadedStats = store.stats(listID: selectedListID)
+            let currentDate = now()
+            async let loadedDue = store.dueCards(listID: selectedListID, limit: 100, now: currentDate)
+            async let loadedStats = store.stats(listID: selectedListID, now: currentDate, calendar: calendar)
             async let loadedSentences = store.savedSentences()
             dictionaryCount = try await count
             hasCompleteDictionary = try await complete
@@ -338,7 +348,7 @@ final class AppState: ObservableObject {
         let listID = selectedListID
         Task {
             do {
-                let loadedDue = try await store.dueCards(listID: listID)
+                let loadedDue = try await store.dueCards(listID: listID, limit: 100, now: now())
                 guard selectedListID == listID else { return }
                 dueCards = loadedDue
                 reviewCards = loadedDue
@@ -349,7 +359,7 @@ final class AppState: ObservableObject {
     func rate(_ card: PersonalCard, _ rating: ReviewRating) {
         Task {
             do {
-                _ = try await store.review(card: card, rating: rating)
+                _ = try await store.review(card: card, rating: rating, now: now(), calendar: calendar)
                 dueCards.removeAll { $0.id == card.id }
                 reviewCards.removeAll { $0.id == card.id }
                 await refreshStudyData()
@@ -365,7 +375,7 @@ final class AppState: ObservableObject {
             let access = url.startAccessingSecurityScopedResource()
             defer { if access { url.stopAccessingSecurityScopedResource() } }
             do {
-                let prepared = try await DictionaryArchive.prepare(url)
+                let prepared = try await dictionaryFilePreparer.prepare(url)
                 defer { prepared.cleanUp() }
                 let imported = try await store.importDictionary(from: prepared.url) { progress in
                     Task { @MainActor [weak self] in self?.importProgress = progress }
@@ -410,6 +420,7 @@ final class AppState: ObservableObject {
 
     func generateSentences(count: Int) {
         guard !isGeneratingSentences, let sourceList = selectedWordList else { return }
+        let count = min(max(count, 1), 10)
         if isUITesting {
             let examples = [
                 ("Das Haus hat ein rotes Dach.", "The house has a red roof."),
@@ -527,7 +538,7 @@ final class AppState: ObservableObject {
 
     func updateLMStudioSettings(_ settings: LMStudioSettings) {
         lmStudioSettings = settings.sanitized
-        if !isUITesting { lmStudioSettings.save(to: settingsDefaults) }
+        if !isUITesting { settingsStore.save(lmStudioSettings) }
     }
 
     func shutdown() async {
@@ -571,9 +582,10 @@ final class AppState: ObservableObject {
     func refreshStudyData() async {
         let listID = selectedListID
         do {
+            let currentDate = now()
             async let loadedCards = store.cards(search: libraryQuery, listID: listID)
-            async let loadedDue = store.dueCards(listID: listID)
-            async let loadedStats = store.stats(listID: listID)
+            async let loadedDue = store.dueCards(listID: listID, limit: 100, now: currentDate)
+            async let loadedStats = store.stats(listID: listID, now: currentDate, calendar: calendar)
             let (newCards, newDue, newStats) = try await (loadedCards, loadedDue, loadedStats)
             guard selectedListID == listID else { return }
             cards = newCards

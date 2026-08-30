@@ -59,13 +59,18 @@ public enum LocalStoreError: LocalizedError {
 }
 
 public actor LocalStore {
-    static let latestSchemaVersion = 1
+    static let latestSchemaVersion = LocalStoreSchema.latestSchemaVersion
 
     private var database: OpaquePointer?
     public nonisolated let databaseURL: URL
+    private let now: @Sendable () -> Date
     private static let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
-    public init(url: URL? = nil) throws {
+    public init(
+        url: URL? = nil,
+        now: @escaping @Sendable () -> Date = { .now }
+    ) throws {
+        self.now = now
         let resolved: URL
         if let url {
             resolved = url
@@ -94,7 +99,7 @@ public actor LocalStore {
         }
 
         do {
-            try Self.configure(pointer)
+            try LocalStoreSchema.configure(pointer)
             self.database = pointer
             self.databaseURL = resolved
         } catch {
@@ -271,7 +276,7 @@ public actor LocalStore {
             }
             guard validLines > 0 else { throw LocalStoreError.invalidDictionaryFile }
             try Self.execute(database, "INSERT INTO dictionary_fts(dictionary_fts) VALUES ('rebuild')")
-            try Self.createDictionaryTriggers(database)
+            try LocalStoreSchema.createDictionaryTriggers(database)
             try Self.execute(database, "COMMIT")
             try Self.execute(database, "PRAGMA optimize")
             progress(.init(imported: imported, bytesRead: totalBytes, totalBytes: totalBytes))
@@ -392,7 +397,7 @@ public actor LocalStore {
             if entry.id != 0, let existing = try self.card(forDictionaryEntryID: entry.id) {
                 card = existing
             } else {
-                let now = Date().timeIntervalSince1970
+                let now = self.now().timeIntervalSince1970
                 let sql = """
                     INSERT INTO personal_cards
                       (dictionary_entry_id, german, english, raw_german, kind, gender, created_at, due_at)
@@ -426,6 +431,7 @@ public actor LocalStore {
     }
 
     public func cards(search: String = "", listID: Int64 = WordList.defaultID, limit: Int = 500) throws -> [PersonalCard] {
+        guard limit > 0 else { return [] }
         let hasQuery = !search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         let sql = """
             SELECT \(qualifiedCardColumns) FROM personal_cards AS c
@@ -443,11 +449,12 @@ public actor LocalStore {
             let pattern = "%" + escapedLike(search) + "%"
             for _ in 0..<3 { bind(pattern, to: index, in: statement); index += 1 }
         }
-        sqlite3_bind_int(statement, index, Int32(limit))
+        sqlite3_bind_int(statement, index, Int32(clamping: limit))
         return try readCards(statement)
     }
 
     public func dueCards(listID: Int64 = WordList.defaultID, limit: Int = 100, now: Date = .now) throws -> [PersonalCard] {
+        guard limit > 0 else { return [] }
         let sql = """
             SELECT \(qualifiedCardColumns) FROM personal_cards AS c
             JOIN card_lists AS cl ON cl.card_id = c.id
@@ -459,7 +466,7 @@ public actor LocalStore {
         defer { sqlite3_finalize(statement) }
         sqlite3_bind_int64(statement, 1, listID)
         sqlite3_bind_double(statement, 2, now.timeIntervalSince1970)
-        sqlite3_bind_int(statement, 3, Int32(limit))
+        sqlite3_bind_int(statement, 3, Int32(clamping: limit))
         return try readCards(statement)
     }
 
@@ -499,13 +506,14 @@ public actor LocalStore {
         guard !name.isEmpty else { throw LocalStoreError.invalidListName }
         let statement = try prepare("INSERT INTO word_lists (name, created_at) VALUES (?, ?)")
         defer { sqlite3_finalize(statement) }
+        let createdAt = now()
         bind(name, to: 1, in: statement)
-        sqlite3_bind_double(statement, 2, Date().timeIntervalSince1970)
+        sqlite3_bind_double(statement, 2, createdAt.timeIntervalSince1970)
         guard sqlite3_step(statement) == SQLITE_DONE else {
             if sqlite3_errcode(database) == SQLITE_CONSTRAINT { throw LocalStoreError.duplicateListName }
             throw sqliteError()
         }
-        return .init(id: sqlite3_last_insert_rowid(database), name: name)
+        return .init(id: sqlite3_last_insert_rowid(database), name: name, createdAt: createdAt)
     }
 
     public func renameWordList(id: Int64, name: String) throws {
@@ -543,7 +551,7 @@ public actor LocalStore {
         defer { sqlite3_finalize(statement) }
         sqlite3_bind_int64(statement, 1, cardID)
         sqlite3_bind_int64(statement, 2, listID)
-        sqlite3_bind_double(statement, 3, Date().timeIntervalSince1970)
+        sqlite3_bind_double(statement, 3, now().timeIntervalSince1970)
         try stepDone(statement)
     }
 
@@ -569,17 +577,29 @@ public actor LocalStore {
         }
     }
 
-    public func review(card: PersonalCard, rating: ReviewRating, now: Date = .now) throws -> PersonalCard {
-        let updated = SpacedRepetitionScheduler.reviewed(card, rating: rating, now: now)
-        try updateCard(updated)
-        let log = try prepare("INSERT INTO review_log (card_id, rating, reviewed_at, interval_days) VALUES (?, ?, ?, ?)")
-        defer { sqlite3_finalize(log) }
-        sqlite3_bind_int64(log, 1, card.id)
-        sqlite3_bind_int(log, 2, Int32(rating.rawValue))
-        sqlite3_bind_double(log, 3, now.timeIntervalSince1970)
-        sqlite3_bind_double(log, 4, updated.intervalDays)
-        try stepDone(log)
-        return updated
+    public func review(
+        card: PersonalCard,
+        rating: ReviewRating,
+        now: Date = .now,
+        calendar: Calendar = .current
+    ) throws -> PersonalCard {
+        let updated = SpacedRepetitionScheduler.reviewed(card, rating: rating, now: now, calendar: calendar)
+        try Self.execute(database, "BEGIN IMMEDIATE")
+        do {
+            try updateCard(updated)
+            let log = try prepare("INSERT INTO review_log (card_id, rating, reviewed_at, interval_days) VALUES (?, ?, ?, ?)")
+            defer { sqlite3_finalize(log) }
+            sqlite3_bind_int64(log, 1, card.id)
+            sqlite3_bind_int(log, 2, Int32(rating.rawValue))
+            sqlite3_bind_double(log, 3, now.timeIntervalSince1970)
+            sqlite3_bind_double(log, 4, updated.intervalDays)
+            try stepDone(log)
+            try Self.execute(database, "COMMIT")
+            return updated
+        } catch {
+            try? Self.execute(database, "ROLLBACK")
+            throw error
+        }
     }
 
     public func updateCard(_ card: PersonalCard) throws {
@@ -669,7 +689,7 @@ public actor LocalStore {
                     throw LocalStoreError.sqlite("Could not encode sentence words")
                 }
                 bind(tokenJSON, to: 5, in: statement)
-                let createdAt = Date()
+                let createdAt = now()
                 sqlite3_bind_double(statement, 6, createdAt.timeIntervalSince1970)
                 try stepDone(statement)
 
@@ -711,147 +731,34 @@ public actor LocalStore {
         sqlite3_bind_double(dueStatement, 2, now.timeIntervalSince1970)
         let due = try readScalarInt(dueStatement)
         let start = calendar.startOfDay(for: now).timeIntervalSince1970
-        let reviewsStatement = try prepare("SELECT COUNT(*) FROM review_log AS r JOIN card_lists AS cl ON cl.card_id = r.card_id WHERE cl.list_id = ? AND r.reviewed_at >= ?")
+        guard let nextDay = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: now)) else {
+            throw LocalStoreError.sqlite("Could not calculate the study-day boundary")
+        }
+        let reviewsStatement = try prepare("SELECT COUNT(*) FROM review_log AS r JOIN card_lists AS cl ON cl.card_id = r.card_id WHERE cl.list_id = ? AND r.reviewed_at >= ? AND r.reviewed_at < ?")
         defer { sqlite3_finalize(reviewsStatement) }
         sqlite3_bind_int64(reviewsStatement, 1, listID)
         sqlite3_bind_double(reviewsStatement, 2, start)
+        sqlite3_bind_double(reviewsStatement, 3, nextDay.timeIntervalSince1970)
         let reviews = try readScalarInt(reviewsStatement)
-        let dayStatement = try prepare("SELECT DISTINCT CAST(r.reviewed_at / 86400 AS INTEGER) FROM review_log AS r JOIN card_lists AS cl ON cl.card_id = r.card_id WHERE cl.list_id = ? ORDER BY 1 DESC")
+        let dayStatement = try prepare("SELECT r.reviewed_at FROM review_log AS r JOIN card_lists AS cl ON cl.card_id = r.card_id WHERE cl.list_id = ?")
         defer { sqlite3_finalize(dayStatement) }
         sqlite3_bind_int64(dayStatement, 1, listID)
-        var reviewDays = Set<Int>()
-        while sqlite3_step(dayStatement) == SQLITE_ROW { reviewDays.insert(Int(sqlite3_column_int64(dayStatement, 0))) }
+        var reviewDays = Set<Date>()
+        while true {
+            let step = sqlite3_step(dayStatement)
+            if step == SQLITE_DONE { break }
+            guard step == SQLITE_ROW else { throw sqliteError() }
+            let reviewedAt = Date(timeIntervalSince1970: sqlite3_column_double(dayStatement, 0))
+            reviewDays.insert(calendar.startOfDay(for: reviewedAt))
+        }
         var streak = 0
-        var day = Int(now.timeIntervalSince1970 / 86_400)
-        while reviewDays.contains(day) { streak += 1; day -= 1 }
+        var day = calendar.startOfDay(for: now)
+        while reviewDays.contains(day) {
+            streak += 1
+            guard let previousDay = calendar.date(byAdding: .day, value: -1, to: day) else { break }
+            day = previousDay
+        }
         return .init(totalCards: total, dueCards: due, reviewsToday: reviews, streakDays: streak)
-    }
-
-    private static func configure(_ database: OpaquePointer) throws {
-        try execute(database, "PRAGMA journal_mode = WAL")
-        try execute(database, "PRAGMA synchronous = NORMAL")
-        try execute(database, "PRAGMA foreign_keys = ON")
-        try execute(database, "PRAGMA temp_store = MEMORY")
-        let installedVersion = try schemaVersion(in: database)
-        guard installedVersion <= latestSchemaVersion else {
-            throw LocalStoreError.unsupportedSchema(found: installedVersion, latest: latestSchemaVersion)
-        }
-        guard installedVersion < latestSchemaVersion else { return }
-
-        try execute(database, "BEGIN IMMEDIATE")
-        do {
-            var migratedVersion = installedVersion
-            // Version 1 adopts pre-versioning databases as well as creating new ones.
-            // Keep future changes in their own `if migratedVersion < N` block.
-            if migratedVersion < 1 {
-                try execute(database, """
-            CREATE TABLE IF NOT EXISTS dictionary_entries (
-              id INTEGER PRIMARY KEY,
-              german TEXT NOT NULL,
-              english TEXT NOT NULL,
-              normalized_german TEXT NOT NULL,
-              normalized_english TEXT NOT NULL,
-              raw_german TEXT NOT NULL,
-              raw_english TEXT NOT NULL,
-              kind TEXT NOT NULL,
-              gender TEXT NOT NULL,
-              usage TEXT,
-              source TEXT NOT NULL,
-              translation_language TEXT NOT NULL DEFAULT 'en',
-              explanation TEXT,
-              UNIQUE(raw_german, raw_english, translation_language)
-            );
-            CREATE INDEX IF NOT EXISTS dictionary_source ON dictionary_entries(source);
-            CREATE INDEX IF NOT EXISTS dictionary_word_kind ON dictionary_entries(normalized_german, kind);
-            CREATE TABLE IF NOT EXISTS dictionary_explanations (
-              id INTEGER PRIMARY KEY,
-              german_key TEXT NOT NULL,
-              kind TEXT NOT NULL,
-              explanation TEXT NOT NULL,
-              source TEXT NOT NULL,
-              sort_order INTEGER NOT NULL DEFAULT 0,
-              UNIQUE(german_key, kind, explanation, source)
-            );
-            CREATE INDEX IF NOT EXISTS dictionary_explanations_word_kind
-              ON dictionary_explanations(german_key, kind, sort_order);
-            CREATE VIRTUAL TABLE IF NOT EXISTS dictionary_fts USING fts5(
-              german, english, content='dictionary_entries', content_rowid='id',
-              tokenize='unicode61 remove_diacritics 2'
-            );
-            CREATE TABLE IF NOT EXISTS personal_cards (
-              id INTEGER PRIMARY KEY,
-              dictionary_entry_id INTEGER UNIQUE REFERENCES dictionary_entries(id) ON DELETE SET NULL,
-              german TEXT NOT NULL,
-              english TEXT NOT NULL,
-              raw_german TEXT NOT NULL,
-              kind TEXT NOT NULL,
-              gender TEXT NOT NULL,
-              notes TEXT NOT NULL DEFAULT '',
-              tags TEXT NOT NULL DEFAULT '',
-              created_at REAL NOT NULL,
-              due_at REAL NOT NULL,
-              last_reviewed_at REAL,
-              interval_days REAL NOT NULL DEFAULT 0,
-              ease_factor REAL NOT NULL DEFAULT 2.5,
-              repetitions INTEGER NOT NULL DEFAULT 0,
-              lapses INTEGER NOT NULL DEFAULT 0,
-              is_starred INTEGER NOT NULL DEFAULT 0,
-              is_suspended INTEGER NOT NULL DEFAULT 0
-            );
-            CREATE INDEX IF NOT EXISTS cards_due ON personal_cards(is_suspended, due_at);
-            CREATE TABLE IF NOT EXISTS word_lists (
-              id INTEGER PRIMARY KEY,
-              name TEXT NOT NULL COLLATE NOCASE UNIQUE,
-              created_at REAL NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS card_lists (
-              card_id INTEGER NOT NULL REFERENCES personal_cards(id) ON DELETE CASCADE,
-              list_id INTEGER NOT NULL REFERENCES word_lists(id) ON DELETE CASCADE,
-              added_at REAL NOT NULL,
-              PRIMARY KEY (card_id, list_id)
-            );
-            CREATE INDEX IF NOT EXISTS card_lists_by_list ON card_lists(list_id, card_id);
-            CREATE TABLE IF NOT EXISTS review_log (
-              id INTEGER PRIMARY KEY,
-              card_id INTEGER NOT NULL REFERENCES personal_cards(id) ON DELETE CASCADE,
-              rating INTEGER NOT NULL,
-              reviewed_at REAL NOT NULL,
-              interval_days REAL NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS saved_sentences (
-              id INTEGER PRIMARY KEY,
-              german TEXT NOT NULL,
-              translation TEXT NOT NULL,
-              source_list_id INTEGER REFERENCES word_lists(id) ON DELETE SET NULL,
-              source_list_name TEXT NOT NULL,
-              tokens_json TEXT NOT NULL,
-              created_at REAL NOT NULL,
-              UNIQUE(german, translation)
-            );
-            CREATE INDEX IF NOT EXISTS saved_sentences_created ON saved_sentences(created_at DESC);
-            """)
-                if try !table("dictionary_entries", hasColumn: "translation_language", in: database) {
-                    try execute(database, "ALTER TABLE dictionary_entries ADD COLUMN translation_language TEXT NOT NULL DEFAULT 'en'")
-                }
-                if try !table("dictionary_entries", hasColumn: "explanation", in: database) {
-                    try execute(database, "ALTER TABLE dictionary_entries ADD COLUMN explanation TEXT")
-                }
-                try execute(database, "CREATE INDEX IF NOT EXISTS dictionary_source_language ON dictionary_entries(source, translation_language)")
-                let defaultName = "My words".replacingOccurrences(of: "'", with: "''")
-                try execute(database, "INSERT OR IGNORE INTO word_lists (id, name, created_at) VALUES (\(WordList.defaultID), '\(defaultName)', strftime('%s', 'now'))")
-                try execute(database, "INSERT OR IGNORE INTO card_lists (card_id, list_id, added_at) SELECT id, \(WordList.defaultID), created_at FROM personal_cards WHERE NOT EXISTS (SELECT 1 FROM card_lists)")
-                try createDictionaryTriggers(database)
-                migratedVersion = 1
-            }
-            guard migratedVersion == latestSchemaVersion else {
-                throw LocalStoreError.sqlite("Missing migration to schema version \(latestSchemaVersion)")
-            }
-            try execute(database, "PRAGMA user_version = \(migratedVersion)")
-            try execute(database, "COMMIT")
-        } catch {
-            try? execute(database, "ROLLBACK")
-            throw error
-        }
     }
 
     private func insertDictionaryEntry(_ entry: DictionaryEntry) throws {
@@ -1155,45 +1062,6 @@ public actor LocalStore {
         }
     }
 
-    private static func table(_ table: String, hasColumn column: String, in database: OpaquePointer?) throws -> Bool {
-        var statement: OpaquePointer?
-        guard sqlite3_prepare_v2(database, "PRAGMA table_info(\(table))", -1, &statement, nil) == SQLITE_OK else {
-            throw LocalStoreError.sqlite(database.map { String(cString: sqlite3_errmsg($0)) } ?? "unknown error")
-        }
-        defer { sqlite3_finalize(statement) }
-        while sqlite3_step(statement) == SQLITE_ROW {
-            guard let value = sqlite3_column_text(statement, 1) else { continue }
-            if String(cString: value) == column { return true }
-        }
-        return false
-    }
-
-    private static func schemaVersion(in database: OpaquePointer?) throws -> Int {
-        var statement: OpaquePointer?
-        guard sqlite3_prepare_v2(database, "PRAGMA user_version", -1, &statement, nil) == SQLITE_OK else {
-            throw LocalStoreError.sqlite(database.map { String(cString: sqlite3_errmsg($0)) } ?? "unknown error")
-        }
-        defer { sqlite3_finalize(statement) }
-        guard sqlite3_step(statement) == SQLITE_ROW else {
-            throw LocalStoreError.sqlite("Could not read the database schema version")
-        }
-        return Int(sqlite3_column_int(statement, 0))
-    }
-
-    private static func createDictionaryTriggers(_ database: OpaquePointer?) throws {
-        try execute(database, """
-            CREATE TRIGGER IF NOT EXISTS dictionary_ai AFTER INSERT ON dictionary_entries BEGIN
-              INSERT INTO dictionary_fts(rowid, german, english) VALUES (new.id, new.normalized_german, new.normalized_english);
-            END;
-            CREATE TRIGGER IF NOT EXISTS dictionary_ad AFTER DELETE ON dictionary_entries BEGIN
-              INSERT INTO dictionary_fts(dictionary_fts, rowid, german, english) VALUES ('delete', old.id, old.normalized_german, old.normalized_english);
-            END;
-            CREATE TRIGGER IF NOT EXISTS dictionary_au AFTER UPDATE ON dictionary_entries BEGIN
-              INSERT INTO dictionary_fts(dictionary_fts, rowid, german, english) VALUES ('delete', old.id, old.normalized_german, old.normalized_english);
-              INSERT INTO dictionary_fts(rowid, german, english) VALUES (new.id, new.normalized_german, new.normalized_english);
-            END;
-            """)
-    }
 }
 
 private struct DictionaryGroupKey: Hashable {

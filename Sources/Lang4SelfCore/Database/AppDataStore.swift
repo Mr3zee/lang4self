@@ -41,7 +41,7 @@ public protocol SentenceStoring: Sendable {
 public protocol StudyStoring: Sendable {
     func dueCards(listID: Int64, limit: Int, now: Date) async throws -> [PersonalCard]
     func reviewCards(listID: Int64) async throws -> [PersonalCard]
-    func review(card: PersonalCard, rating: ReviewRating, now: Date) async throws -> PersonalCard
+    func review(card: PersonalCard, rating: ReviewRating, now: Date, calendar: Calendar) async throws -> PersonalCard
     func stats(listID: Int64, now: Date, calendar: Calendar) async throws -> StudyStats
 }
 
@@ -102,7 +102,7 @@ public extension StudyStoring {
     }
 
     func review(card: PersonalCard, rating: ReviewRating) async throws -> PersonalCard {
-        try await review(card: card, rating: rating, now: .now)
+        try await review(card: card, rating: rating, now: .now, calendar: .current)
     }
 
     func stats(listID: Int64) async throws -> StudyStats {

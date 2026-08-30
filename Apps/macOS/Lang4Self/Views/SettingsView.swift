@@ -226,7 +226,7 @@ struct SettingsView: View {
                 }
 
                 settingsSection("Local data", symbol: "internaldrive") {
-                    Text(state.store.databaseURL.path)
+                    Text(state.databaseURL.path)
                         .font(.caption.monospaced())
                         .textSelection(.enabled)
                         .foregroundStyle(.secondary)

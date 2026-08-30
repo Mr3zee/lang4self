@@ -120,16 +120,25 @@ final class Lang4SelfUITests: XCTestCase {
 
     func testSpeakRecordingControlAndConfirmationAreKeyboardOperable() {
         openRoute("2", route: "speak")
-        XCTAssertTrue(app.buttons["speak.record"].waitForExistence(timeout: 3))
+        let recordButton = app.buttons["speak.record"]
+        XCTAssertTrue(recordButton.waitForExistence(timeout: 3))
 
-        app.buttons["speak.record"].click()
-        XCTAssertEqual(app.buttons["speak.record"].label, "Stop recording")
-        app.buttons["speak.record"].click()
+        waitForUIToSettle()
+        app.typeKey(.space, modifierFlags: [])
         XCTAssertTrue(app.buttons["speak.confirm"].waitForExistence(timeout: 3))
         app.typeKey(.return, modifierFlags: [])
         XCTAssertTrue(app.buttons["banner.dismiss"].waitForExistence(timeout: 3))
 
-        app.typeKey(.space, modifierFlags: [])
+        waitForUIToSettle()
+        let idleFrame = recordButton.frame
+
+        recordButton.click()
+        XCTAssertEqual(recordButton.label, "Stop recording")
+        waitForUIToSettle()
+        XCTAssertEqual(recordButton.frame.width, idleFrame.width, accuracy: 1)
+        XCTAssertEqual(recordButton.frame.midX, idleFrame.midX, accuracy: 1)
+
+        recordButton.click()
         XCTAssertTrue(app.buttons["speak.confirm"].waitForExistence(timeout: 3))
     }
 
