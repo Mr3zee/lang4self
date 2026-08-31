@@ -1868,8 +1868,9 @@ public actor LocalStore {
         let explanations = try dictionaryExplanations(for: canonical)
         let forms = try dictionaryForms(for: canonical.german, kind: canonical.kind)
         let reference = try dictionaryReference(for: canonical.german)
-        let pluralForms = pluralEntries.reduce(into: [String]()) { forms, entry in
-            if !forms.contains(entry.german) { forms.append(entry.german) }
+        let pluralForms = (baseEntries.flatMap(GermanMorphology.pluralForms) + pluralEntries.map(\.german))
+            .reduce(into: [String]()) { forms, form in
+                if !forms.contains(form) { forms.append(form) }
         }
         let allSources = explanations.reduce(into: sources) { result, explanation in
             if !result.contains(explanation.source) { result.append(explanation.source) }
@@ -2143,6 +2144,7 @@ public actor LocalStore {
                 lapses: Int(sqlite3_column_int(statement, 15)),
                 isStarred: sqlite3_column_int(statement, 16) != 0,
                 isSuspended: sqlite3_column_int(statement, 17) != 0,
+                pluralForms: indexedEntry?.pluralForms ?? [],
                 forms: try indexedEntry?.forms ?? dictionaryForms(for: storedGerman, kind: storedKind),
                 meanings: indexedEntry?.meanings ?? storedMeanings
             ))

@@ -76,12 +76,20 @@ final class UITestingDictionaryTranslator: DictionaryTranslating {
     var phaseDidChange: ((DictionaryTranslationPhase) -> Void)?
 
     func translateGermanToEnglish(_ text: String) async throws -> String? {
-        guard text == "Dieser Satz wird lokal übersetzt." else { return nil }
+        let translation: String
+        switch text {
+        case "Dieser Satz wird lokal übersetzt.":
+            translation = "This sentence is translated locally."
+        case "Donaudampfschifffahrtsgesellschaftskapitän":
+            translation = "Danube steamship company captain"
+        default:
+            return nil
+        }
         defer { phaseDidChange?(.idle) }
         phaseDidChange?(.downloadingLanguages)
         try await Task.sleep(for: .seconds(1))
         phaseDidChange?(.translating)
-        return "This sentence is translated locally."
+        return translation
     }
 }
 

@@ -635,6 +635,16 @@ final class LocalStoreTests: XCTestCase {
             }
         }
 
+        let topicEntries = try await store.searchDictionary("Thema")
+        let topicEntry = try XCTUnwrap(topicEntries.first)
+        _ = try await store.addCard(from: topicEntry)
+        let storedCards = try await store.cards()
+        let topicCard = try XCTUnwrap(storedCards.first { $0.german == "Thema" })
+        XCTAssertEqual(Set(topicCard.pluralForms), Set(["Themata", "Themen"]))
+        XCTAssertTrue(try XCTUnwrap(
+            ReviewChallenge(card: topicCard, mode: .plural)
+        ).accepts("Themen"))
+
         let russianPluralResults = try await store.searchDictionary("собаки")
         let dog = try XCTUnwrap(russianPluralResults.first)
         XCTAssertEqual(dog.german, "Hund")

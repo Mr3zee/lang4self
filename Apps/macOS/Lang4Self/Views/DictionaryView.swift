@@ -6,6 +6,7 @@ struct DictionaryView: View {
     @EnvironmentObject private var state: AppState
     @EnvironmentObject private var speech: SpeechRecognizer
     @EnvironmentObject private var voiceSearchShortcut: VoiceSearchShortcutController
+    @EnvironmentObject private var germanSpeech: GermanSpeechController
     @State private var isManualRecording = false
     @State private var isShowingAddedListSelection = false
     @FocusState private var focusedControl: FocusControl?
@@ -92,6 +93,7 @@ struct DictionaryView: View {
             if !speech.transcription.isEmpty {
                 state.search(speech.transcription, immediate: true, selectFirstResult: true)
             }
+            updateGermanSpeechTarget()
             guard automaticallyFocusContent else { return }
             DispatchQueue.main.async { focusedControl = .record }
         }
@@ -99,7 +101,23 @@ struct DictionaryView: View {
             voiceSearchShortcut.dictionaryTextSearchFocusChanged(isFocused: false)
             releaseRecordingHolds()
             speech.reset()
+            germanSpeech.setTarget(nil, in: .dictionary)
         }
+        .onChange(of: displayedGermanForSpeech) { _, _ in updateGermanSpeechTarget() }
+    }
+
+    private var displayedGermanForSpeech: String? {
+        if !state.isSearchingDictionary,
+           !state.searchQuery.isEmpty,
+           !state.searchResults.isEmpty,
+           let selectedEntry = state.selectedEntry {
+            return selectedEntry.german
+        }
+        return speech.transcription.isEmpty ? nil : speech.transcription
+    }
+
+    private func updateGermanSpeechTarget() {
+        germanSpeech.setTarget(displayedGermanForSpeech, in: .dictionary)
     }
 
     private var textSearch: some View {
@@ -161,12 +179,12 @@ struct DictionaryView: View {
             Group {
                 if !speech.transcription.isEmpty {
                     VStack(spacing: 7) {
-                        Text(speech.transcription)
+                        Text(GermanTextPresentation.hyphenated(speech.transcription))
                             .font(.system(size: 34, weight: .bold, design: .rounded))
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.65)
+                            .fixedSize(horizontal: false, vertical: true)
                             .frame(maxWidth: 520)
                             .textSelection(.enabled)
+                            .accessibilityLabel(speech.transcription)
                             .accessibilityIdentifier("dictionary.voice-transcription")
                         if speech.hasMultipleAlternatives, let position = speech.alternativePosition {
                             HStack(spacing: 10) {
@@ -201,7 +219,7 @@ struct DictionaryView: View {
                         .frame(maxWidth: 520)
                 }
             }
-            .frame(height: 64)
+            .frame(minHeight: 64)
 
             speechControls
         }

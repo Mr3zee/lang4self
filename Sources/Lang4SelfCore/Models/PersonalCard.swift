@@ -51,6 +51,7 @@ public struct PersonalCard: Identifiable, Hashable, Codable, Sendable {
     public var lapses: Int
     public var isStarred: Bool
     public var isSuspended: Bool
+    public var pluralForms: [String]
     public var forms: [DictionaryForm]
     public var meanings: [DictionaryMeaning]?
 
@@ -83,6 +84,7 @@ public struct PersonalCard: Identifiable, Hashable, Codable, Sendable {
         lapses: Int = 0,
         isStarred: Bool = false,
         isSuspended: Bool = false,
+        pluralForms: [String] = [],
         forms: [DictionaryForm] = [],
         meanings: [DictionaryMeaning]? = nil
     ) {
@@ -104,6 +106,7 @@ public struct PersonalCard: Identifiable, Hashable, Codable, Sendable {
         self.lapses = lapses
         self.isStarred = isStarred
         self.isSuspended = isSuspended
+        self.pluralForms = pluralForms
         self.forms = forms
         self.meanings = meanings
     }

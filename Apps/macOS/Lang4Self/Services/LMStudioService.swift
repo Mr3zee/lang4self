@@ -140,7 +140,8 @@ protocol SentenceGenerating: AnyObject {
         vocabulary: [PersonalCard],
         count requestedCount: Int,
         options requestedOptions: SentenceGenerationOptions,
-        settings requestedSettings: LMStudioSettings
+        settings requestedSettings: LMStudioSettings,
+        excluding excludedSentences: [String]
     ) async throws -> [SentenceDraft]
     func installedModels() async throws -> [LMStudioModel]
     func shutdown() async
@@ -178,9 +179,10 @@ final class LMStudioService: SentenceGenerating {
         vocabulary: [PersonalCard],
         count requestedCount: Int,
         options requestedOptions: SentenceGenerationOptions,
-        settings requestedSettings: LMStudioSettings
+        settings requestedSettings: LMStudioSettings,
+        excluding excludedSentences: [String] = []
     ) async throws -> [SentenceDraft] {
-        let count = min(max(requestedCount, 1), 10)
+        let count = min(max(requestedCount, 1), 5)
         let options = requestedOptions.sanitized
         let settings = requestedSettings.sanitized
         let safeVocabulary = Array(vocabulary.prefix(600))
@@ -203,7 +205,7 @@ final class LMStudioService: SentenceGenerating {
                             contract: contract,
                             count: missingCount,
                             settings: settings,
-                            excluding: drafts.map(\.german),
+                            excluding: excludedSentences + drafts.map(\.german),
                             structured: true
                         )
                     } catch LMStudioError.api(let status, _) where status == 400 || status == 422 {
@@ -211,14 +213,16 @@ final class LMStudioService: SentenceGenerating {
                             contract: contract,
                             count: missingCount,
                             settings: settings,
-                            excluding: drafts.map(\.german),
+                            excluding: excludedSentences + drafts.map(\.german),
                             structured: false
                         )
                     }
                 } catch LMStudioError.invalidResponse where attempt < 2 {
                     continue
                 }
-                let seen = Set(drafts.map { SentenceTokenizer.normalized($0.german) })
+                let seen = Set((excludedSentences + drafts.map(\.german)).map {
+                    SentenceTokenizer.normalized($0)
+                })
                 drafts += validator.validatedDrafts(
                     from: response,
                     limit: missingCount,

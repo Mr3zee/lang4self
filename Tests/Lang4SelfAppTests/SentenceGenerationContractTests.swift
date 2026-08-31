@@ -92,6 +92,9 @@ final class SentenceGenerationContractTests: XCTestCase {
 
         XCTAssertTrue(contract.systemPrompt(count: 2).contains("at C1 CEFR level"))
         XCTAssertTrue(contract.systemPrompt(count: 2).contains("7-9 words"))
+        XCTAssertTrue(contract.systemPrompt(count: 2).contains("Full output JSON Schema:"))
+        XCTAssertTrue(contract.systemPrompt(count: 2).contains("Example sentence item 1"))
+        XCTAssertTrue(contract.systemPrompt(count: 2).contains("Example sentence item 2"))
         XCTAssertTrue(try contract.userPrompt(excluding: []).contains(#""style":"formal newspaper report""#))
         XCTAssertEqual(
             GeneratedSentenceValidator(vocabulary: vocabulary, options: options)

@@ -1,5 +1,53 @@
+import CoreFoundation
+import Foundation
 import SwiftUI
 import Lang4SelfCore
+
+enum GermanTextPresentation {
+    static let softHyphen = "\u{00AD}"
+
+    static func hyphenated(_ text: String) -> String {
+        let plainText = text.replacingOccurrences(of: softHyphen, with: "")
+        guard plainText.utf16.count > 3 else { return plainText }
+
+        let locale = CFLocaleCreate(
+            kCFAllocatorDefault,
+            CFLocaleIdentifier(rawValue: "de_DE" as CFString)
+        )
+        guard CFStringIsHyphenationAvailableForLocale(locale) else { return plainText }
+
+        let source = plainText as CFString
+        var hyphenationLocations: [Int] = []
+        plainText.enumerateSubstrings(
+            in: plainText.startIndex..<plainText.endIndex,
+            options: .byWords
+        ) { _, wordRange, _, _ in
+            let range = NSRange(wordRange, in: plainText)
+            let limit = CFRange(location: range.location, length: range.length)
+            var searchLocation = NSMaxRange(range)
+
+            while searchLocation > range.location {
+                let location = CFStringGetHyphenationLocationBeforeIndex(
+                    source,
+                    searchLocation,
+                    limit,
+                    0,
+                    locale,
+                    nil
+                )
+                guard location != kCFNotFound, location > range.location else { break }
+                hyphenationLocations.append(location)
+                searchLocation = location
+            }
+        }
+
+        let result = NSMutableString(string: plainText)
+        for location in hyphenationLocations.sorted(by: >) {
+            result.insert(softHyphen, at: location)
+        }
+        return result as String
+    }
+}
 
 extension Gender {
     var color: Color {
@@ -24,6 +72,7 @@ struct GenderBadge: View {
                 .padding(.horizontal, 7)
                 .padding(.vertical, 3)
                 .background(gender.color.opacity(0.12), in: Capsule())
+                .fixedSize()
                 .accessibilityLabel("Gender: \(gender.article)")
         }
     }
@@ -39,6 +88,7 @@ struct TranslationLanguageBadge: View {
             .padding(.horizontal, 5)
             .padding(.vertical, 2)
             .background(.quaternary, in: Capsule())
+            .fixedSize()
             .accessibilityLabel(language.label)
     }
 }
@@ -106,6 +156,7 @@ struct PartOfSpeechBadge: View {
             .padding(.horizontal, 6)
             .padding(.vertical, 2)
             .background(.quaternary, in: Capsule())
+            .fixedSize()
             .accessibilityLabel("Part of speech: \(kind.label)")
     }
 }
@@ -119,6 +170,7 @@ struct TranslationResultBadge: View {
             .padding(.horizontal, 6)
             .padding(.vertical, 2)
             .background(.blue.opacity(0.12), in: Capsule())
+            .fixedSize()
             .accessibilityLabel("Apple on-device translation")
             .accessibilityIdentifier("entry.translation-result")
     }
@@ -129,25 +181,29 @@ struct GermanWordView: View {
     var font: Font = .headline
 
     var body: some View {
-        HStack(spacing: 5) {
+        HStack(alignment: .firstTextBaseline, spacing: 5) {
             if entry.gender != .unknown {
                 Text(entry.gender.article.replacingOccurrences(of: " (plural)", with: ""))
                     .foregroundStyle(entry.gender.color)
                     .fontWeight(.semibold)
+                    .fixedSize()
             }
             if let parts = GermanMorphology.separableParts(for: entry) {
-                (Text(parts.prefix).fontWeight(.semibold)
+                (Text(GermanTextPresentation.hyphenated(parts.prefix)).fontWeight(.semibold)
                     + Text("·").foregroundStyle(.secondary)
-                    + Text(parts.stem))
+                    + Text(GermanTextPresentation.hyphenated(parts.stem)))
             } else {
-                Text(entry.german)
+                Text(GermanTextPresentation.hyphenated(entry.german))
                     .foregroundStyle(
                         entry.kind == .noun && entry.gender != .unknown ? entry.gender.color : .primary
                     )
             }
         }
         .font(font)
+        .fixedSize(horizontal: false, vertical: true)
         .textSelection(.enabled)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(entry.german)
     }
 }
 
@@ -159,6 +215,7 @@ struct GermanSentenceText: View {
 
     var body: some View {
         styledText
+            .fixedSize(horizontal: false, vertical: true)
             .accessibilityLabel(german)
             .task(id: tokens) {
                 genders = await state.sentenceGenders(for: tokens)
@@ -166,16 +223,52 @@ struct GermanSentenceText: View {
     }
 
     private var styledText: Text {
-        guard !tokens.isEmpty else { return Text(german) }
+        guard !tokens.isEmpty else { return Text(GermanTextPresentation.hyphenated(german)) }
         return tokens.enumerated().reduce(Text("")) { text, item in
             let (offset, token) = item
             let prefix = offset == 0 ? "" : " "
-            var segment = Text(prefix + token.surface)
+            var segment = Text(prefix + GermanTextPresentation.hyphenated(token.surface))
             if let gender = genders[token.index] {
                 segment = segment.foregroundColor(gender.color)
             }
             return text + segment
         }
+    }
+}
+
+struct GermanPronunciationHint: View {
+    @EnvironmentObject private var speech: GermanSpeechController
+    let german: String
+    var ipa: String?
+
+    var body: some View {
+        HStack(spacing: 8) {
+            if let ipa {
+                Text("IPA")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(.tertiary)
+                Text(ipa)
+                    .textSelection(.enabled)
+                    .accessibilityLabel("Pronunciation: \(ipa)")
+                    .accessibilityIdentifier("entry.ipa")
+            }
+
+            Button {
+                speech.speak(german)
+            } label: {
+                Label("Listen", systemImage: "speaker.wave.2.fill")
+            }
+            .buttonStyle(.borderless)
+            .help("Play German pronunciation — press Shift twice")
+            .accessibilityLabel("Play German pronunciation")
+            .accessibilityIdentifier("pronunciation.play")
+
+            KeyboardShortcutHint(.doubleShift)
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+                .accessibilityIdentifier("pronunciation.shortcut")
+        }
+        .fixedSize(horizontal: true, vertical: false)
     }
 }
 
@@ -199,12 +292,18 @@ struct EntryRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 7) {
-                GermanWordView(entry: entry)
-                if entry.isAppleTranslation {
-                    TranslationResultBadge()
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 7) {
+                    GermanWordView(entry: entry)
+                        .fixedSize()
+                    entryBadges
                 }
-                PartOfSpeechBadge(kind: entry.kind)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    GermanWordView(entry: entry)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    entryBadges
+                }
             }
 
             ForEach(TranslationLanguage.allCases, id: \.self) { language in
@@ -213,7 +312,7 @@ struct EntryRow: View {
                     HStack(spacing: 6) {
                         TranslationLanguageBadge(language: language)
                         Text(meaning.translation)
-                            .lineLimit(1)
+                            .fixedSize(horizontal: false, vertical: true)
                         if entry.gender == .unknown, meaning.gender != .unknown {
                             GenderBadge(gender: meaning.gender)
                         }
@@ -244,6 +343,15 @@ struct EntryRow: View {
         }
         .padding(.vertical, 4)
         .accessibilityElement(children: .contain)
+    }
+
+    private var entryBadges: some View {
+        HStack(spacing: 7) {
+            if entry.isAppleTranslation {
+                TranslationResultBadge()
+            }
+            PartOfSpeechBadge(kind: entry.kind)
+        }
     }
 }
 
@@ -302,17 +410,19 @@ struct EntryDetailView: View {
             VStack(alignment: .leading, spacing: 22) {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(alignment: .top, spacing: 16) {
-                        HStack(spacing: 9) {
+                        VStack(alignment: .leading, spacing: 8) {
                             GermanWordView(entry: entry, font: .largeTitle.weight(.bold))
-                                .lineLimit(1)
-                                .layoutPriority(1)
+                                .frame(maxWidth: .infinity, alignment: .leading)
                                 .accessibilityIdentifier("entry.word")
-                            if entry.isAppleTranslation {
-                                TranslationResultBadge()
+
+                            HStack(spacing: 9) {
+                                if entry.isAppleTranslation {
+                                    TranslationResultBadge()
+                                }
+                                PartOfSpeechBadge(kind: entry.kind)
                             }
-                            PartOfSpeechBadge(kind: entry.kind)
-                                .fixedSize()
                         }
+                        .frame(maxWidth: .infinity, alignment: .leading)
                         .layoutPriority(1)
 
                         Spacer(minLength: 8)
@@ -383,14 +493,7 @@ struct EntryDetailView: View {
                     meanings
                     HStack {
                         GenderBadge(gender: entry.gender)
-                        if let ipa = entry.ipa {
-                            Text(ipa)
-                                .font(.title3)
-                                .foregroundStyle(.secondary)
-                                .textSelection(.enabled)
-                                .accessibilityLabel("Pronunciation: \(ipa)")
-                                .accessibilityIdentifier("entry.ipa")
-                        }
+                        GermanPronunciationHint(german: entry.german, ipa: entry.ipa)
                     }
                 }
 
@@ -533,9 +636,10 @@ struct EntryDetailView: View {
                     Text(row.label)
                         .foregroundStyle(.secondary)
                         .gridColumnAlignment(.trailing)
-                    Text(row.value)
+                    Text(GermanTextPresentation.hyphenated(row.value))
                         .fontWeight(.medium)
                         .foregroundStyle(infoColor(for: row))
+                        .fixedSize(horizontal: false, vertical: true)
                         .textSelection(.enabled)
                 }
             }
@@ -629,8 +733,9 @@ struct EntryDetailView: View {
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
                         Text(form.relation.capitalized)
                             .foregroundStyle(.secondary)
-                        Text(form.word)
+                        Text(GermanTextPresentation.hyphenated(form.word))
                             .fontWeight(.medium)
+                            .fixedSize(horizontal: false, vertical: true)
                             .textSelection(.enabled)
                     }
                 }
@@ -677,8 +782,9 @@ struct EntryDetailView: View {
                     Text(row.label.uppercased())
                         .font(.caption2.weight(.bold))
                         .foregroundStyle(.secondary)
-                    Text(row.value)
+                    Text(GermanTextPresentation.hyphenated(row.value))
                         .font(.title3.weight(.semibold))
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 .padding(12)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -694,10 +800,11 @@ struct EntryDetailView: View {
                 LazyVStack(alignment: .leading, spacing: 7) {
                     ForEach(entry.forms) { form in
                         HStack(alignment: .firstTextBaseline, spacing: 12) {
-                            Text(form.form)
+                            Text(GermanTextPresentation.hyphenated(form.form))
                                 .fontWeight(.medium)
+                                .fixedSize(horizontal: false, vertical: true)
                                 .textSelection(.enabled)
-                                .frame(minWidth: 120, alignment: .leading)
+                                .frame(minWidth: 120, maxWidth: .infinity, alignment: .leading)
                             Text(form.tags.sorted().joined(separator: " · "))
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
@@ -963,6 +1070,7 @@ struct ShortcutPresentation: Hashable {
 
     static let returnKey = ShortcutPresentation(chords: [.init(.returnKey)])
     static let commandF = ShortcutPresentation(chords: [.init(.command, .letter("F"))])
+    static let doubleShift = ShortcutPresentation(chords: [.init(.shift), .init(.shift)])
 
     var accessibilityName: String {
         let separatorName = switch separator {
@@ -1071,6 +1179,7 @@ struct AppShortcut: Identifiable {
         .init(id: "global.find", group: .global, shortcut: .commandF, action: "Focus search in Dictionary or My Words; open Dictionary elsewhere"),
         .init(id: "global.help", group: .global, shortcut: .init(chords: [.init(.command, .slash), .init(.command, .questionMark)], separator: .alternatives), action: "Show this keyboard shortcut reference"),
         .init(id: "global.voice-search", group: .global, shortcut: .init(chords: [.init(.space)], hold: true), action: "Open Dictionary and search by voice when not typing"),
+        .init(id: "global.pronunciation", group: .global, shortcut: .doubleShift, action: "Play the displayed German word or sentence"),
         .init(id: "global.focus", group: .global, shortcut: .init(chords: [.init(.tab), .init(.shift, .tab)]), action: "Move focus forward or backward"),
         .init(id: "dictionary.navigate", group: .dictionary, shortcut: .init(chords: [.init(.up), .init(.down)]), action: "Move through search results"),
         .init(id: "dictionary.results", group: .dictionary, shortcut: .returnKey, action: "Move from search into its results; press again to add"),
@@ -1079,6 +1188,7 @@ struct AppShortcut: Identifiable {
         .init(id: "dictionary.voice-search", group: .dictionary, shortcut: .init(chords: [.init(.space)], hold: true), action: "Search spoken German when focus is outside the text field"),
         .init(id: "dictionary.voice-alternatives", group: .dictionary, shortcut: .init(chords: [.init(.command, .leftBracket), .init(.command, .rightBracket)]), action: "Cycle through voice recognition results"),
         .init(id: "review.reveal", group: .review, shortcut: .init(chords: [.init(.space)]), action: "Reveal the current answer or restart after completion"),
+        .init(id: "review.mode", group: .review, shortcut: .init(chords: [.init(.command, .leftBracket), .init(.command, .rightBracket)]), action: "Switch review mode"),
         .init(id: "review.translation", group: .review, shortcut: .init(chords: [.init(.left), .init(.right)]), action: "Move between translations in the current language"),
         .init(id: "review.language", group: .review, shortcut: .init(chords: [.init(.up), .init(.down)]), action: "Move between translation languages"),
         .init(id: "review.rate", group: .review, shortcut: .init(chords: [.init(.digit(1)), .init(.digit(4))], separator: .range), action: "Rate Again, Hard, Good, or Easy after revealing"),

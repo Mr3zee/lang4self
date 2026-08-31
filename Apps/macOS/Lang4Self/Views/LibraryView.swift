@@ -3,6 +3,7 @@ import Lang4SelfCore
 
 struct LibraryView: View {
     @EnvironmentObject private var state: AppState
+    @EnvironmentObject private var germanSpeech: GermanSpeechController
     @State private var selectedID: PersonalCard.ID?
     @State private var editingCard: PersonalCard?
     @State private var listEditor: ListEditorRequest?
@@ -138,8 +139,11 @@ struct LibraryView: View {
         }
         .onAppear {
             state.loadLibrary()
+            updateGermanSpeechTarget()
             if automaticallyFocusContent { focusCardList() }
         }
+        .onDisappear { germanSpeech.setTarget(nil, in: .library) }
+        .onChange(of: selectedID) { _, _ in updateGermanSpeechTarget() }
         .onReceive(NotificationCenter.default.publisher(for: .focusLibrarySearch)) { _ in
             state.route = .library
             focusedArea = .search
@@ -297,6 +301,10 @@ struct LibraryView: View {
         selectedID = first.id
         focusedArea = nil
         DispatchQueue.main.async { focusedArea = .cards }
+    }
+
+    private func updateGermanSpeechTarget() {
+        germanSpeech.setTarget(selected?.german, in: .library)
     }
 
     private func entry(for card: PersonalCard) -> DictionaryEntry {

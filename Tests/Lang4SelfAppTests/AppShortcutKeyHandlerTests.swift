@@ -77,6 +77,34 @@ final class AppShortcutKeyHandlerTests: XCTestCase {
         XCTAssertEqual(undoCount, 0)
     }
 
+    func testCommandBracketsCycleReviewModesWhileEditingText() {
+        var offsets: [Int] = []
+        let handler = AppShortcutKeyHandler(
+            openSettings: {},
+            showKeyboardShortcuts: {},
+            cycleReviewMode: {
+                offsets.append($0)
+                return true
+            },
+            isEditingText: { true }
+        )
+
+        XCTAssertNil(handler.handle(keyEvent(characters: "[", modifiers: .command)))
+        XCTAssertNil(handler.handle(keyEvent(characters: "]", modifiers: .command)))
+        XCTAssertEqual(offsets, [-1, 1])
+    }
+
+    func testCommandBracketsRemainAvailableOutsideReview() {
+        let handler = AppShortcutKeyHandler(
+            openSettings: {},
+            showKeyboardShortcuts: {},
+            cycleReviewMode: { _ in false }
+        )
+        let event = keyEvent(characters: "]", modifiers: .command)
+
+        XCTAssertIdentical(handler.handle(event), event)
+    }
+
     private func keyEvent(characters: String, modifiers: NSEvent.ModifierFlags) -> NSEvent {
         NSEvent.keyEvent(
             with: .keyDown,

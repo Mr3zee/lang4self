@@ -3,7 +3,13 @@ import Lang4SelfCore
 
 struct ReviewView: View {
     @EnvironmentObject private var state: AppState
+    @EnvironmentObject private var speech: SpeechRecognizer
+    @EnvironmentObject private var germanSpeech: GermanSpeechController
+    @State private var mode = ReviewTestMode.flashcard
     @State private var revealed = false
+    @State private var answer = ""
+    @State private var submittedAnswer: String?
+    @State private var answerWasCorrect: Bool?
     @State private var translations = ReviewTranslationCarousel()
     @State private var carouselWordIDs = CarouselWordIDs()
     @FocusState private var focusedAction: FocusedAction?
@@ -12,6 +18,9 @@ struct ReviewView: View {
     private enum FocusedAction: Hashable {
         case carousel
         case reveal
+        case answer
+        case speech
+        case gender(Int)
         case rating(Int)
         case restart
     }
@@ -78,7 +87,13 @@ struct ReviewView: View {
         }
     }
 
-    private var current: PersonalCard? { state.reviewCards.first }
+    private var current: PersonalCard? {
+        state.reviewCards.first { ReviewChallenge(card: $0, mode: mode) != nil }
+    }
+
+    private var challenge: ReviewChallenge? {
+        current.flatMap { ReviewChallenge(card: $0, mode: mode) }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -88,25 +103,19 @@ struct ReviewView: View {
             if let card = current {
                 VStack(spacing: 24) {
                     Spacer()
-                    Text("TRANSLATIONS → GERMAN")
+                    Text(mode.title.uppercased())
                         .font(.caption.weight(.bold))
                         .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("review.mode-title")
                     PartOfSpeechBadge(kind: card.kind)
                         .accessibilityIdentifier("review.part-of-speech")
-                    translationCarousel
+                    prompt(for: card)
 
                     if revealed {
                         Divider().frame(maxWidth: 460)
-                        GermanWordView(entry: entry(for: card), font: .system(size: 32, weight: .bold))
-                        compactInfo(for: card)
+                        revealedAnswer(for: card)
                     } else {
-                        Button("Show answer  Space") { revealed = true }
-                            .buttonStyle(.borderedProminent)
-                            .controlSize(.large)
-                            .keyboardShortcut(.space, modifiers: [])
-                            .focusable()
-                            .focused($focusedAction, equals: .reveal)
-                            .accessibilityIdentifier("review.reveal")
+                        responseControl
                     }
                     Spacer()
 
@@ -117,10 +126,10 @@ struct ReviewView: View {
                 VStack(spacing: 0) {
                     PlaceholderView(
                         symbol: "checkmark.circle",
-                        title: state.isReviewingAll ? "Review complete" : "All caught up",
+                        title: emptyReviewTitle,
                         detail: emptyReviewDetail
                     )
-                    if state.stats.totalCards > 0 {
+                    if state.reviewCards.isEmpty, state.stats.totalCards > 0 {
                         Button(state.isReviewingAll ? "Review All Again" : "Review All Cards") {
                             state.startReviewAll()
                         }
@@ -148,16 +157,34 @@ struct ReviewView: View {
         .onAppear {
             Task { await state.refreshStudyData() }
             resetTranslations(for: current)
+            updateGermanSpeechTarget()
             if automaticallyFocusContent { focusPrimaryAction() }
         }
-        .onDisappear { state.stopPreparingReviewTranslations() }
+        .onDisappear {
+            state.stopPreparingReviewTranslations()
+            speech.reset()
+            germanSpeech.setTarget(nil, in: .review)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .previousReviewMode)) { _ in
+            mode = mode.advanced(by: -1)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .nextReviewMode)) { _ in
+            mode = mode.advanced(by: 1)
+        }
         .onReceive(NotificationCenter.default.publisher(for: .focusReviewContent)) { _ in
             focusCarousel()
         }
         .onChange(of: current?.id) { _, _ in
-            revealed = false
+            resetResponse()
             resetTranslations(for: current)
             if automaticallyFocusContent || focusedAction != nil { focusPrimaryAction() }
+        }
+        .onChange(of: mode) { oldMode, _ in
+            if oldMode.usesSpeech { speech.reset() }
+            resetResponse()
+            resetTranslations(for: current)
+            updateGermanSpeechTarget()
+            focusPrimaryAction()
         }
         .onChange(of: state.reviewDictionaryMeanings) { _, meanings in
             guard let card = current,
@@ -165,15 +192,25 @@ struct ReviewView: View {
             else { return }
             translations.replace(cardEnglish: card.english, dictionaryMeanings: meanings)
         }
-        .onChange(of: state.selectedListID) { _, _ in revealed = false }
-        .onChange(of: state.isReviewingAll) { _, _ in revealed = false }
+        .onChange(of: state.selectedListID) { _, _ in resetResponse() }
+        .onChange(of: state.isReviewingAll) { _, _ in resetResponse() }
+        .onChange(of: speech.phase) { _, phase in
+            guard mode.usesSpeech,
+                  phase == .guess,
+                  !revealed,
+                  !speech.transcription.isEmpty
+            else { return }
+            submit(speech.transcription)
+        }
         .onChange(of: revealed) { _, isRevealed in
+            updateGermanSpeechTarget()
             DispatchQueue.main.async {
-                focusedAction = isRevealed ? .rating(ReviewRating.allCases.first?.rawValue ?? 1) : .reveal
+                focusedAction = isRevealed ? .rating(suggestedRating.rawValue) : primaryFocusedAction
             }
         }
         .onKeyPress(.leftArrow) {
-            guard translations.hasMultipleTranslations else { return .ignored }
+            guard mode.usesTranslationCarousel,
+                  translations.hasMultipleTranslations else { return .ignored }
             withAnimation(.snappy) {
                 translations.moveTranslation(by: -1)
                 carouselWordIDs.moveTranslation(by: -1)
@@ -181,7 +218,8 @@ struct ReviewView: View {
             return .handled
         }
         .onKeyPress(.rightArrow) {
-            guard translations.hasMultipleTranslations else { return .ignored }
+            guard mode.usesTranslationCarousel,
+                  translations.hasMultipleTranslations else { return .ignored }
             withAnimation(.snappy) {
                 translations.moveTranslation(by: 1)
                 carouselWordIDs.moveTranslation(by: 1)
@@ -189,7 +227,8 @@ struct ReviewView: View {
             return .handled
         }
         .onKeyPress(.upArrow) {
-            guard translations.hasMultipleLanguages else { return .ignored }
+            guard mode.usesTranslationCarousel,
+                  translations.hasMultipleLanguages else { return .ignored }
             withAnimation(.snappy) {
                 translations.moveLanguage(by: -1)
                 carouselWordIDs.moveLanguage(by: -1)
@@ -197,12 +236,182 @@ struct ReviewView: View {
             return .handled
         }
         .onKeyPress(.downArrow) {
-            guard translations.hasMultipleLanguages else { return .ignored }
+            guard mode.usesTranslationCarousel,
+                  translations.hasMultipleLanguages else { return .ignored }
             withAnimation(.snappy) {
                 translations.moveLanguage(by: 1)
                 carouselWordIDs.moveLanguage(by: 1)
             }
             return .handled
+        }
+        .onChange(of: current?.german) { _, _ in updateGermanSpeechTarget() }
+    }
+
+    @ViewBuilder
+    private func prompt(for card: PersonalCard) -> some View {
+        if mode.usesTranslationCarousel {
+            translationCarousel
+        } else {
+            VStack(spacing: 8) {
+                switch mode {
+                case .gender:
+                    Text("Choose the article")
+                        .font(.title3)
+                        .foregroundStyle(.secondary)
+                case .conjugation:
+                    Text("Present tense")
+                        .font(.title3)
+                        .foregroundStyle(.secondary)
+                case .plural:
+                    Text("Write the plural")
+                        .font(.title3)
+                        .foregroundStyle(.secondary)
+                case .germanToEnglish, .germanToEnglishWriting:
+                    Text("Translate into English")
+                        .font(.title3)
+                        .foregroundStyle(.secondary)
+                case .flashcard, .writing, .speaking:
+                    EmptyView()
+                }
+
+                Text(card.german)
+                    .font(.system(size: 36, weight: .bold, design: .rounded))
+                    .multilineTextAlignment(.center)
+                    .textSelection(.enabled)
+                    .accessibilityIdentifier("review.prompt")
+
+                if let pronoun = challenge?.conjugationPronoun {
+                    Text("\(pronoun) …")
+                        .font(.title2.weight(.semibold))
+                        .accessibilityIdentifier("review.conjugation-pronoun")
+                }
+
+                GermanPronunciationHint(german: card.german)
+            }
+            .frame(minHeight: 180)
+        }
+    }
+
+    @ViewBuilder
+    private var responseControl: some View {
+        if mode.requiresWrittenAnswer {
+            HStack(spacing: 10) {
+                TextField(writtenAnswerPlaceholder, text: $answer)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.title3)
+                    .focused($focusedAction, equals: .answer)
+                    .onSubmit { submit(answer) }
+                    .accessibilityIdentifier("review.answer")
+
+                Button("Check") { submit(answer) }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                    .disabled(answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .accessibilityIdentifier("review.check")
+            }
+            .frame(maxWidth: 520)
+        } else if mode.usesSpeech {
+            speechControl
+        } else if mode.usesGenderChoices {
+            HStack(spacing: 12) {
+                ForEach(Array(Self.genderChoices.enumerated()), id: \.offset) { index, gender in
+                    Button(gender.article) { submit(gender.article) }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.large)
+                        .frame(minWidth: 84)
+                        .focused($focusedAction, equals: .gender(index))
+                        .accessibilityIdentifier("review.gender.\(gender.rawValue)")
+                }
+            }
+        } else {
+            Button("Show answer  Space") { revealed = true }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .keyboardShortcut(.space, modifiers: [])
+                .focusable()
+                .focused($focusedAction, equals: .reveal)
+                .accessibilityIdentifier("review.reveal")
+        }
+    }
+
+    @ViewBuilder
+    private var speechControl: some View {
+        VStack(spacing: 10) {
+            if speech.hasRecordingPermission {
+                Button(speechControlTitle) { toggleSpeechRecognition() }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                    .disabled(speech.phase == .requestingPermission || speech.phase == .processing)
+                    .focused($focusedAction, equals: .speech)
+                    .accessibilityIdentifier("review.speech")
+            } else {
+                Button("Set up speech recognition") { speech.requestPermissions() }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                    .disabled(speech.phase == .requestingPermission)
+                    .focused($focusedAction, equals: .speech)
+                    .accessibilityIdentifier("review.speech-permission")
+            }
+
+            if !speech.transcription.isEmpty {
+                Text("Heard: \(speech.transcription)")
+                    .font(.headline)
+                    .accessibilityIdentifier("review.speech-transcription")
+            } else {
+                Text(speechStatusText)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("review.speech-status")
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func revealedAnswer(for card: PersonalCard) -> some View {
+        if let answerWasCorrect {
+            HStack(spacing: 6) {
+                Image(systemName: answerWasCorrect ? "checkmark.circle.fill" : "xmark.circle.fill")
+                    .accessibilityHidden(true)
+                Text(answerWasCorrect ? "Correct" : "Not quite")
+                    .accessibilityIdentifier("review.answer-result")
+            }
+            .font(.title3.weight(.semibold))
+            .foregroundStyle(answerWasCorrect ? .green : .red)
+
+            if !answerWasCorrect, let submittedAnswer {
+                Text("Your answer: \(submittedAnswer)")
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("review.submitted-answer")
+            }
+        }
+
+        switch mode {
+        case .flashcard, .writing, .speaking:
+            GermanWordView(entry: entry(for: card), font: .system(size: 32, weight: .bold))
+            GermanPronunciationHint(german: card.german)
+            compactInfo(for: card)
+
+        case .germanToEnglish, .germanToEnglishWriting:
+            Text(challenge?.acceptedAnswers.joined(separator: " · ") ?? card.english)
+                .font(.system(size: 32, weight: .bold, design: .rounded))
+                .multilineTextAlignment(.center)
+                .textSelection(.enabled)
+                .accessibilityIdentifier("review.correct-answer")
+
+        case .gender:
+            Text("\(challenge?.acceptedAnswers.first ?? card.gender.article) \(card.german)")
+                .font(.system(size: 32, weight: .bold, design: .rounded))
+                .accessibilityIdentifier("review.correct-answer")
+
+        case .conjugation:
+            Text("\(challenge?.conjugationPronoun ?? "") \(challenge?.acceptedAnswers.first ?? "")")
+                .font(.system(size: 32, weight: .bold, design: .rounded))
+                .accessibilityIdentifier("review.correct-answer")
+
+        case .plural:
+            Text(challenge?.acceptedAnswers.joined(separator: " · ") ?? "")
+                .font(.system(size: 32, weight: .bold, design: .rounded))
+                .accessibilityIdentifier("review.correct-answer")
         }
     }
 
@@ -387,6 +596,16 @@ struct ReviewView: View {
             .frame(maxWidth: 180)
             .accessibilityIdentifier("review.list-picker")
 
+            Picker("Mode", selection: $mode) {
+                ForEach(ReviewTestMode.allCases) { testMode in
+                    Text(testMode.title).tag(testMode)
+                }
+            }
+            .pickerStyle(.menu)
+            .frame(maxWidth: 230)
+            .help("Switch modes with Command-[ and Command-]")
+            .accessibilityIdentifier("review.mode")
+
             stat(state.stats.dueCards, "Due")
             stat(state.stats.reviewsToday, "Today")
             stat(state.stats.streakDays, "Day streak")
@@ -402,7 +621,21 @@ struct ReviewView: View {
         .padding(.vertical, 12)
     }
 
+    private var emptyReviewTitle: String {
+        if !state.reviewCards.isEmpty { return "No matching cards" }
+        return state.isReviewingAll ? "Review complete" : "All caught up"
+    }
+
     private var emptyReviewDetail: String {
+        if !state.reviewCards.isEmpty {
+            return switch mode {
+            case .gender: "No remaining nouns have a known singular gender. Switch modes with ⌘[ or ⌘]."
+            case .conjugation: "No remaining cards are verbs with a usable conjugation. Switch modes with ⌘[ or ⌘]."
+            case .plural: "No remaining nouns have a known plural. Switch modes with ⌘[ or ⌘]."
+            case .germanToEnglish, .germanToEnglishWriting: "No remaining cards have an English meaning. Switch modes with ⌘[ or ⌘]."
+            case .flashcard, .writing, .speaking: "No remaining cards can use this mode. Switch modes with ⌘[ or ⌘]."
+            }
+        }
         if state.stats.totalCards == 0 {
             return "Search for a word or phrase in Dictionary to start learning."
         }
@@ -448,7 +681,9 @@ struct ReviewView: View {
             ForEach(EntryDetailInfoRows.supplemental(from: info.rows).prefix(3)) { row in
                 HStack {
                     Text(row.label).foregroundStyle(.secondary)
-                    Text(row.value).fontWeight(.medium)
+                    Text(GermanTextPresentation.hyphenated(row.value))
+                        .fontWeight(.medium)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 .font(.callout)
             }
@@ -464,14 +699,34 @@ struct ReviewView: View {
             kind: card.kind,
             gender: card.gender,
             source: "My words",
+            pluralForms: card.pluralForms,
             meanings: card.resolvedMeanings,
             forms: card.forms
         )
     }
 
     private func rate(_ card: PersonalCard, _ rating: ReviewRating) {
-        revealed = false
+        resetResponse()
         state.rate(card, rating)
+    }
+
+    private func submit(_ value: String) {
+        guard let challenge else { return }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        answer = trimmed
+        submittedAnswer = trimmed
+        answerWasCorrect = challenge.accepts(trimmed)
+        revealed = true
+        if mode.usesSpeech, speech.isListening { speech.stop() }
+    }
+
+    private func resetResponse() {
+        if mode.usesSpeech { speech.reset() }
+        revealed = false
+        answer = ""
+        submittedAnswer = nil
+        answerWasCorrect = nil
     }
 
     private func resetTranslations(for card: PersonalCard?) {
@@ -483,15 +738,15 @@ struct ReviewView: View {
         state.prepareReviewTranslations(for: card)
     }
 
+    private func updateGermanSpeechTarget() {
+        let germanIsVisible = revealed || !mode.usesTranslationCarousel
+        germanSpeech.setTarget(germanIsVisible ? current?.german : nil, in: .review)
+    }
+
     private func focusPrimaryAction() {
-        let action: FocusedAction
-        if current == nil {
-            action = .restart
-        } else if revealed {
-            action = .rating(ReviewRating.allCases.first?.rawValue ?? 1)
-        } else {
-            action = .reveal
-        }
+        let action = current == nil
+            ? FocusedAction.restart
+            : revealed ? .rating(suggestedRating.rawValue) : primaryFocusedAction
 
         focusedAction = nil
         DispatchQueue.main.async {
@@ -504,13 +759,80 @@ struct ReviewView: View {
             focusPrimaryAction()
             return
         }
+        guard mode.usesTranslationCarousel, !mode.requiresWrittenAnswer, !mode.usesSpeech else {
+            focusPrimaryAction()
+            return
+        }
         focusedAction = nil
         DispatchQueue.main.async { focusedAction = .carousel }
     }
+
+    private var primaryFocusedAction: FocusedAction {
+        if mode.requiresWrittenAnswer { return .answer }
+        if mode.usesSpeech { return .speech }
+        if mode.usesGenderChoices { return .gender(0) }
+        return .reveal
+    }
+
+    private var suggestedRating: ReviewRating {
+        switch answerWasCorrect {
+        case .some(true): .good
+        case .some(false): .again
+        case .none: .again
+        }
+    }
+
+    private var writtenAnswerPlaceholder: String {
+        switch mode {
+        case .germanToEnglishWriting: "Type the English meaning"
+        case .conjugation: "Type the conjugated form"
+        case .plural: "Type the plural form"
+        case .writing: "Type the German word"
+        case .flashcard, .speaking, .gender, .germanToEnglish: "Type your answer"
+        }
+    }
+
+    private var speechControlTitle: String {
+        switch speech.phase {
+        case .listening: "Stop and check"
+        case .processing: "Recognizing…"
+        case .guess: "Speak again"
+        case .requestingPermission: "Requesting access…"
+        case .idle, .unavailable: "Start speaking"
+        }
+    }
+
+    private var speechStatusText: String {
+        switch speech.phase {
+        case .idle: "Speak the German word"
+        case .requestingPermission: "Checking speech access…"
+        case .listening: "Listening…"
+        case .processing: "Recognizing…"
+        case .guess: "Ready to check"
+        case .unavailable(let message): message
+        }
+    }
+
+    private func toggleSpeechRecognition() {
+        switch speech.phase {
+        case .listening:
+            speech.stop()
+        case .idle:
+            speech.start()
+        case .guess, .unavailable:
+            speech.rerecord()
+        case .requestingPermission, .processing:
+            break
+        }
+    }
+
+    private static let genderChoices: [Gender] = [.masculine, .feminine, .neuter]
 }
 
 extension Notification.Name {
     static let focusReviewContent = Notification.Name("focusReviewContent")
+    static let previousReviewMode = Notification.Name("previousReviewMode")
+    static let nextReviewMode = Notification.Name("nextReviewMode")
 }
 
 struct ReviewTranslationCarousel: Equatable {

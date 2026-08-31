@@ -2,6 +2,7 @@ import SwiftUI
 
 struct RootView: View {
     @EnvironmentObject private var state: AppState
+    @EnvironmentObject private var germanSpeech: GermanSpeechController
     @FocusState private var sidebarFocused: Bool
 
     var body: some View {
@@ -62,7 +63,8 @@ struct RootView: View {
                 if let banner = state.banner {
                     HStack(spacing: 10) {
                         Image(systemName: "info.circle.fill")
-                        Text(banner).lineLimit(1)
+                        Text(banner)
+                            .fixedSize(horizontal: false, vertical: true)
                         Button {
                             state.dismissBanner()
                         } label: {
@@ -96,6 +98,8 @@ struct RootView: View {
                 DispatchQueue.main.async { sidebarFocused = true }
             }
         }
+        .onAppear(perform: activateGermanSpeechContext)
+        .onChange(of: state.route) { _, _ in activateGermanSpeechContext() }
         .overlay(alignment: .topLeading) {
             if state.isUITestSession, state.isBootstrapComplete {
                 Color.clear
@@ -103,6 +107,24 @@ struct RootView: View {
                     .accessibilityElement(children: .ignore)
                     .accessibilityLabel("Application ready")
                     .accessibilityIdentifier("app.ready")
+            }
+        }
+        .overlay(alignment: .topLeading) {
+            if state.isUITestSession, let lastSpokenText = germanSpeech.lastSpokenText {
+                Color.clear
+                    .frame(width: 1, height: 1)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("Last pronounced German: \(lastSpokenText)")
+                    .accessibilityIdentifier("speech.last-spoken")
+            }
+        }
+        .overlay(alignment: .topLeading) {
+            if state.isUITestSession, let target = germanSpeech.target {
+                Color.clear
+                    .frame(width: 1, height: 1)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("Pronunciation target: \(target)")
+                    .accessibilityIdentifier("speech.target")
             }
         }
         .task {
@@ -147,6 +169,17 @@ struct RootView: View {
                 NotificationCenter.default.post(name: notification, object: nil)
             }
         }
+    }
+
+    private func activateGermanSpeechContext() {
+        let context: GermanSpeechController.Context? = switch state.route {
+        case .dictionary: .dictionary
+        case .review: .review
+        case .library: .library
+        case .sentences: .sentences
+        case .settings: nil
+        }
+        germanSpeech.activate(context)
     }
 }
 

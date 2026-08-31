@@ -16,7 +16,7 @@ enum AppRoute: String, CaseIterable, Identifiable {
         case .dictionary: "Dictionary"
         case .review: "Review"
         case .library: "My words"
-        case .sentences: "Sentences"
+        case .sentences: "Sentence test"
         case .settings: "Settings"
         }
     }
@@ -26,7 +26,7 @@ enum AppRoute: String, CaseIterable, Identifiable {
         case .dictionary: "character.book.closed"
         case .review: "rectangle.on.rectangle.angled"
         case .library: "books.vertical"
-        case .sentences: "text.quote"
+        case .sentences: "text.badge.checkmark"
         case .settings: "gearshape"
         }
     }
@@ -153,12 +153,9 @@ final class AppState: ObservableObject {
     @Published private(set) var isImportingExplanations = false
     @Published private(set) var banner: String?
     @Published var libraryQuery = ""
-    @Published private(set) var savedSentences: [SavedSentence] = []
-    @Published private(set) var generatedSentences: [SentenceDraft] = []
-    @Published private(set) var selectedGeneratedSentenceIDs: Set<SentenceDraft.ID> = []
-    @Published private(set) var generatedSourceList: WordList?
+    @Published private(set) var sentenceRetries: [SavedSentence] = []
+    @Published private(set) var sentencePractice = SentencePracticeSession()
     @Published private(set) var lmStudioProgress: LMStudioProgress = .idle
-    @Published private(set) var isGeneratingSentences = false
     @Published private(set) var installedLMStudioModels: [LMStudioModel] = []
     @Published private(set) var isRefreshingLMStudioModels = false
     @Published private(set) var lmStudioSettings: LMStudioSettings
@@ -174,6 +171,7 @@ final class AppState: ObservableObject {
     private var libraryTask: Task<Void, Never>?
     private var reviewDictionaryTask: Task<Void, Never>?
     private var sentenceGenerationTask: Task<Void, Never>?
+    private var sentenceGenerationID = UUID()
     private var bannerDismissTask: Task<Void, Never>?
     private var hasBootstrapped = false
     private let lmStudio: any SentenceGenerating
@@ -236,7 +234,7 @@ final class AppState: ObservableObject {
             let currentDate = now()
             async let loadedDue = store.dueCards(listID: selectedListID, limit: 100, now: currentDate)
             async let loadedStats = store.stats(listID: selectedListID, now: currentDate, calendar: calendar)
-            async let loadedSentences = store.savedSentences()
+            async let loadedSentenceRetries = store.savedSentences()
             dictionaryCount = try await count
             hasCompleteDictionary = try await complete
             installedTranslationLanguages = try await languages
@@ -246,7 +244,7 @@ final class AppState: ObservableObject {
             dueCards = try await loadedDue
             reviewCards = dueCards
             stats = try await loadedStats
-            savedSentences = try await loadedSentences
+            sentenceRetries = try await loadedSentenceRetries
         } catch {
             show(error)
         }
@@ -290,25 +288,55 @@ final class AppState: ObservableObject {
                 lookupTerm: "abfallen"
             )
         }
-        generatedSentences = [
+        let sourceList = WordList(id: WordList.defaultID, name: "My words")
+        sentencePractice.start(
+            mode: .vocabularyBlanks,
+            requestedCount: 3,
+            retries: [],
+            sourceList: sourceList
+        )
+        sentencePractice.appendGenerated([
             SentenceDraft(
                 german: generatedGerman,
                 translation: "The house is big.",
-                tokens: SentenceTokenizer.tokens(in: generatedGerman)
+                tokens: sentenceTokens(
+                    in: generatedGerman,
+                    targetSurface: "Haus",
+                    card: fixtureCards.first
+                )
             ),
             SentenceDraft(
                 german: generatedLearning,
                 translation: "We learn every day.",
-                tokens: SentenceTokenizer.tokens(in: generatedLearning)
+                tokens: sentenceTokens(
+                    in: generatedLearning,
+                    targetSurface: "lernen",
+                    card: fixtureCards.dropFirst().first
+                )
             ),
             SentenceDraft(
                 german: generatedSeparable,
                 translation: "The leaf falls off.",
                 tokens: separableTokens
             )
-        ]
-        selectedGeneratedSentenceIDs = Set(generatedSentences.map(\.id))
-        generatedSourceList = WordList(id: WordList.defaultID, name: "My words")
+        ])
+        sentencePractice.finishGeneration()
+    }
+
+    private func sentenceTokens(
+        in sentence: String,
+        targetSurface: String,
+        card: PersonalCard?
+    ) -> [SentenceToken] {
+        SentenceTokenizer.tokens(in: sentence).map { token in
+            guard token.lookupTerm == targetSurface, let card else { return token }
+            return SentenceToken(
+                index: token.index,
+                surface: token.surface,
+                lookupTerm: card.german,
+                cardID: card.id
+            )
+        }
     }
 
     func search(_ value: String, immediate: Bool = false, selectFirstResult: Bool = false) {
@@ -544,7 +572,7 @@ final class AppState: ObservableObject {
                 reviewCards = []
                 stats = StudyStats()
                 await refreshStudyData()
-                savedSentences = try await store.savedSentences()
+                sentenceRetries = try await store.savedSentences()
                 undoHistory.record(restoreWordListOperation(
                     mutation,
                     actionName: "Delete “\(mutation.list.name)”"
@@ -629,7 +657,7 @@ final class AppState: ObservableObject {
                 let entry = try await reviewDictionaryEntry(for: card)
                 guard !Task.isCancelled,
                       reviewDictionaryMeaningsCardID == card.id,
-                      reviewCards.first?.id == card.id
+                      reviewCards.contains(where: { $0.id == card.id })
                 else { return }
                 reviewDictionaryMeanings = entry?.meanings ?? []
                 reviewDictionaryTask = nil
@@ -732,129 +760,165 @@ final class AppState: ObservableObject {
         }
     }
 
-    func generateSentences(count: Int, options: SentenceGenerationOptions) {
-        guard !isGeneratingSentences, let sourceList = selectedWordList else { return }
-        let count = min(max(count, 1), 10)
+    func startSentencePractice(
+        count requestedCount: Int,
+        mode: SentenceTestMode,
+        options: SentenceGenerationOptions
+    ) {
+        guard !sentencePractice.isGenerating, let sourceList = selectedWordList else { return }
+        let count = min(max(requestedCount, 1), 50)
         let options = options.sanitized
-        if isUITesting {
-            let examples = [
-                ("Das Haus hat ein rotes Dach.", "The house has a red roof."),
-                ("Wir lernen jeden Morgen Deutsch.", "We learn German every morning."),
-                ("Das Kind liest ein interessantes Buch.", "The child reads an interesting book."),
-                ("Heute ist das Wetter sehr schön.", "The weather is very nice today."),
-                ("Ich trinke gern heißen Tee.", "I like drinking hot tea."),
-                ("Der Zug kommt pünktlich an.", "The train arrives on time."),
-                ("Sie kauft frisches Brot.", "She buys fresh bread."),
-                ("Am Abend kochen wir zusammen.", "In the evening we cook together."),
-                ("Mein Freund wohnt in Berlin.", "My friend lives in Berlin."),
-                ("Morgen besuchen wir das Museum.", "Tomorrow we visit the museum.")
-            ]
-            generatedSentences = examples.prefix(count).map { german, translation in
-                SentenceDraft(
-                    german: german,
-                    translation: translation,
-                    tokens: SentenceTokenizer.tokens(in: german)
-                )
-            }
-            selectedGeneratedSentenceIDs = Set(generatedSentences.map(\.id))
-            generatedSourceList = sourceList
-            return
-        }
         sentenceGenerationTask?.cancel()
-        isGeneratingSentences = true
+        let generationID = UUID()
+        sentenceGenerationID = generationID
+        sentencePractice.start(
+            mode: mode,
+            requestedCount: count,
+            retries: sentenceRetries,
+            sourceList: sourceList
+        )
         sentenceGenerationTask = Task {
             do {
                 let vocabulary = try await store.cards(listID: sourceList.id, limit: 600)
                 guard !vocabulary.isEmpty else { throw SentenceFeatureError.emptyWordList }
-                let drafts = try await lmStudio.generate(
-                    vocabulary: vocabulary,
-                    count: count,
-                    options: options,
-                    settings: lmStudioSettings
-                )
-                try Task.checkCancellation()
-                let analyses = try await sentenceAnalyzer.analyze(sentences: drafts.map(\.german))
-                try Task.checkCancellation()
-                guard analyses.count == drafts.count else {
-                    throw CoNLLUParsingError.sentenceCount(
-                        expected: drafts.count,
-                        actual: analyses.count
-                    )
+                var excluded = sentenceRetries.map(\.german)
+                var generatedOffset = 0
+
+                for batchSize in SentenceGenerationBatchPlan(requestedCount: count).batches {
+                    let drafts: [SentenceDraft]
+                    if isUITesting {
+                        drafts = uiTestingSentenceDrafts(
+                            count: batchSize,
+                            offset: generatedOffset,
+                            vocabulary: vocabulary
+                        )
+                    } else {
+                        drafts = try await lmStudio.generate(
+                            vocabulary: vocabulary,
+                            count: batchSize,
+                            options: options,
+                            settings: lmStudioSettings,
+                            excluding: excluded
+                        )
+                    }
+                    try Task.checkCancellation()
+
+                    let analyzedDrafts: [SentenceDraft]
+                    if isUITesting {
+                        analyzedDrafts = drafts
+                    } else {
+                        let analyses = try await sentenceAnalyzer.analyze(sentences: drafts.map(\.german))
+                        try Task.checkCancellation()
+                        guard analyses.count == drafts.count else {
+                            throw CoNLLUParsingError.sentenceCount(
+                                expected: drafts.count,
+                                actual: analyses.count
+                            )
+                        }
+                        analyzedDrafts = zip(drafts, analyses).map { draft, analysis in
+                            draft.withAnalysis(analysis)
+                        }
+                    }
+
+                    guard sentenceGenerationID == generationID else { throw CancellationError() }
+                    sentencePractice.appendGenerated(analyzedDrafts)
+                    excluded += analyzedDrafts.map(\.german)
+                    generatedOffset += analyzedDrafts.count
+                    await Task.yield()
                 }
-                let analyzedDrafts = zip(drafts, analyses).map { draft, analysis in
-                    draft.withAnalysis(analysis)
-                }
-                generatedSentences = analyzedDrafts
-                selectedGeneratedSentenceIDs = Set(analyzedDrafts.map(\.id))
-                generatedSourceList = sourceList
             } catch is CancellationError {
                 // Closing the app or replacing the task is an expected cancellation.
             } catch {
+                guard sentenceGenerationID == generationID else { return }
                 show(error)
             }
-            isGeneratingSentences = false
+            guard sentenceGenerationID == generationID else { return }
+            sentencePractice.finishGeneration()
             sentenceGenerationTask = nil
         }
     }
 
-    func setGeneratedSentence(_ id: SentenceDraft.ID, selected: Bool) {
-        if selected { selectedGeneratedSentenceIDs.insert(id) }
-        else { selectedGeneratedSentenceIDs.remove(id) }
-    }
+    func submitSentenceAnswer(_ answer: String) {
+        guard let item = sentencePractice.currentItem,
+              let result = sentencePractice.submit(answer: answer) else { return }
+        let matchingRetries = sentenceRetries.filter {
+            $0.german == item.draft.german && $0.translation == item.draft.translation
+        }
 
-    func selectAllGeneratedSentences(_ selected: Bool) {
-        selectedGeneratedSentenceIDs = selected ? Set(generatedSentences.map(\.id)) : []
-    }
-
-    func saveSelectedGeneratedSentences() {
-        guard !undoHistory.isPerforming else { return }
-        guard let sourceList = generatedSourceList else { return }
-        let selected = generatedSentences.filter { selectedGeneratedSentenceIDs.contains($0.id) }
-        guard !selected.isEmpty else { return }
-        let selectedIDs = Set(selected.map(\.id))
-        let generatedBeforeSave = generatedSentences
-        let selectionBeforeSave = selectedGeneratedSentenceIDs
-        Task {
-            do {
-                let inserted = try await store.saveSentences(selected, sourceList: sourceList)
-                savedSentences = try await store.savedSentences()
-                generatedSentences.removeAll { selectedIDs.contains($0.id) }
-                selectedGeneratedSentenceIDs.subtract(selectedIDs)
-                if !inserted.isEmpty {
-                    undoHistory.record(deleteSavedSentencesOperation(
-                        inserted,
-                        actionName: "Save \(inserted.count) sentence\(inserted.count == 1 ? "" : "s")",
-                        generatedBefore: generatedBeforeSave,
-                        selectionBefore: selectionBeforeSave,
-                        generatedAfter: generatedSentences,
-                        selectionAfter: selectedGeneratedSentenceIDs
-                    ))
+        switch result {
+        case .incorrect:
+            guard matchingRetries.isEmpty, let sourceList = sentencePractice.sourceList else { return }
+            sentencePractice.setUpdatingRetry(true)
+            Task {
+                do {
+                    _ = try await store.saveSentences([item.draft], sourceList: sourceList)
+                    sentenceRetries = try await store.savedSentences()
+                } catch {
+                    show(error)
                 }
-                if inserted.isEmpty {
-                    showBanner("These sentences were already saved")
-                } else {
-                    showBanner("Saved \(inserted.count) sentence\(inserted.count == 1 ? "" : "s")")
+                sentencePractice.setUpdatingRetry(false)
+            }
+        case .correct:
+            guard !matchingRetries.isEmpty else { return }
+            sentencePractice.setUpdatingRetry(true)
+            Task {
+                do {
+                    try await store.deleteSentences(ids: matchingRetries.map(\.id))
+                    sentenceRetries = try await store.savedSentences()
+                } catch {
+                    show(error)
                 }
-            } catch { show(error) }
+                sentencePractice.setUpdatingRetry(false)
+            }
         }
     }
 
-    func deleteSentence(_ sentence: SavedSentence) {
-        guard !undoHistory.isPerforming else { return }
-        Task {
-            do {
-                try await store.deleteSentence(id: sentence.id)
-                savedSentences.removeAll { $0.id == sentence.id }
-                undoHistory.record(restoreSavedSentencesOperation(
-                    [sentence],
-                    actionName: "Delete sentence",
-                    generatedBefore: generatedSentences,
-                    selectionBefore: selectedGeneratedSentenceIDs,
-                    generatedAfter: generatedSentences,
-                    selectionAfter: selectedGeneratedSentenceIDs
-                ))
-                showBanner("Deleted sentence")
-            } catch { show(error) }
+    func advanceSentencePractice() {
+        sentencePractice.advance()
+    }
+
+    private func uiTestingSentenceDrafts(
+        count: Int,
+        offset: Int,
+        vocabulary: [PersonalCard]
+    ) -> [SentenceDraft] {
+        let examples = [
+            ("Das Haus hat ein rotes Dach.", "The house has a red roof.", "Haus"),
+            ("Wir lernen jeden Morgen Deutsch.", "We learn German every morning.", "lernen"),
+            ("Hinter dem Haus wächst ein Baum.", "A tree grows behind the house.", "Haus"),
+            ("Die Kinder lernen heute zusammen.", "The children study together today.", "lernen"),
+            ("Das Haus steht neben dem Park.", "The house stands next to the park.", "Haus"),
+            ("Im Kurs lernen wir neue Wörter.", "We learn new words in class.", "lernen"),
+            ("Vor dem Haus wartet ein Taxi.", "A taxi is waiting in front of the house.", "Haus"),
+            ("Mit Freunden lernen wir besonders gern.", "We especially enjoy studying with friends.", "lernen"),
+            ("Unser Haus hat einen kleinen Garten.", "Our house has a small garden.", "Haus"),
+            ("Beim Lesen lernen Kinder sehr schnell.", "Children learn very quickly by reading.", "lernen")
+        ]
+
+        return (0..<count).map { index in
+            let example = examples[(offset + index) % examples.count]
+            let card = vocabulary.first {
+                SentenceTokenizer.normalized($0.german) == SentenceTokenizer.normalized(example.2)
+            } ?? vocabulary.first
+            let target = card.flatMap { selectedCard -> String? in
+                let candidate = SentenceTokenizer.tokens(in: example.0).first {
+                    SentenceTokenizer.normalized($0.lookupTerm) ==
+                        SentenceTokenizer.normalized(selectedCard.german)
+                }
+                return candidate?.lookupTerm
+            }
+            let tokens = SentenceTokenizer.tokens(in: example.0).map { token in
+                guard let card, let target,
+                      SentenceTokenizer.normalized(token.lookupTerm) ==
+                        SentenceTokenizer.normalized(target) else { return token }
+                return SentenceToken(
+                    index: token.index,
+                    surface: token.surface,
+                    lookupTerm: card.german,
+                    cardID: card.id
+                )
+            }
+            return SentenceDraft(german: example.0, translation: example.1, tokens: tokens)
         }
     }
 
@@ -1104,7 +1168,7 @@ final class AppState: ObservableObject {
             guard let self else { throw CancellationError() }
             let mutation = try await self.store.deleteWordListRecordingChange(id: listID)
             self.wordLists = try await self.store.wordLists()
-            self.savedSentences = try await self.store.savedSentences()
+            self.sentenceRetries = try await self.store.savedSentences()
             if self.selectedListID == listID {
                 await self.activateWordList(WordList.defaultID)
             } else {
@@ -1122,61 +1186,11 @@ final class AppState: ObservableObject {
             guard let self else { throw CancellationError() }
             try await self.store.restoreDeletedWordList(mutation)
             self.wordLists = try await self.store.wordLists()
-            self.savedSentences = try await self.store.savedSentences()
+            self.sentenceRetries = try await self.store.savedSentences()
             await self.activateWordList(mutation.list.id)
             return self.deleteWordListOperation(
                 listID: mutation.list.id,
                 actionName: actionName
-            )
-        }
-    }
-
-    private func deleteSavedSentencesOperation(
-        _ sentences: [SavedSentence],
-        actionName: String,
-        generatedBefore: [SentenceDraft],
-        selectionBefore: Set<SentenceDraft.ID>,
-        generatedAfter: [SentenceDraft],
-        selectionAfter: Set<SentenceDraft.ID>
-    ) -> AppUndoOperation {
-        AppUndoOperation(name: actionName) { [weak self] in
-            guard let self else { throw CancellationError() }
-            try await self.store.deleteSentences(ids: sentences.map(\.id))
-            self.savedSentences = try await self.store.savedSentences()
-            self.generatedSentences = generatedBefore
-            self.selectedGeneratedSentenceIDs = selectionBefore
-            return self.restoreSavedSentencesOperation(
-                sentences,
-                actionName: actionName,
-                generatedBefore: generatedBefore,
-                selectionBefore: selectionBefore,
-                generatedAfter: generatedAfter,
-                selectionAfter: selectionAfter
-            )
-        }
-    }
-
-    private func restoreSavedSentencesOperation(
-        _ sentences: [SavedSentence],
-        actionName: String,
-        generatedBefore: [SentenceDraft],
-        selectionBefore: Set<SentenceDraft.ID>,
-        generatedAfter: [SentenceDraft],
-        selectionAfter: Set<SentenceDraft.ID>
-    ) -> AppUndoOperation {
-        AppUndoOperation(name: actionName) { [weak self] in
-            guard let self else { throw CancellationError() }
-            try await self.store.restoreSentences(sentences)
-            self.savedSentences = try await self.store.savedSentences()
-            self.generatedSentences = generatedAfter
-            self.selectedGeneratedSentenceIDs = selectionAfter
-            return self.deleteSavedSentencesOperation(
-                sentences,
-                actionName: actionName,
-                generatedBefore: generatedBefore,
-                selectionBefore: selectionBefore,
-                generatedAfter: generatedAfter,
-                selectionAfter: selectionAfter
             )
         }
     }

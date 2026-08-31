@@ -3,172 +3,366 @@ import Lang4SelfCore
 
 struct SentencesView: View {
     @EnvironmentObject private var state: AppState
+    @EnvironmentObject private var germanSpeech: GermanSpeechController
     @State private var generationCount = 5
     @State private var generationCountText = "5"
     @State private var generationOptions = SentenceGenerationOptions.defaults
     @State private var minimumWordsText = "5"
     @State private var maximumWordsText = "14"
-    @State private var selection: SentenceSelection?
+    @State private var testMode = SentenceTestMode.vocabularyBlanks
+    @State private var answer = ""
     @FocusState private var focusedControl: FocusControl?
     let automaticallyFocusContent: Bool
 
-    private enum FocusControl: Hashable { case style, sentences }
+    private enum FocusControl: Hashable { case style, answer }
 
     var body: some View {
-        HSplitView {
-            VStack(spacing: 0) {
+        ScrollView {
+            VStack(spacing: 18) {
                 generationControls
-                Divider()
-                sentenceList
-                if !state.generatedSentences.isEmpty {
-                    Divider()
-                    saveControls
-                }
+                practiceContent
             }
-            .frame(minWidth: 330, idealWidth: 400)
-
-            if let sentence = selectedSentence {
-                SentenceInspector(sentence: sentence)
-                    .id(sentence.id)
-                    .accessibilityIdentifier(sentence.id.inspectorAccessibilityIdentifier)
-            } else {
-                PlaceholderView(
-                    symbol: "text.quote",
-                    title: "Select a sentence",
-                    detail: "Use the arrow keys inside a sentence to inspect each word's translation."
-                )
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
+            .frame(maxWidth: 920)
+            .frame(maxWidth: .infinity)
+            .padding(20)
         }
-        .navigationTitle("Sentences")
+        .accessibilityIdentifier("sentences.scroll")
+        .navigationTitle("Sentence test")
         .onAppear {
-            repairSelection()
-            if automaticallyFocusContent {
-                DispatchQueue.main.async { focusedControl = .sentences }
+            updateGermanSpeechTarget()
+            if automaticallyFocusContent { focusPrimaryContent() }
+        }
+        .onChange(of: state.sentencePractice.currentItem?.id) { _, _ in
+            answer = ""
+            updateGermanSpeechTarget()
+            if state.sentencePractice.currentItem != nil {
+                DispatchQueue.main.async { focusedControl = .answer }
             }
         }
-        .onChange(of: state.generatedSentences.map(\.id)) { _, _ in
-            repairSelection(preferGenerated: true)
-            DispatchQueue.main.async { focusedControl = .sentences }
+        .onChange(of: state.sentencePractice.result) { _, _ in
+            updateGermanSpeechTarget()
         }
-        .onChange(of: state.savedSentences.map(\.id)) { _, _ in repairSelection() }
-        .onReceive(NotificationCenter.default.publisher(for: .focusSentenceList)) { _ in
-            DispatchQueue.main.async { focusedControl = .sentences }
-        }
+        .onDisappear { germanSpeech.setTarget(nil, in: .sentences) }
         .onReceive(NotificationCenter.default.publisher(for: .focusSentenceContent)) { _ in
             focusPrimaryContent()
         }
     }
 
     private var generationControls: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Picker("Generate from", selection: Binding(
-                    get: { state.selectedListID },
-                    set: { state.selectWordList($0) }
-                )) {
-                    ForEach(state.wordLists) { list in Text(list.name).tag(list.id) }
+        GroupBox {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Picker("Vocabulary", selection: Binding(
+                        get: { state.selectedListID },
+                        set: { state.selectWordList($0) }
+                    )) {
+                        ForEach(state.wordLists) { list in Text(list.name).tag(list.id) }
+                    }
+                    .pickerStyle(.menu)
+                    .accessibilityIdentifier("sentences.list-picker")
+
+                    Spacer(minLength: 12)
+
+                    numericStepper(
+                        title: "Sentence count",
+                        value: generationCountBinding,
+                        text: $generationCountText,
+                        range: 1...50,
+                        fieldIdentifier: "sentences.count-input",
+                        stepperIdentifier: "sentences.count"
+                    )
+                    .help("Number of new sentences (maximum 50)")
+
+                    Button("Start test") {
+                        commitNumericInputs()
+                        answer = ""
+                        state.startSentencePractice(
+                            count: generationCount,
+                            mode: testMode,
+                            options: generationOptions
+                        )
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(
+                        state.sentencePractice.isGenerating ||
+                        state.sentencePractice.isUpdatingRetry ||
+                        state.wordLists.isEmpty
+                    )
+                    .accessibilityIdentifier("sentences.generate")
                 }
-                .labelsHidden()
-                .pickerStyle(.menu)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .accessibilityIdentifier("sentences.list-picker")
 
-                numericStepper(
-                    title: "Sentence count",
-                    value: generationCountBinding,
-                    text: $generationCountText,
-                    range: 1...10,
-                    fieldIdentifier: "sentences.count-input",
-                    stepperIdentifier: "sentences.count"
-                )
-                .help("Number of sentences (maximum 10)")
-
-                Button("Generate") {
-                    commitNumericInputs()
-                    state.generateSentences(count: generationCount, options: generationOptions)
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(state.isGeneratingSentences || state.wordLists.isEmpty)
-                .accessibilityIdentifier("sentences.generate")
-            }
-
-            HStack(spacing: 8) {
-                Text("Level")
-                    .foregroundStyle(.secondary)
-                    .fixedSize()
-                Picker("CEFR level", selection: $generationOptions.proficiency) {
-                    ForEach(SentenceProficiencyLevel.allCases) { level in
-                        Text(level.rawValue).tag(level)
+                Picker("Test mode", selection: $testMode) {
+                    ForEach(SentenceTestMode.allCases) { mode in
+                        Text(mode.title).tag(mode)
                     }
                 }
-                .labelsHidden()
-                .pickerStyle(.menu)
-                .frame(width: 70)
-                .accessibilityLabel("CEFR level")
-                .accessibilityIdentifier("sentences.level")
+                .pickerStyle(.segmented)
+                .disabled(state.sentencePractice.isGenerating)
+                .accessibilityIdentifier("sentences.mode")
 
-                Spacer(minLength: 8)
+                HStack(spacing: 8) {
+                    Text("Level")
+                        .foregroundStyle(.secondary)
+                    Picker("CEFR level", selection: $generationOptions.proficiency) {
+                        ForEach(SentenceProficiencyLevel.allCases) { level in
+                            Text(level.rawValue).tag(level)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .frame(width: 70)
+                    .accessibilityIdentifier("sentences.level")
 
-                Text("Words")
-                    .foregroundStyle(.secondary)
-                    .fixedSize()
-                numericStepper(
-                    title: "Minimum words",
-                    value: minimumWordsBinding,
-                    text: $minimumWordsText,
-                    range: 2...generationOptions.maximumWords,
-                    fieldIdentifier: "sentences.minimum-words-input",
-                    stepperIdentifier: "sentences.minimum-words"
-                )
+                    Spacer(minLength: 8)
 
-                Text("–")
-                    .foregroundStyle(.secondary)
-
-                numericStepper(
-                    title: "Maximum words",
-                    value: maximumWordsBinding,
-                    text: $maximumWordsText,
-                    range: generationOptions.minimumWords...30,
-                    fieldIdentifier: "sentences.maximum-words-input",
-                    stepperIdentifier: "sentences.maximum-words"
-                )
-            }
-
-            HStack(spacing: 8) {
-                Text("Style")
-                    .foregroundStyle(.secondary)
-                TextField("Sentence style", text: $generationOptions.style)
-                    .textFieldStyle(.roundedBorder)
-                    .focused($focusedControl, equals: .style)
-                    .accessibilityLabel("Sentence style")
-                    .accessibilityIdentifier("sentences.style")
-            }
-
-            HStack(spacing: 8) {
-                if state.lmStudioProgress.isWorking {
-                    ProgressView().controlSize(.small)
-                } else if case .failed = state.lmStudioProgress {
-                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-                } else if case .ready = state.lmStudioProgress {
-                    Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
-                } else {
-                    Image(systemName: "externaldrive.connected.to.line.below").foregroundStyle(.secondary)
+                    Text("Words")
+                        .foregroundStyle(.secondary)
+                    numericStepper(
+                        title: "Minimum words",
+                        value: minimumWordsBinding,
+                        text: $minimumWordsText,
+                        range: 2...generationOptions.maximumWords,
+                        fieldIdentifier: "sentences.minimum-words-input",
+                        stepperIdentifier: "sentences.minimum-words"
+                    )
+                    Text("–").foregroundStyle(.secondary)
+                    numericStepper(
+                        title: "Maximum words",
+                        value: maximumWordsBinding,
+                        text: $maximumWordsText,
+                        range: generationOptions.minimumWords...30,
+                        fieldIdentifier: "sentences.maximum-words-input",
+                        stepperIdentifier: "sentences.maximum-words"
+                    )
                 }
-                Text(state.lmStudioProgress.message)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
+
+                HStack(spacing: 8) {
+                    Text("Style").foregroundStyle(.secondary)
+                    TextField("Sentence style", text: $generationOptions.style)
+                        .textFieldStyle(.roundedBorder)
+                        .focused($focusedControl, equals: .style)
+                        .accessibilityIdentifier("sentences.style")
+                }
+
+                HStack(spacing: 8) {
+                    generationStatusIcon
+                    Text(generationStatusText)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                    Spacer()
+                    if !state.sentenceRetries.isEmpty {
+                        Label(
+                            "\(state.sentenceRetries.count) waiting for retry",
+                            systemImage: "arrow.clockwise"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("sentences.retry-count")
+                    }
+                }
             }
-            .accessibilityElement(children: .combine)
+            .padding(4)
+        } label: {
+            Text("Create a test")
         }
-        .padding(14)
+    }
+
+    @ViewBuilder
+    private var generationStatusIcon: some View {
+        if state.sentencePractice.isGenerating || state.lmStudioProgress.isWorking {
+            ProgressView().controlSize(.small)
+        } else if case .failed = state.lmStudioProgress {
+            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+        } else if case .ready = state.lmStudioProgress {
+            Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+        } else {
+            Image(systemName: "externaldrive.connected.to.line.below").foregroundStyle(.secondary)
+        }
+    }
+
+    private var generationStatusText: String {
+        let pending = state.sentencePractice.pendingGenerationCount
+        if state.sentencePractice.isGenerating, pending > 0 {
+            return "\(state.sentencePractice.generatedCount) ready · generating \(pending) more in batches of 5"
+        }
+        return state.lmStudioProgress.message
+    }
+
+    @ViewBuilder
+    private var practiceContent: some View {
+        if let item = state.sentencePractice.currentItem {
+            testCard(item)
+
+            if state.sentencePractice.result != nil {
+                revealedAnswer(for: item)
+            }
+        } else if state.sentencePractice.isWaitingForGeneration {
+            GroupBox {
+                VStack(spacing: 12) {
+                    ProgressView()
+                    Text("Waiting for the next sentences…")
+                        .font(.title3.weight(.semibold))
+                    Text("You finished everything ready so far. Generation is continuing in the background.")
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(32)
+                .accessibilityIdentifier("sentences.waiting")
+            }
+        } else if state.sentencePractice.isComplete {
+            ContentUnavailableView {
+                Label("Test complete", systemImage: "checkmark.circle")
+            } description: {
+                Text("Answered \(state.sentencePractice.answeredCount) prompt\(state.sentencePractice.answeredCount == 1 ? "" : "s"). Start another test when you’re ready.")
+            }
+            .frame(minHeight: 260)
+            .accessibilityIdentifier("sentences.complete")
+        } else {
+            ContentUnavailableView {
+                Label("Test your German", systemImage: "text.badge.checkmark")
+            } description: {
+                Text("Choose a mode, then generate sentences from your vocabulary.")
+            }
+            .frame(minHeight: 260)
+        }
+    }
+
+    private func testCard(_ item: SentencePracticeItem) -> some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 18) {
+                HStack {
+                    Text("Prompt \(state.sentencePractice.currentIndex + 1)")
+                        .font(.headline)
+                    Text("· \(max(0, state.sentencePractice.items.count - state.sentencePractice.currentIndex - 1)) ready after this")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    if state.sentencePractice.pendingGenerationCount > 0 {
+                        ProgressView()
+                            .controlSize(.small)
+                            .help("More sentences are being generated")
+                    }
+                }
+
+                Text(item.draft.translation)
+                    .font(.title2.weight(.semibold))
+                    .textSelection(.enabled)
+                    .accessibilityIdentifier("sentences.translation")
+
+                if SentenceAnswerEvaluator.usesVocabularyBlanks(
+                    for: item,
+                    mode: state.sentencePractice.mode
+                ) {
+                    MaskedSentenceFlow(item: item)
+                } else {
+                    Label(
+                        state.sentencePractice.mode == .vocabularyBlanks
+                            ? "This retry has no linked vocabulary word. Write the full German sentence."
+                            : "Write the full German sentence.",
+                        systemImage: "pencil.line"
+                    )
+                    .foregroundStyle(.secondary)
+                }
+
+                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    TextField(answerPlaceholder(for: item), text: $answer)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.title3)
+                        .disabled(state.sentencePractice.result != nil)
+                        .focused($focusedControl, equals: .answer)
+                        .onSubmit { submitAnswer() }
+                        .accessibilityIdentifier("sentences.answer")
+
+                    Button("Check") { submitAnswer() }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(
+                            answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+                            state.sentencePractice.result != nil
+                        )
+                        .accessibilityIdentifier("sentences.check")
+                }
+            }
+            .padding(8)
+        }
+        .accessibilityIdentifier("sentences.test-card")
+    }
+
+    private func revealedAnswer(for item: SentencePracticeItem) -> some View {
+        VStack(spacing: 14) {
+            HStack {
+                switch state.sentencePractice.result {
+                case .correct:
+                    Label("Correct", systemImage: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                case .incorrect:
+                    Label("Not quite — this sentence was added to your retry queue", systemImage: "arrow.clockwise.circle.fill")
+                        .foregroundStyle(.orange)
+                case nil:
+                    EmptyView()
+                }
+                Spacer()
+                if state.sentencePractice.isUpdatingRetry {
+                    ProgressView().controlSize(.small)
+                }
+                Button(nextButtonTitle) {
+                    state.advanceSentencePractice()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(state.sentencePractice.isUpdatingRetry)
+                .accessibilityIdentifier("sentences.next")
+            }
+            .font(.headline)
+
+            SentenceInspector(sentence: SentencePresentation(item: item))
+                .id(item.id)
+                .frame(minHeight: 520)
+                .accessibilityIdentifier("sentences.revealed")
+        }
+    }
+
+    private var nextButtonTitle: String {
+        if state.sentencePractice.currentIndex + 1 < state.sentencePractice.items.count {
+            return "Next"
+        }
+        return state.sentencePractice.isGenerating ? "Continue" : "Finish"
+    }
+
+    private func answerPlaceholder(for item: SentencePracticeItem) -> String {
+        SentenceAnswerEvaluator.usesVocabularyBlanks(for: item, mode: state.sentencePractice.mode)
+            ? "Missing word or words"
+            : "German sentence"
+    }
+
+    private func submitAnswer() {
+        guard !answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        focusedControl = nil
+        state.submitSentenceAnswer(answer)
+    }
+
+    private func focusPrimaryContent() {
+        if state.sentencePractice.result != nil {
+            focusedControl = nil
+            NotificationCenter.default.post(name: .focusSentenceInspector, object: nil)
+        } else if state.sentencePractice.currentItem != nil {
+            focusedControl = .answer
+        } else {
+            focusedControl = .style
+        }
+    }
+
+    private func updateGermanSpeechTarget() {
+        let sentence = state.sentencePractice.result == nil
+            ? nil
+            : state.sentencePractice.currentItem?.draft.german
+        germanSpeech.setTarget(sentence, in: .sentences)
     }
 
     private var generationCountBinding: Binding<Int> {
         Binding(
             get: { generationCount },
-            set: { generationCount = min(max($0, 1), 10) }
+            set: { generationCount = min(max($0, 1), 50) }
         )
     }
 
@@ -176,10 +370,7 @@ struct SentencesView: View {
         Binding(
             get: { generationOptions.minimumWords },
             set: {
-                generationOptions.minimumWords = min(
-                    max($0, 2),
-                    generationOptions.maximumWords
-                )
+                generationOptions.minimumWords = min(max($0, 2), generationOptions.maximumWords)
             }
         )
     }
@@ -188,10 +379,7 @@ struct SentencesView: View {
         Binding(
             get: { generationOptions.maximumWords },
             set: {
-                generationOptions.maximumWords = max(
-                    min($0, 30),
-                    generationOptions.minimumWords
-                )
+                generationOptions.maximumWords = max(min($0, 30), generationOptions.minimumWords)
             }
         )
     }
@@ -210,7 +398,7 @@ struct SentencesView: View {
                 .textFieldStyle(.roundedBorder)
                 .multilineTextAlignment(.trailing)
                 .monospacedDigit()
-                .frame(width: 38)
+                .frame(width: 42)
                 .accessibilityLabel(title)
                 .accessibilityIdentifier(fieldIdentifier)
                 .onSubmit { commitNumericInputs() }
@@ -223,231 +411,75 @@ struct SentencesView: View {
                 .labelsHidden()
                 .accessibilityIdentifier(stepperIdentifier)
                 .onChange(of: value.wrappedValue) { _, newValue in
-                    if Int(text.wrappedValue) != newValue {
-                        text.wrappedValue = String(newValue)
-                    }
+                    if Int(text.wrappedValue) != newValue { text.wrappedValue = String(newValue) }
                 }
         }
     }
 
     private func commitNumericInputs() {
-        generationCount = min(max(Int(generationCountText) ?? generationCount, 1), 10)
+        generationCount = min(max(Int(generationCountText) ?? generationCount, 1), 50)
         var options = generationOptions
         options.minimumWords = Int(minimumWordsText) ?? options.minimumWords
         options.maximumWords = Int(maximumWordsText) ?? options.maximumWords
         generationOptions = options.sanitized
-
         generationCountText = String(generationCount)
         minimumWordsText = String(generationOptions.minimumWords)
         maximumWordsText = String(generationOptions.maximumWords)
     }
-
-    private var sentenceList: some View {
-        List(selection: $selection) {
-            if !state.generatedSentences.isEmpty {
-                Section("Generated") {
-                    ForEach(state.generatedSentences) { sentence in
-                        HStack(alignment: .top, spacing: 9) {
-                            Toggle(isOn: Binding(
-                                get: { state.selectedGeneratedSentenceIDs.contains(sentence.id) },
-                                set: { state.setGeneratedSentence(sentence.id, selected: $0) }
-                            )) {
-                                Text("Include \(sentence.german) when saving")
-                            }
-                            .labelsHidden()
-                            .toggleStyle(.checkbox)
-                            .help("Include when saving")
-                            .accessibilityLabel("Include generated sentence when saving")
-                            .accessibilityIdentifier("sentences.include.\(sentence.id.uuidString)")
-
-                            SentenceRow(
-                                german: sentence.german,
-                                translation: sentence.translation,
-                                tokens: sentence.tokens
-                            )
-                        }
-                        .tag(SentenceSelection.generated(sentence.id))
-                        .accessibilityIdentifier("sentences.generated.\(sentence.id.uuidString)")
-                    }
-                }
-            }
-
-            Section("Saved sentences") {
-                if state.savedSentences.isEmpty {
-                    Text("No saved sentences yet")
-                        .foregroundStyle(.secondary)
-                } else {
-                    ForEach(state.savedSentences) { sentence in
-                        SentenceRow(
-                            german: sentence.german,
-                            translation: sentence.translation,
-                            tokens: sentence.tokens,
-                            footnote: sentence.sourceListName
-                        )
-                        .tag(SentenceSelection.saved(sentence.id))
-                        .accessibilityIdentifier("sentences.saved.\(sentence.id)")
-                        .contextMenu {
-                            Button("Delete Sentence", role: .destructive) {
-                                state.deleteSentence(sentence)
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        .onDeleteCommand {
-            guard case .saved(let id) = selection,
-                  let sentence = state.savedSentences.first(where: { $0.id == id }) else { return }
-            state.deleteSentence(sentence)
-        }
-        .focused($focusedControl, equals: .sentences)
-        .accessibilityIdentifier("sentences.list")
-        .onKeyPress(.rightArrow) {
-            guard selectedSentence != nil else { return .ignored }
-            focusedControl = nil
-            NotificationCenter.default.post(name: .focusSentenceInspector, object: nil)
-            return .handled
-        }
-        .onKeyPress("x") {
-            guard case .generated(let id) = selection else { return .ignored }
-            state.setGeneratedSentence(
-                id,
-                selected: !state.selectedGeneratedSentenceIDs.contains(id)
-            )
-            return .handled
-        }
-        .onKeyPress(.return) {
-            guard !state.selectedGeneratedSentenceIDs.isEmpty else { return .handled }
-            state.saveSelectedGeneratedSentences()
-            return .handled
-        }
-    }
-
-    private var saveControls: some View {
-        HStack {
-            Button(state.selectedGeneratedSentenceIDs.count == state.generatedSentences.count ? "Select None" : "Select All") {
-                state.selectAllGeneratedSentences(
-                    state.selectedGeneratedSentenceIDs.count != state.generatedSentences.count
-                )
-            }
-            .accessibilityIdentifier("sentences.select-all")
-            Spacer()
-            Button("Save Selected (\(state.selectedGeneratedSentenceIDs.count))") {
-                state.saveSelectedGeneratedSentences()
-            }
-            .buttonStyle(.borderedProminent)
-            .disabled(state.selectedGeneratedSentenceIDs.isEmpty)
-            .accessibilityIdentifier("sentences.save-selected")
-        }
-        .padding(12)
-    }
-
-    private var selectedSentence: SentencePresentation? {
-        switch selection {
-        case .generated(let id):
-            guard let sentence = state.generatedSentences.first(where: { $0.id == id }) else { return nil }
-            return .init(
-                id: .generated(id),
-                german: sentence.german,
-                translation: sentence.translation,
-                tokens: sentence.tokens,
-                analysis: sentence.analysis,
-                sourceListName: state.generatedSourceList?.name ?? state.selectedWordList?.name ?? "Selected list"
-            )
-        case .saved(let id):
-            guard let sentence = state.savedSentences.first(where: { $0.id == id }) else { return nil }
-            return .init(
-                id: .saved(id),
-                german: sentence.german,
-                translation: sentence.translation,
-                tokens: sentence.tokens,
-                analysis: sentence.analysis,
-                sourceListName: sentence.sourceListName
-            )
-        case nil:
-            return nil
-        }
-    }
-
-    private func repairSelection(preferGenerated: Bool = false) {
-        if preferGenerated, let first = state.generatedSentences.first {
-            selection = .generated(first.id)
-        } else if selectedSentence != nil {
-            return
-        } else if let first = state.savedSentences.first {
-            selection = .saved(first.id)
-        } else if let first = state.generatedSentences.first {
-            selection = .generated(first.id)
-        } else {
-            selection = nil
-        }
-    }
-
-    private func focusPrimaryContent() {
-        if let first = state.generatedSentences.first {
-            selection = .generated(first.id)
-            focusedControl = nil
-            DispatchQueue.main.async { focusedControl = .sentences }
-        } else if let first = state.savedSentences.first {
-            selection = .saved(first.id)
-            focusedControl = nil
-            DispatchQueue.main.async { focusedControl = .sentences }
-        } else {
-            selection = nil
-            focusedControl = .style
-        }
-    }
 }
 
-private enum SentenceSelection: Hashable {
-    case generated(UUID)
-    case saved(Int64)
+private struct MaskedSentenceFlow: View {
+    let item: SentencePracticeItem
 
-    var inspectorAccessibilityIdentifier: String {
-        switch self {
-        case .generated(let id):
-            "sentences.inspector.generated.\(id.uuidString)"
-        case .saved(let id):
-            "sentences.inspector.saved.\(id)"
+    var body: some View {
+        TokenFlowLayout(spacing: 7) {
+            ForEach(item.draft.tokens) { token in
+                Text(displayText(for: token))
+                    .font(.title2.weight(token.cardID == nil ? .regular : .semibold))
+                    .foregroundStyle(token.cardID == nil ? .primary : Color.accentColor)
+                    .fixedSize(horizontal: true, vertical: true)
+                    .padding(.horizontal, token.cardID == nil ? 0 : 6)
+                    .padding(.vertical, 3)
+                    .background(
+                        token.cardID == nil ? Color.clear : Color.accentColor.opacity(0.12),
+                        in: RoundedRectangle(cornerRadius: 6)
+                    )
+                    .accessibilityLabel(token.cardID == nil ? token.surface : "Missing vocabulary word")
+            }
         }
+        .accessibilityIdentifier("sentences.masked-sentence")
+    }
+
+    private func displayText(for token: SentenceToken) -> String {
+        guard token.cardID != nil else { return token.surface }
+        let lexical = SentenceTokenizer.lookupTerm(from: token.surface)
+        guard let range = token.surface.range(of: lexical), !lexical.isEmpty else { return "_____" }
+        return String(token.surface[..<range.lowerBound]) + "_____" + String(token.surface[range.upperBound...])
     }
 }
 
 private struct SentencePresentation: Identifiable {
-    let id: SentenceSelection
+    let id: UUID
     let german: String
     let translation: String
     let tokens: [SentenceToken]
     let analysis: SentenceAnalysis?
     let sourceListName: String
+
+    init(item: SentencePracticeItem) {
+        id = item.id
+        german = item.draft.german
+        translation = item.draft.translation
+        tokens = item.draft.tokens
+        analysis = item.draft.analysis
+        sourceListName = item.sourceListName
+    }
 }
 
 private struct SentenceLookupContext: Hashable {
-    let sentenceID: SentenceSelection
+    let sentenceID: UUID
     let token: SentenceToken?
     let nounTokenIndices: Set<Int>
-}
-
-private struct SentenceRow: View {
-    let german: String
-    let translation: String
-    let tokens: [SentenceToken]
-    var footnote: String?
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            GermanSentenceText(german: german, tokens: tokens)
-                .fontWeight(.medium)
-                .lineLimit(2)
-            Text(translation).font(.subheadline).foregroundStyle(.secondary).lineLimit(2)
-            if let footnote {
-                Label(footnote, systemImage: "list.bullet")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-            }
-        }
-        .padding(.vertical, 3)
-    }
 }
 
 private struct SentenceInspector: View {
@@ -493,19 +525,13 @@ private struct SentenceInspector: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Spacer()
+                    GermanPronunciationHint(german: sentence.german)
                     HStack(spacing: 4) {
                         KeyboardShortcutHint(.init(chords: [.init(.left), .init(.right)]))
                         Text("select word")
                     }
                     .font(.caption)
                     .foregroundStyle(.tertiary)
-                    if let savedSentence {
-                        Button("Delete Sentence", role: .destructive) {
-                            state.deleteSentence(savedSentence)
-                        }
-                        .keyboardShortcut(.delete, modifiers: [])
-                        .accessibilityIdentifier("sentences.delete-selected")
-                    }
                 }
 
                 TokenFlowLayout(spacing: 7) {
@@ -516,16 +542,9 @@ private struct SentenceInspector: View {
                             focusedTokenIndex = offset
                         } label: {
                             Text(token.surface)
-                                .font(.title2)
-                                .opacity(isSelected ? 0 : 1)
-                                .overlay {
-                                    if isSelected {
-                                        Text(token.surface)
-                                            .font(.title2.weight(.semibold))
-                                            .fixedSize()
-                                    }
-                                }
+                                .font(.title2.weight(isSelected ? .semibold : .regular))
                                 .foregroundStyle(tokenGenders[token.index]?.color ?? .primary)
+                                .fixedSize(horizontal: true, vertical: true)
                                 .padding(.horizontal, 7)
                                 .padding(.vertical, 5)
                                 .background(
@@ -537,11 +556,13 @@ private struct SentenceInspector: View {
                         .focusable()
                         .focused($focusedTokenIndex, equals: offset)
                         .onMoveCommand(perform: moveSelection)
+                        .accessibilityElement(children: .ignore)
                         .accessibilityLabel("Word \(offset + 1) of \(sentence.tokens.count): \(token.surface)")
                         .accessibilityAddTraits(isSelected ? .isSelected : [])
                         .accessibilityIdentifier("sentence.token.\(offset)")
                     }
                 }
+
                 Text(sentence.translation)
                     .font(.title3)
                     .foregroundStyle(.secondary)
@@ -586,6 +607,8 @@ private struct SentenceInspector: View {
                 }
             }
         }
+        .background(.background, in: RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(.quaternary))
         .task(id: lookupContext) {
             let context = lookupContext
             guard let selectedToken = context.token else { return }
@@ -605,9 +628,7 @@ private struct SentenceInspector: View {
         .task(id: sentence.tokens) {
             tokenGenders = await state.sentenceGenders(for: sentence.tokens)
         }
-        .onAppear {
-            selectedTokenIndex = 0
-        }
+        .onAppear { selectedTokenIndex = 0 }
         .onChange(of: focusedTokenIndex) { _, index in
             if let index { selectedTokenIndex = index }
         }
@@ -620,12 +641,6 @@ private struct SentenceInspector: View {
     private func moveSelection(_ direction: MoveCommandDirection) {
         guard !sentence.tokens.isEmpty else { return }
         switch direction {
-        case .left where selectedTokenIndex == sentence.tokens.startIndex:
-            focusedTokenIndex = nil
-            DispatchQueue.main.async {
-                NotificationCenter.default.post(name: .focusSentenceList, object: nil)
-            }
-            return
         case .left, .up:
             selectedTokenIndex = max(0, selectedTokenIndex - 1)
         case .right, .down:
@@ -635,16 +650,10 @@ private struct SentenceInspector: View {
         }
         focusedTokenIndex = selectedTokenIndex
     }
-
-    private var savedSentence: SavedSentence? {
-        guard case .saved(let id) = sentence.id else { return nil }
-        return state.savedSentences.first { $0.id == id }
-    }
 }
 
 extension Notification.Name {
     static let focusSentenceInspector = Notification.Name("focusSentenceInspector")
-    static let focusSentenceList = Notification.Name("focusSentenceList")
     static let focusSentenceContent = Notification.Name("focusSentenceContent")
 }
 
@@ -665,21 +674,34 @@ private struct TokenFlowLayout: Layout {
         subviews: Subviews,
         cache: inout ()
     ) {
-        let result = layout(proposal: .init(width: bounds.width, height: proposal.height), subviews: subviews)
+        let result = layout(
+            proposal: .init(width: bounds.width, height: proposal.height),
+            subviews: subviews
+        )
         for (index, point) in result.points.enumerated() {
-            subviews[index].place(at: CGPoint(x: bounds.minX + point.x, y: bounds.minY + point.y), proposal: .unspecified)
+            subviews[index].place(
+                at: CGPoint(x: bounds.minX + point.x, y: bounds.minY + point.y),
+                anchor: .topLeading,
+                proposal: ProposedViewSize(result.sizes[index])
+            )
         }
     }
 
-    private func layout(proposal: ProposedViewSize, subviews: Subviews) -> (size: CGSize, points: [CGPoint]) {
+    private func layout(
+        proposal: ProposedViewSize,
+        subviews: Subviews
+    ) -> (size: CGSize, points: [CGPoint], sizes: [CGSize]) {
         let maxWidth = proposal.width ?? .infinity
         var points: [CGPoint] = []
+        var sizes: [CGSize] = []
         var x: CGFloat = 0
         var y: CGFloat = 0
         var lineHeight: CGFloat = 0
         var usedWidth: CGFloat = 0
 
         for subview in subviews {
+            // Each token keeps its ideal width, so short words never split into
+            // multiple lines. Wrapping only happens between tokens.
             let size = subview.sizeThatFits(.unspecified)
             if x > 0, x + size.width > maxWidth {
                 x = 0
@@ -687,10 +709,11 @@ private struct TokenFlowLayout: Layout {
                 lineHeight = 0
             }
             points.append(CGPoint(x: x, y: y))
+            sizes.append(size)
             x += size.width + spacing
             lineHeight = max(lineHeight, size.height)
             usedWidth = max(usedWidth, x - spacing)
         }
-        return (CGSize(width: min(usedWidth, maxWidth), height: y + lineHeight), points)
+        return (CGSize(width: min(usedWidth, maxWidth), height: y + lineHeight), points, sizes)
     }
 }

@@ -15,6 +15,9 @@ struct Lang4SelfApp: App {
         _dependencies = StateObject(wrappedValue: dependencies)
         appDelegate.appState = dependencies.state
         appDelegate.voiceSearchShortcut = dependencies.voiceSearchShortcut
+        appDelegate.pronunciationShortcut = dependencies.pronunciationShortcut
+        appDelegate.germanSpeech = dependencies.germanSpeech
+        appDelegate.scrollbarStyler = OverlayScrollbarStyler(notificationCenter: .default)
         appDelegate.isUITesting = dependencies.isUITesting
     }
 
@@ -25,13 +28,14 @@ struct Lang4SelfApp: App {
                     .environmentObject(state)
                     .environmentObject(dependencies.speech)
                     .environmentObject(voiceSearchShortcut)
+                    .environmentObject(dependencies.germanSpeech)
                     .hostsDictionaryTranslation(using: dependencies.dictionaryTranslator)
             } else {
                 StartupFailureView(message: dependencies.startupFailure ?? "The application could not start.")
             }
         }
         .windowStyle(.automatic)
-        .defaultSize(width: 1_120, height: 740)
+        .defaultSize(width: 1_121, height: 939)
         .commands {
             if let state = dependencies.state {
                 Lang4SelfCommands(state: state)
@@ -48,8 +52,10 @@ private final class Lang4SelfDependencies: ObservableObject {
     let isUITesting: Bool
     let state: AppState?
     let speech: SpeechRecognizer
+    let germanSpeech: GermanSpeechController
     let dictionaryTranslator: any DictionaryTranslating
     let voiceSearchShortcut: VoiceSearchShortcutController?
+    let pronunciationShortcut: DoubleShiftShortcutController
     let startupFailure: String?
 
     init(processInfo: ProcessInfo, settingsDefaults: UserDefaults) {
@@ -62,6 +68,15 @@ private final class Lang4SelfDependencies: ObservableObject {
                 ? 0
                 : processInfo.arguments.contains("--ui-testing-single-voice-alternative") ? 1 : 3
         )
+        let germanSpeech = GermanSpeechController(
+            synthesizer: isUITesting
+                ? UITestingGermanSpeechSynthesizer()
+                : AppleGermanSpeechSynthesizer()
+        )
+        self.germanSpeech = germanSpeech
+        pronunciationShortcut = DoubleShiftShortcutController { [weak germanSpeech] in
+            germanSpeech?.speakTarget()
+        }
         if isUITesting && processInfo.arguments.contains("--ui-testing-translation-fallback") {
             dictionaryTranslator = UITestingDictionaryTranslator()
         } else if isUITesting {
@@ -147,13 +162,21 @@ private struct StartupFailureView: View {
 private final class Lang4SelfAppDelegate: NSObject, NSApplicationDelegate {
     weak var appState: AppState?
     var voiceSearchShortcut: VoiceSearchShortcutController?
+    var pronunciationShortcut: DoubleShiftShortcutController?
+    var germanSpeech: GermanSpeechController?
+    var scrollbarStyler: (any AppScrollbarStyling)?
     var isUITesting = false
     private var shortcutKeyMonitor: Any?
     private var uiTestingInputObserver: NSObjectProtocol?
+    private var uiTestingDoubleShiftObserver: NSObjectProtocol?
     private var uiTestingDisableMonitorObserver: NSObjectProtocol?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        if let application = notification.object as? NSApplication {
+            scrollbarStyler?.start(application: application)
+        }
         voiceSearchShortcut?.startMonitoring()
+        pronunciationShortcut?.startMonitoring()
         installShortcutKeyMonitor()
 
         guard isUITesting else { return }
@@ -163,6 +186,13 @@ private final class Lang4SelfAppDelegate: NSObject, NSApplicationDelegate {
             queue: .main
         ) { _ in
             UITestingInput.postHeldSpaceWithRepeats()
+        }
+        uiTestingDoubleShiftObserver = DistributedNotificationCenter.default().addObserver(
+            forName: Notification.Name("Lang4SelfUITestingSimulateDoubleShift"),
+            object: nil,
+            queue: .main
+        ) { _ in
+            UITestingInput.postDoubleShift()
         }
         uiTestingDisableMonitorObserver = DistributedNotificationCenter.default().addObserver(
             forName: Notification.Name("Lang4SelfUITestingDisableSpaceMonitor"),
@@ -191,6 +221,7 @@ private final class Lang4SelfAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillResignActive(_ notification: Notification) {
         voiceSearchShortcut?.cancelSpaceHold()
+        pronunciationShortcut?.reset()
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -202,13 +233,20 @@ private final class Lang4SelfAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        scrollbarStyler?.stop()
         voiceSearchShortcut?.stopMonitoring()
+        pronunciationShortcut?.stopMonitoring()
+        germanSpeech?.stop()
         if let shortcutKeyMonitor { NSEvent.removeMonitor(shortcutKeyMonitor) }
         shortcutKeyMonitor = nil
         if let uiTestingInputObserver {
             DistributedNotificationCenter.default().removeObserver(uiTestingInputObserver)
         }
         uiTestingInputObserver = nil
+        if let uiTestingDoubleShiftObserver {
+            DistributedNotificationCenter.default().removeObserver(uiTestingDoubleShiftObserver)
+        }
+        uiTestingDoubleShiftObserver = nil
         if let uiTestingDisableMonitorObserver {
             DistributedNotificationCenter.default().removeObserver(uiTestingDisableMonitorObserver)
         }
@@ -233,6 +271,14 @@ private final class Lang4SelfAppDelegate: NSObject, NSApplicationDelegate {
                     state.redo()
                     return true
                 },
+                cycleReviewMode: { [weak self] offset in
+                    guard self?.appState?.route == .review else { return false }
+                    NotificationCenter.default.post(
+                        name: offset < 0 ? .previousReviewMode : .nextReviewMode,
+                        object: nil
+                    )
+                    return true
+                },
                 isEditingText: { event.window?.firstResponder is NSTextView }
             )
             .handle(event)
@@ -247,6 +293,7 @@ struct AppShortcutKeyHandler {
     let showKeyboardShortcuts: () -> Void
     let undo: () -> Bool
     let redo: () -> Bool
+    let cycleReviewMode: (Int) -> Bool
     let isEditingText: () -> Bool
 
     init(
@@ -254,12 +301,14 @@ struct AppShortcutKeyHandler {
         showKeyboardShortcuts: @escaping () -> Void,
         undo: @escaping () -> Bool = { false },
         redo: @escaping () -> Bool = { false },
+        cycleReviewMode: @escaping (Int) -> Bool = { _ in false },
         isEditingText: @escaping () -> Bool = { false }
     ) {
         self.openSettings = openSettings
         self.showKeyboardShortcuts = showKeyboardShortcuts
         self.undo = undo
         self.redo = redo
+        self.cycleReviewMode = cycleReviewMode
         self.isEditingText = isEditingText
     }
 
@@ -280,6 +329,11 @@ struct AppShortcutKeyHandler {
         case "z" where !isEditingText():
             guard !event.isARepeat else { return nil }
             let handled = modifiers.contains(.shift) ? redo() : undo()
+            return handled ? nil : event
+        case "[" where !modifiers.contains(.shift),
+             "]" where !modifiers.contains(.shift):
+            guard !event.isARepeat else { return event }
+            let handled = cycleReviewMode(characters == "[" ? -1 : 1)
             return handled ? nil : event
         default:
             return event
@@ -309,6 +363,33 @@ private enum UITestingInput {
         postSpaceEvent(type: .keyUp, isRepeat: false, after: 0.20)
     }
 
+    static func postDoubleShift() {
+        NSApp.activate()
+        NSApp.mainWindow?.makeKey()
+        postShiftEvent(isDown: true, after: 0.05)
+        postShiftEvent(isDown: false, after: 0.10)
+        postShiftEvent(isDown: true, after: 0.15)
+        postShiftEvent(isDown: false, after: 0.20)
+    }
+
+    private static func postShiftEvent(isDown: Bool, after delay: TimeInterval) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+            guard let event = NSEvent.keyEvent(
+                with: .flagsChanged,
+                location: .zero,
+                modifierFlags: isDown ? .shift : [],
+                timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: NSApp.mainWindow?.windowNumber ?? 0,
+                context: nil,
+                characters: "",
+                charactersIgnoringModifiers: "",
+                isARepeat: false,
+                keyCode: 56
+            ) else { return }
+            NSApp.postEvent(event, atStart: false)
+        }
+    }
+
     private static func postSpaceEvent(
         type: NSEvent.EventType,
         isRepeat: Bool,
@@ -330,6 +411,86 @@ private enum UITestingInput {
             NSApp.postEvent(event, atStart: false)
         }
     }
+}
+
+@MainActor
+protocol AppScrollbarStyling: AnyObject {
+    func start(application: NSApplication)
+    func stop()
+}
+
+@MainActor
+final class OverlayScrollbarStyler: AppScrollbarStyling {
+    private let notificationCenter: NotificationCenter
+    private weak var application: NSApplication?
+    private var updateObserver: NSObjectProtocol?
+
+    init(notificationCenter: NotificationCenter) {
+        self.notificationCenter = notificationCenter
+    }
+
+    func start(application: NSApplication) {
+        stop()
+        self.application = application
+        styleScrollViews(in: application.windows)
+        updateObserver = notificationCenter.addObserver(
+            forName: NSApplication.didUpdateNotification,
+            object: application,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, let application = self.application else { return }
+                self.styleScrollViews(in: application.windows)
+            }
+        }
+    }
+
+    func stop() {
+        if let updateObserver {
+            notificationCenter.removeObserver(updateObserver)
+        }
+        updateObserver = nil
+        application = nil
+    }
+
+    func styleScrollViews(in windows: [NSWindow]) {
+        for window in windows {
+            guard let contentView = window.contentView else { continue }
+            Self.styleScrollViews(in: contentView)
+        }
+    }
+
+    static func styleScrollViews(in rootView: NSView) {
+        if let scrollView = rootView as? NSScrollView {
+            style(scrollView)
+        }
+        for subview in rootView.subviews {
+            styleScrollViews(in: subview)
+        }
+    }
+
+    private static func style(_ scrollView: NSScrollView) {
+        var needsTiling = false
+        if scrollView.scrollerStyle != .overlay {
+            scrollView.scrollerStyle = .overlay
+            needsTiling = true
+        }
+        for scroller in [scrollView.verticalScroller, scrollView.horizontalScroller].compactMap({ $0 }) {
+            if scroller.controlSize != .small {
+                scroller.controlSize = .small
+                needsTiling = true
+            }
+        }
+        if needsTiling {
+            scrollView.tile()
+        }
+    }
+}
+
+@MainActor
+private final class UITestingGermanSpeechSynthesizer: GermanSpeechSynthesizing {
+    func speak(_ text: String) {}
+    func stop() {}
 }
 
 private struct Lang4SelfCommands: Commands {
@@ -364,6 +525,18 @@ private struct Lang4SelfCommands: Commands {
         CommandGroup(after: .textEditing) {
             Button("Find") { focusSearch() }
             .keyboardShortcut("f", modifiers: .command)
+
+            Button("Previous Review Mode") {
+                NotificationCenter.default.post(name: .previousReviewMode, object: nil)
+            }
+            .keyboardShortcut("[", modifiers: .command)
+            .disabled(state.route != .review)
+
+            Button("Next Review Mode") {
+                NotificationCenter.default.post(name: .nextReviewMode, object: nil)
+            }
+            .keyboardShortcut("]", modifiers: .command)
+            .disabled(state.route != .review)
         }
 
         CommandGroup(replacing: .help) {
