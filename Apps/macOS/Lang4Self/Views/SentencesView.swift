@@ -232,6 +232,20 @@ struct SentenceReviewView: View {
             if state.sentencePractice.result != nil {
                 revealedAnswer(for: item)
             }
+        } else if state.sentencePractice.isWaitingForInitialGeneration {
+            GroupBox {
+                VStack(spacing: 12) {
+                    ProgressView()
+                    Text("Preparing your first sentence…")
+                        .font(.title3.weight(.semibold))
+                    Text("Practice will start as soon as it’s ready.")
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(32)
+                .accessibilityIdentifier("sentences.preparing")
+            }
         } else if state.sentencePractice.isWaitingForGeneration {
             GroupBox {
                 VStack(spacing: 12) {
@@ -253,15 +267,16 @@ struct SentenceReviewView: View {
                 } description: {
                     Text("Answered \(state.sentencePractice.answeredCount) prompt\(state.sentencePractice.answeredCount == 1 ? "" : "s").")
                 }
+                .accessibilityIdentifier("sentences.complete")
                 Button("Set up another run") {
                     state.abortSentencePractice()
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
+                .keyboardShortcut(.defaultAction)
                 .accessibilityIdentifier("sentences.restart")
             }
             .frame(minHeight: 260)
-            .accessibilityIdentifier("sentences.complete")
         } else {
             ContentUnavailableView {
                 Label("Test your German", systemImage: "text.badge.checkmark")

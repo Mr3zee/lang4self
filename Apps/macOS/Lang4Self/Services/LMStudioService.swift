@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import Lang4SelfCore
+import OSLog
 
 struct LMStudioModel: Decodable, Hashable, Identifiable {
     struct Quantization: Decodable, Hashable {
@@ -132,6 +133,56 @@ enum LMStudioError: LocalizedError {
     }
 }
 
+struct SentenceGenerationFailureLog {
+    let requestID: UUID
+    let reason: String
+    let requestBody: String
+    let responseBody: String?
+}
+
+protocol SentenceGenerationLogging {
+    func logFailure(_ failure: SentenceGenerationFailureLog)
+}
+
+struct OSLogSentenceGenerationLogger: SentenceGenerationLogging {
+    private let logger: Logger
+
+    init(subsystem: String) {
+        logger = Logger(subsystem: subsystem, category: "SentenceGeneration")
+    }
+
+    func logFailure(_ failure: SentenceGenerationFailureLog) {
+        let requestID = failure.requestID.uuidString
+        logger.error(
+            "Sentence generation request \(requestID, privacy: .public) failed: \(failure.reason, privacy: .public)"
+        )
+        logDump(failure.requestBody, label: "request", requestID: requestID)
+        if let responseBody = failure.responseBody {
+            logDump(responseBody, label: "response", requestID: requestID)
+        } else {
+            logger.error("[\(requestID, privacy: .public)] response: <no response>")
+        }
+    }
+
+    private func logDump(_ value: String, label: String, requestID: String) {
+        var remainder = value[...]
+        var chunkNumber = 1
+        while !remainder.isEmpty {
+            let end = remainder.index(
+                remainder.startIndex,
+                offsetBy: 2_000,
+                limitedBy: remainder.endIndex
+            ) ?? remainder.endIndex
+            let chunk = String(remainder[..<end])
+            logger.error(
+                "[\(requestID, privacy: .public)] \(label, privacy: .public) \(chunkNumber): \(chunk, privacy: .public)"
+            )
+            remainder = remainder[end...]
+            chunkNumber += 1
+        }
+    }
+}
+
 @MainActor
 protocol SentenceGenerating: AnyObject {
     var progressDidChange: ((LMStudioProgress) -> Void)? { get set }
@@ -164,6 +215,7 @@ final class LMStudioService: SentenceGenerating {
     private var loadedSettings: LMStudioSettings?
     private var loadedModelKey: String?
     private var isShuttingDown = false
+    private let generationLogger: any SentenceGenerationLogging
 
     private lazy var session: URLSession = {
         let configuration = URLSessionConfiguration.ephemeral
@@ -173,7 +225,9 @@ final class LMStudioService: SentenceGenerating {
         return URLSession(configuration: configuration)
     }()
 
-    init() {}
+    init(generationLogger: any SentenceGenerationLogging) {
+        self.generationLogger = generationLogger
+    }
 
     func generate(
         vocabulary: [PersonalCard],
@@ -198,7 +252,7 @@ final class LMStudioService: SentenceGenerating {
 
             for attempt in 0..<3 where drafts.count < count {
                 let missingCount = count - drafts.count
-                let response: SentenceGenerationEnvelope
+                let response: SentenceRequestResult
                 do {
                     do {
                         response = try await requestSentences(
@@ -223,11 +277,20 @@ final class LMStudioService: SentenceGenerating {
                 let seen = Set((excludedSentences + drafts.map(\.german)).map {
                     SentenceTokenizer.normalized($0)
                 })
-                drafts += validator.validatedDrafts(
-                    from: response,
+                let validatedDrafts = validator.validatedDrafts(
+                    from: response.envelope,
                     limit: missingCount,
                     excluding: seen
                 )
+                if validatedDrafts.count < missingCount {
+                    generationLogger.logFailure(SentenceGenerationFailureLog(
+                        requestID: response.requestID,
+                        reason: "Validation accepted \(validatedDrafts.count) of \(missingCount) requested sentences.",
+                        requestBody: response.requestBody,
+                        responseBody: response.responseBody
+                    ))
+                }
+                drafts += validatedDrafts
             }
             guard drafts.count == count else { throw LMStudioError.noValidSentences }
             progress = .ready(model.displayName)
@@ -418,7 +481,7 @@ final class LMStudioService: SentenceGenerating {
         settings: LMStudioSettings,
         excluding excludedSentences: [String],
         structured: Bool
-    ) async throws -> SentenceGenerationEnvelope {
+    ) async throws -> SentenceRequestResult {
         let userPrompt = try contract.userPrompt(excluding: excludedSentences)
 
         var body: [String: Any] = [
@@ -444,30 +507,50 @@ final class LMStudioService: SentenceGenerating {
         request.timeoutInterval = 180
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
-
-        let (data, response) = try await session.data(for: request)
-        guard data.count < 2_000_000 else {
-            throw LMStudioError.invalidResponse("The response was unexpectedly large.")
-        }
-        guard let http = response as? HTTPURLResponse else { throw LMStudioError.serverUnavailable }
-        guard (200..<300).contains(http.statusCode) else {
-            let detail = apiErrorMessage(from: data)
-            throw LMStudioError.api(http.statusCode, detail)
-        }
-
-        let chat: ChatResponse
+        let requestID = UUID()
+        let requestBody = String(decoding: request.httpBody ?? Data(), as: UTF8.self)
+        var responseBody: String?
         do {
-            chat = try JSONDecoder().decode(ChatResponse.self, from: data)
+            let (data, response) = try await session.data(for: request)
+            responseBody = String(decoding: data, as: UTF8.self)
+            guard data.count < 2_000_000 else {
+                throw LMStudioError.invalidResponse("The response was unexpectedly large.")
+            }
+            guard let http = response as? HTTPURLResponse else { throw LMStudioError.serverUnavailable }
+            guard (200..<300).contains(http.statusCode) else {
+                let detail = apiErrorMessage(from: data)
+                throw LMStudioError.api(http.statusCode, detail)
+            }
+
+            let chat: ChatResponse
+            do {
+                chat = try JSONDecoder().decode(ChatResponse.self, from: data)
+            } catch {
+                throw LMStudioError.invalidResponse("The chat response could not be decoded.")
+            }
+            guard let message = chat.choices.first?.message,
+                  let content = [message.content, message.reasoningContent]
+                    .compactMap({ $0?.trimmingCharacters(in: .whitespacesAndNewlines) })
+                    .first(where: { !$0.isEmpty }) else {
+                throw LMStudioError.invalidResponse("The response contained no text.")
+            }
+            return SentenceRequestResult(
+                requestID: requestID,
+                envelope: try contract.decodeEnvelope(content),
+                requestBody: requestBody,
+                responseBody: responseBody ?? ""
+            )
+        } catch where Task.isCancelled || error is CancellationError {
+            throw error
         } catch {
-            throw LMStudioError.invalidResponse("The chat response could not be decoded.")
+            generationLogger.logFailure(SentenceGenerationFailureLog(
+                requestID: requestID,
+                reason: error.localizedDescription,
+                requestBody: requestBody,
+                responseBody: responseBody
+            ))
+            throw error
         }
-        guard let message = chat.choices.first?.message,
-              let content = [message.content, message.reasoningContent]
-                .compactMap({ $0?.trimmingCharacters(in: .whitespacesAndNewlines) })
-                .first(where: { !$0.isEmpty }) else {
-            throw LMStudioError.invalidResponse("The response contained no text.")
-        }
-        return try contract.decodeEnvelope(content)
     }
 
     private func apiErrorMessage(from data: Data) -> String {
@@ -537,6 +620,13 @@ final class LMStudioService: SentenceGenerating {
         }
         return output.trimmingCharacters(in: .whitespacesAndNewlines)
     }
+}
+
+private struct SentenceRequestResult {
+    let requestID: UUID
+    let envelope: SentenceGenerationEnvelope
+    let requestBody: String
+    let responseBody: String
 }
 
 private struct LoadedModelsResponse: Decodable {

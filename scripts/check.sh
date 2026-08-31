@@ -9,4 +9,5 @@ xcodebuild -quiet \
   -project "$PROJECT_DIR/Lang4Self.xcodeproj" \
   -scheme Lang4Self \
   -destination 'platform=macOS,arch=arm64' \
+  -skipPackagePluginValidation \
   build

@@ -156,7 +156,7 @@ struct ReviewView: View {
                         forcedTestMode: mode == .listeningSentences ? .listening : nil
                     )
                 } else if let card = current {
-                    ZStack(alignment: .bottom) {
+                    VStack(spacing: 0) {
                         VStack(spacing: 24) {
                             prompt(for: card)
 
@@ -170,6 +170,7 @@ struct ReviewView: View {
                         .accessibilityElement(children: .contain)
                         .accessibilityIdentifier("review.content")
                         .padding(32)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
 
                         if revealed { ratingBar(card) }
                     }

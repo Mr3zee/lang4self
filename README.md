@@ -13,13 +13,19 @@
 
 Lang4Self combines a fast offline dictionary, speech lookup and pronunciation, flexible spaced-repetition drills, named word lists, and locally generated sentence practice. There is no account, telemetry, or Lang4Self cloud backend. Grammar analysis sends generated German sentences to the public UDPipe API.
 
-## Screenshots
+## Views
 
-| Dictionary | My words | Sentence practice |
-|---|---|---|
-| ![Text and speech lookup in the offline dictionary](docs/screenshots/dictionary.png) | ![Saved words, lists, and study details](docs/screenshots/my-words.png) | ![Generated fill-in-the-blank sentence practice](docs/screenshots/sentences.png) |
+### Dictionary
 
-The screenshots use the app's small deterministic test fixture. They do not contain imported dict.cc or personal data.
+![Text and speech lookup in the offline dictionary](docs/screenshots/dictionary.png)
+
+### My words
+
+![Saved words, lists, and study details](docs/screenshots/my-words.png)
+
+### Sentence practice
+
+![Generated fill-in-the-blank sentence practice](docs/screenshots/sentences.png)
 
 ## Features
 
@@ -83,6 +89,7 @@ Run the macOS UI tests:
 ```sh
 xcodebuild -quiet -project Lang4Self.xcodeproj -scheme Lang4Self \
   -destination 'platform=macOS,arch=arm64' \
+  -skipPackagePluginValidation \
   -only-testing:Lang4SelfUITests test
 ```
 
@@ -130,3 +137,5 @@ lang4self import-explanations ~/Downloads/dictionary-de.db
 Code in this repository is licensed under [GPL-2.0-or-later](LICENSE).
 
 dict.cc translation data is not open-source data. Personal use is allowed under the separate dict.cc terms, but the exports are never bundled or republished here. Imported explanations originate from Wiktionary via kaikki.org and Lector and are licensed under CC BY-SA 4.0; they also remain local and are not bundled.
+
+The screenshots do not contain imported dict.cc or personal data.

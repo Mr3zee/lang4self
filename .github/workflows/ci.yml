@@ -39,6 +39,7 @@ jobs:
             -project Lang4Self.xcodeproj \
             -scheme Lang4Self \
             -destination 'platform=macOS' \
+            -skipPackagePluginValidation \
             -resultBundlePath TestResults.xcresult \
             -only-testing:Lang4SelfUITests \
             test

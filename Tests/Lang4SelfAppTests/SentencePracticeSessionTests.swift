@@ -106,6 +106,38 @@ final class SentencePracticeSessionTests: XCTestCase {
         XCTAssertFalse(session.isWaitingForGeneration)
     }
 
+    func testInitialGenerationIsNotReportedAsWaitingForNextBatch() {
+        let source = WordList(id: WordList.defaultID, name: "My words")
+        var session = SentencePracticeSession()
+
+        session.start(
+            mode: .vocabularyBlanks,
+            requestedCount: 5,
+            retries: [],
+            sourceList: source
+        )
+
+        XCTAssertTrue(session.isWaitingForInitialGeneration)
+        XCTAssertFalse(session.isWaitingForGeneration)
+    }
+
+    func testGenerationFailureWithoutSentencesReturnsToSetup() {
+        let source = WordList(id: WordList.defaultID, name: "My words")
+        var session = SentencePracticeSession()
+        session.start(
+            mode: .vocabularyBlanks,
+            requestedCount: 5,
+            retries: [],
+            sourceList: source
+        )
+
+        session.finishGeneration()
+
+        XCTAssertFalse(session.hasStarted)
+        XCTAssertFalse(session.isComplete)
+        XCTAssertNil(session.currentItem)
+    }
+
     func testAbortClearsAnActiveRunAndReturnsToSetupState() {
         let source = WordList(id: WordList.defaultID, name: "My words")
         var session = SentencePracticeSession()

@@ -99,6 +99,89 @@ final class GermanSpeechControllerTests: XCTestCase {
     }
 }
 
+@MainActor
+final class MLXGermanSpeechSynthesizerTests: XCTestCase {
+    func testSpeakWaitsForMatchingPreparationInsteadOfGeneratingInParallel() async {
+        let model = ControllableGermanSpeechModel()
+        let player = TestGermanSpeechAudioPlayer()
+        let synthesizer = MLXGermanSpeechSynthesizer(
+            configuration: testMLXConfiguration,
+            modelLoader: TestMLXGermanSpeechModelLoader(model: model),
+            fallback: TestGermanSpeechSynthesizer(),
+            player: player
+        )
+        synthesizer.start()
+        await waitUntil { synthesizer.modelStatus == .ready }
+
+        model.blockedText = "Haus"
+        synthesizer.prepare("Haus")
+        await waitUntil { model.generatedTexts.contains("Haus") }
+        synthesizer.speak("Haus")
+        await Task.yield()
+
+        XCTAssertEqual(model.generatedTexts.filter { $0 == "Haus" }.count, 1)
+        XCTAssertTrue(player.startedSampleRates.isEmpty)
+
+        model.finishBlockedGeneration(samples: [0.25, 0.5])
+        await waitUntil { player.finishCount == 1 }
+
+        XCTAssertEqual(model.generatedTexts.filter { $0 == "Haus" }.count, 1)
+        XCTAssertEqual(player.startedSampleRates, [24_000])
+        XCTAssertEqual(player.scheduledChunks, [[0.25, 0.5]])
+    }
+
+    func testMatchingPreparationUpdateDoesNotInterruptPlaybackThatStartedFirst() async {
+        let model = ControllableGermanSpeechModel()
+        let player = TestGermanSpeechAudioPlayer()
+        let synthesizer = MLXGermanSpeechSynthesizer(
+            configuration: testMLXConfiguration,
+            modelLoader: TestMLXGermanSpeechModelLoader(model: model),
+            fallback: TestGermanSpeechSynthesizer(),
+            player: player
+        )
+        synthesizer.start()
+        await waitUntil { synthesizer.modelStatus == .ready }
+
+        model.blockedText = "Haus"
+        synthesizer.speak("Haus")
+        synthesizer.prepare("Haus")
+        await waitUntil { model.generatedTexts.contains("Haus") }
+
+        XCTAssertEqual(model.generatedTexts.filter { $0 == "Haus" }.count, 1)
+        XCTAssertEqual(player.startedSampleRates, [24_000])
+
+        model.finishBlockedGeneration(samples: [0.25, 0.5])
+        await waitUntil { player.finishCount == 1 }
+
+        XCTAssertEqual(model.generatedTexts.filter { $0 == "Haus" }.count, 1)
+        XCTAssertEqual(player.scheduledChunks, [[0.25, 0.5]])
+    }
+
+    private var testMLXConfiguration: MLXGermanSpeechConfiguration {
+        MLXGermanSpeechConfiguration(
+            repositoryID: "test/repository",
+            revision: "test-revision",
+            cacheDirectory: FileManager.default.temporaryDirectory,
+            voice: "Test Voice",
+            language: "German",
+            warmupText: "Hallo.",
+            streamingInterval: 0.08
+        )
+    }
+
+    private func waitUntil(
+        _ condition: @MainActor () -> Bool,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async {
+        for _ in 0..<200 {
+            if condition() { return }
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        XCTFail("Condition was not met", file: file, line: line)
+    }
+}
+
 final class DoubleShiftKeyDetectorTests: XCTestCase {
     func testTwoCleanShiftTapsWithinIntervalTriggerOnce() {
         var detector = DoubleShiftKeyDetector(maximumInterval: 0.4)
@@ -160,6 +243,72 @@ final class DoubleShiftKeyDetectorTests: XCTestCase {
             keyCode: 0
         )!
     }
+}
+
+@MainActor
+private final class TestMLXGermanSpeechModelLoader: MLXGermanSpeechModelLoading {
+    let model: any MLXGermanSpeechGenerating
+
+    init(model: any MLXGermanSpeechGenerating) {
+        self.model = model
+    }
+
+    func isModelDownloaded() async -> Bool { true }
+    func downloadModel() async throws {}
+    func loadModel() async throws -> any MLXGermanSpeechGenerating { model }
+}
+
+@MainActor
+private final class ControllableGermanSpeechModel: MLXGermanSpeechGenerating {
+    let sampleRate = 24_000
+    var blockedText: String?
+    private(set) var generatedTexts: [String] = []
+    private var blockedContinuation: AsyncThrowingStream<[Float], Error>.Continuation?
+
+    func generateSamplesStream(
+        text: String,
+        voice: String,
+        language: String,
+        streamingInterval: TimeInterval
+    ) -> AsyncThrowingStream<[Float], Error> {
+        generatedTexts.append(text)
+        if text == blockedText {
+            return AsyncThrowingStream { continuation in
+                blockedContinuation = continuation
+            }
+        }
+        return AsyncThrowingStream { continuation in
+            continuation.yield([0.1])
+            continuation.finish()
+        }
+    }
+
+    func finishBlockedGeneration(samples: [Float]) {
+        blockedContinuation?.yield(samples)
+        blockedContinuation?.finish()
+        blockedContinuation = nil
+    }
+}
+
+@MainActor
+private final class TestGermanSpeechAudioPlayer: MLXGermanSpeechAudioPlaying {
+    private(set) var startedSampleRates: [Double] = []
+    private(set) var scheduledChunks: [[Float]] = []
+    private(set) var finishCount = 0
+
+    func startStreaming(sampleRate: Double) {
+        startedSampleRates.append(sampleRate)
+    }
+
+    func scheduleAudioChunk(_ samples: [Float], withCrossfade: Bool) {
+        scheduledChunks.append(samples)
+    }
+
+    func finishStreamingInput() {
+        finishCount += 1
+    }
+
+    func stop() {}
 }
 
 @MainActor

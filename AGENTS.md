@@ -27,6 +27,7 @@
 - Tests live in `Tests/Lang4SelfUITests/Lang4SelfUITests.swift`.
 - Run only the focused test(s) relevant to the change by default, using `-only-testing:Lang4SelfUITests/Lang4SelfUITests/testName`.
 - Do not run the full UI-test target unless the user explicitly asks for it; the full suite is very slow.
+- Always pass `-skipPackagePluginValidation`; otherwise Xcode blocks the MLX `CudaBuild` package plugin.
 - Use Xcode's default Derived Data. Never use `-derivedDataPath .derived`: this Desktop-hosted repository causes repeated macOS permission prompts.
 - Add stable accessibility identifiers and deterministic `--ui-testing` fixtures for new interactions.
 - Ignore locked-iPhone `notification_proxy` warnings; they are unrelated to macOS tests.
@@ -35,5 +36,6 @@
 ```sh
 xcodebuild -quiet -project Lang4Self.xcodeproj -scheme Lang4Self \
   -destination 'platform=macOS,arch=arm64' \
+  -skipPackagePluginValidation \
   -only-testing:Lang4SelfUITests test
 ```

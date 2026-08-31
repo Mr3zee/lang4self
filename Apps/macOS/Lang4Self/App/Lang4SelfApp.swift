@@ -139,7 +139,11 @@ private final class Lang4SelfDependencies: ObservableObject {
                     index: store,
                     translator: dictionaryTranslator
                 ),
-                sentenceGenerator: LMStudioService(),
+                sentenceGenerator: LMStudioService(
+                    generationLogger: OSLogSentenceGenerationLogger(
+                        subsystem: Bundle.main.bundleIdentifier ?? "com.alexsysoev.Lang4Self"
+                    )
+                ),
                 sentenceAnalyzer: UDPipeSentenceAnalyzer(
                     session: URLSession(configuration: udpipeConfiguration)
                 ),

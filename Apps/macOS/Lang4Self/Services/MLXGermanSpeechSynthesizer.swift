@@ -13,10 +13,50 @@ struct MLXGermanSpeechConfiguration {
     let streamingInterval: TimeInterval
 }
 
+@MainActor
+protocol MLXGermanSpeechGenerating: AnyObject {
+    var sampleRate: Int { get }
+
+    func generateSamplesStream(
+        text: String,
+        voice: String,
+        language: String,
+        streamingInterval: TimeInterval
+    ) -> AsyncThrowingStream<[Float], Error>
+}
+
+@MainActor
+private final class MLXGermanSpeechGenerationModel: MLXGermanSpeechGenerating {
+    private let model: any SpeechGenerationModel
+
+    init(model: any SpeechGenerationModel) {
+        self.model = model
+    }
+
+    var sampleRate: Int { model.sampleRate }
+
+    func generateSamplesStream(
+        text: String,
+        voice: String,
+        language: String,
+        streamingInterval: TimeInterval
+    ) -> AsyncThrowingStream<[Float], Error> {
+        model.generateSamplesStream(
+            text: text,
+            voice: voice,
+            refAudio: nil,
+            refText: nil,
+            language: language,
+            streamingInterval: streamingInterval
+        )
+    }
+}
+
+@MainActor
 protocol MLXGermanSpeechModelLoading {
     func isModelDownloaded() async -> Bool
     func downloadModel() async throws
-    func loadModel() async throws -> any SpeechGenerationModel
+    func loadModel() async throws -> any MLXGermanSpeechGenerating
 }
 
 struct HuggingFaceMLXGermanSpeechModelLoader: MLXGermanSpeechModelLoading {
@@ -46,16 +86,17 @@ struct HuggingFaceMLXGermanSpeechModelLoader: MLXGermanSpeechModelLoading {
         }
     }
 
-    func loadModel() async throws -> any SpeechGenerationModel {
+    func loadModel() async throws -> any MLXGermanSpeechGenerating {
         let snapshot = try expectedSnapshot()
         guard Self.isCompleteSnapshot(snapshot) else {
             throw MLXGermanSpeechModelError.modelNotDownloaded
         }
 
-        return try await TTS.loadModel(
+        let model = try await TTS.loadModel(
             modelRepo: snapshot.path,
             modelType: "qwen3_tts"
         )
+        return MLXGermanSpeechGenerationModel(model: model)
     }
 
     private func expectedSnapshot() throws -> URL {
@@ -111,6 +152,16 @@ enum MLXGermanSpeechModelError: LocalizedError {
 }
 
 @MainActor
+protocol MLXGermanSpeechAudioPlaying: AnyObject {
+    func startStreaming(sampleRate: Double)
+    func scheduleAudioChunk(_ samples: [Float], withCrossfade: Bool)
+    func finishStreamingInput()
+    func stop()
+}
+
+extension AudioPlayer: MLXGermanSpeechAudioPlaying {}
+
+@MainActor
 final class MLXGermanSpeechSynthesizer: GermanSpeechSynthesizing, GermanSpeechModelManaging {
     private struct PreparedSpeech {
         let text: String
@@ -121,12 +172,16 @@ final class MLXGermanSpeechSynthesizer: GermanSpeechSynthesizing, GermanSpeechMo
     private let configuration: MLXGermanSpeechConfiguration
     private let modelLoader: any MLXGermanSpeechModelLoading
     private let fallback: any GermanSpeechSynthesizing
-    private let player: AudioPlayer
+    private let player: any MLXGermanSpeechAudioPlaying
 
-    private var model: (any SpeechGenerationModel)?
+    private var model: (any MLXGermanSpeechGenerating)?
     private var warmupTask: Task<Void, Never>?
     private var preparationTask: Task<Void, Never>?
+    private var speechTask: Task<Void, Never>?
     private var requestedPreparationText: String?
+    private var requestedSpeechText: String?
+    private var preparationRequestID = 0
+    private var speechRequestID = 0
     private var preparedSpeech: PreparedSpeech?
     private var hasStarted = false
 
@@ -137,7 +192,7 @@ final class MLXGermanSpeechSynthesizer: GermanSpeechSynthesizing, GermanSpeechMo
         configuration: MLXGermanSpeechConfiguration,
         modelLoader: any MLXGermanSpeechModelLoading,
         fallback: any GermanSpeechSynthesizing,
-        player: AudioPlayer
+        player: any MLXGermanSpeechAudioPlaying
     ) {
         precondition(!configuration.repositoryID.isEmpty)
         precondition(!configuration.revision.isEmpty)
@@ -177,9 +232,26 @@ final class MLXGermanSpeechSynthesizer: GermanSpeechSynthesizing, GermanSpeechMo
 
     func prepare(_ text: String?) {
         start()
-        preparationTask?.cancel()
+
+        if let text, requestedSpeechText == text {
+            return
+        }
+
+        let supersededSpeechTask = speechTask
+        supersededSpeechTask?.cancel()
+        speechTask = nil
+        requestedSpeechText = nil
+        speechRequestID &+= 1
+        if supersededSpeechTask != nil {
+            player.stop()
+        }
+
+        let supersededPreparationTask = preparationTask
+        supersededPreparationTask?.cancel()
         preparationTask = nil
         requestedPreparationText = text
+        preparationRequestID &+= 1
+        let requestID = preparationRequestID
 
         guard let text else {
             preparedSpeech = nil
@@ -190,6 +262,8 @@ final class MLXGermanSpeechSynthesizer: GermanSpeechSynthesizing, GermanSpeechMo
 
         preparationTask = Task { [weak self] in
             guard let self else { return }
+            await supersededSpeechTask?.value
+            await supersededPreparationTask?.value
             await warmupTask?.value
             guard !Task.isCancelled, let model else { return }
 
@@ -200,7 +274,9 @@ final class MLXGermanSpeechSynthesizer: GermanSpeechSynthesizing, GermanSpeechMo
                     streamingInterval: 0.32
                 )
                 try Task.checkCancellation()
-                guard requestedPreparationText == text else { return }
+                guard preparationRequestID == requestID,
+                      requestedPreparationText == text
+                else { return }
                 preparedSpeech = PreparedSpeech(
                     text: text,
                     samples: samples,
@@ -211,38 +287,105 @@ final class MLXGermanSpeechSynthesizer: GermanSpeechSynthesizing, GermanSpeechMo
             } catch {
                 NSLog("Lang4Self could not prepare MLX pronunciation: %@", error.localizedDescription)
             }
+
+            if preparationRequestID == requestID {
+                preparationTask = nil
+            }
         }
     }
 
     func speak(_ text: String) {
         start()
-        preparationTask?.cancel()
-        preparationTask = nil
-        requestedPreparationText = nil
 
-        if let preparedSpeech, preparedSpeech.text == text {
+        let supersededSpeechTask = speechTask
+        supersededSpeechTask?.cancel()
+        if supersededSpeechTask != nil {
+            player.stop()
+        }
+
+        let pendingPreparationTask = requestedPreparationText == text
+            ? preparationTask
+            : nil
+        let supersededPreparationTask = preparationTask
+        if pendingPreparationTask == nil {
+            supersededPreparationTask?.cancel()
+            preparationTask = nil
+            requestedPreparationText = nil
+            preparationRequestID &+= 1
+        }
+
+        requestedSpeechText = text
+        speechRequestID &+= 1
+        let requestID = speechRequestID
+        speechTask = Task { [weak self] in
+            guard let self else { return }
+            await supersededSpeechTask?.value
+            await supersededPreparationTask?.value
+            await warmupTask?.value
+            guard !Task.isCancelled,
+                  speechRequestID == requestID,
+                  requestedSpeechText == text
+            else { return }
+
+            if let preparedSpeech, preparedSpeech.text == text {
+                play(preparedSpeech)
+                return
+            }
+
+            guard let model else {
+                requestedSpeechText = nil
+                fallback.speak(text)
+                return
+            }
+
             fallback.stop()
-            player.startStreaming(sampleRate: preparedSpeech.sampleRate)
-            player.scheduleAudioChunk(preparedSpeech.samples, withCrossfade: false)
-            player.finishStreamingInput()
-            return
-        }
+            player.startStreaming(sampleRate: Double(model.sampleRate))
 
-        guard let model else {
-            fallback.speak(text)
-            return
+            do {
+                var generatedSamples: [Float] = []
+                let stream = model.generateSamplesStream(
+                    text: text,
+                    voice: configuration.voice,
+                    language: configuration.language,
+                    streamingInterval: configuration.streamingInterval
+                )
+                for try await samples in stream {
+                    try Task.checkCancellation()
+                    guard speechRequestID == requestID,
+                          requestedSpeechText == text
+                    else {
+                        throw CancellationError()
+                    }
+                    generatedSamples.append(contentsOf: samples)
+                    player.scheduleAudioChunk(samples, withCrossfade: false)
+                }
+                try Task.checkCancellation()
+                guard speechRequestID == requestID,
+                      requestedSpeechText == text
+                else {
+                    throw CancellationError()
+                }
+                player.finishStreamingInput()
+                if !generatedSamples.isEmpty {
+                    preparedSpeech = PreparedSpeech(
+                        text: text,
+                        samples: generatedSamples,
+                        sampleRate: Double(model.sampleRate)
+                    )
+                }
+            } catch is CancellationError {
+                if speechRequestID == requestID {
+                    requestedSpeechText = nil
+                    player.stop()
+                }
+            } catch {
+                guard speechRequestID == requestID else { return }
+                requestedSpeechText = nil
+                player.stop()
+                fallback.speak(text)
+                NSLog("Lang4Self could not stream MLX pronunciation: %@", error.localizedDescription)
+            }
         }
-
-        fallback.stop()
-        let stream = model.generatePCMBufferStream(
-            text: text,
-            voice: configuration.voice,
-            refAudio: nil,
-            refText: nil,
-            language: configuration.language,
-            streamingInterval: configuration.streamingInterval
-        )
-        player.play(stream: stream)
     }
 
     func stop() {
@@ -250,8 +393,21 @@ final class MLXGermanSpeechSynthesizer: GermanSpeechSynthesizing, GermanSpeechMo
         warmupTask = nil
         preparationTask?.cancel()
         preparationTask = nil
+        speechTask?.cancel()
+        speechTask = nil
+        requestedPreparationText = nil
+        requestedSpeechText = nil
+        preparationRequestID &+= 1
+        speechRequestID &+= 1
         player.stop()
         fallback.stop()
+    }
+
+    private func play(_ preparedSpeech: PreparedSpeech) {
+        fallback.stop()
+        player.startStreaming(sampleRate: preparedSpeech.sampleRate)
+        player.scheduleAudioChunk(preparedSpeech.samples, withCrossfade: false)
+        player.finishStreamingInput()
     }
 
     private func loadAndWarmModel(downloadIfNeeded: Bool) async {
@@ -296,15 +452,13 @@ final class MLXGermanSpeechSynthesizer: GermanSpeechSynthesizing, GermanSpeechMo
 
     private func generateSamples(
         text: String,
-        model: any SpeechGenerationModel,
+        model: any MLXGermanSpeechGenerating,
         streamingInterval: TimeInterval
     ) async throws -> [Float] {
         var samples: [Float] = []
         let stream = model.generateSamplesStream(
             text: text,
             voice: configuration.voice,
-            refAudio: nil,
-            refText: nil,
             language: configuration.language,
             streamingInterval: streamingInterval
         )

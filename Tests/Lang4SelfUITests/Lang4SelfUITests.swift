@@ -291,6 +291,37 @@ final class Lang4SelfUITests: XCTestCase {
         XCTAssertTrue(app.buttons["sentences.next"].isEnabled)
     }
 
+    func testSentenceRunRestartButtonUsesEnter() {
+        openSentenceReview()
+        element("review.sentence-abort").click()
+
+        let count = app.textFields["sentences.count-input"]
+        count.click()
+        app.typeKey("a", modifierFlags: .command)
+        count.typeText("1")
+        element("sentences.generate").click()
+
+        var answer = app.textFields["sentences.answer"]
+        XCTAssertTrue(answer.waitForExistence(timeout: 5))
+        answer.typeText("Das Kind liest ein Buch.")
+        app.typeKey(.return, modifierFlags: [])
+        let next = element("sentences.next")
+        XCTAssertTrue(next.waitForExistence(timeout: 3))
+        XCTAssertTrue(waitUntil { next.isEnabled })
+        next.click()
+
+        answer = app.textFields["sentences.answer"]
+        XCTAssertTrue(answer.waitForExistence(timeout: 3))
+        answer.typeText("Haus")
+        app.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(next.waitForExistence(timeout: 3))
+        next.click()
+
+        XCTAssertTrue(element("sentences.restart").waitForExistence(timeout: 3))
+        app.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(element("sentences.generate").waitForExistence(timeout: 3))
+    }
+
     func testEmptyIndexFallsBackToLocalTranslationAndSavingCachesIt() {
         let german = "Dieser Satz wird lokal übersetzt."
         let english = "This sentence is translated locally."
@@ -637,6 +668,26 @@ final class Lang4SelfUITests: XCTestCase {
         XCTAssertTrue(partOfSpeech.waitForExistence(timeout: 3))
         XCTAssertTrue(app.staticTexts["Part of speech: Noun"].waitForExistence(timeout: 3))
         XCTAssertTrue(app.buttons["review.reveal"].exists)
+    }
+
+    func testReviewRatingBarDoesNotOverlapRevealedContentInCardModes() {
+        func assertContentIsAboveRatingBar() {
+            let content = element("review.content")
+            let firstRating = app.buttons["review.rating.1"]
+            XCTAssertTrue(firstRating.waitForExistence(timeout: 3))
+            XCTAssertLessThanOrEqual(content.frame.maxY, firstRating.frame.minY)
+        }
+
+        openRoute("2", route: "review")
+        app.typeKey(.space, modifierFlags: [])
+        assertContentIsAboveRatingBar()
+
+        for _ in 0..<5 { app.typeKey("]", modifierFlags: .command) }
+        let answer = app.textFields["review.answer"]
+        XCTAssertTrue(answer.waitForExistence(timeout: 3))
+        answer.typeText("wrong")
+        app.typeKey(.return, modifierFlags: [])
+        assertContentIsAboveRatingBar()
     }
 
     func testReviewModeTitleStaysAtTopAndIsSmallerThanReviewedText() {

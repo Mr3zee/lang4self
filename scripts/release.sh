@@ -3,14 +3,16 @@ set -euo pipefail
 
 SCRIPT_DIR=${0:A:h}
 PROJECT_DIR=${SCRIPT_DIR:h}
-APP_PATH="$PROJECT_DIR/.derived/Build/Products/Release/Lang4Self.app"
 APPLICATIONS_DIRECTORY="${HOME}/Applications"
 APPLICATIONS_APP="${APPLICATIONS_DIRECTORY}/Lang4Self.app"
 CLI_DIRECTORY="${HOME}/.local/bin"
 CLI_SCRATCH_PATH="$PROJECT_DIR/.derived/SwiftPMCLI"
 LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
 
-"$SCRIPT_DIR/build-release.sh"
+source "$SCRIPT_DIR/build-app.zsh"
+
+build_app Release
+APP_PATH=$BUILT_APP_PATH
 
 swift build \
   --package-path "$PROJECT_DIR" \

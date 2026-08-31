@@ -80,8 +80,12 @@ struct SentencePracticeSession {
         max(0, requestedGenerationCount - generatedCount)
     }
 
+    var isWaitingForInitialGeneration: Bool {
+        currentItem == nil && isGenerating && generatedCount == 0
+    }
+
     var isWaitingForGeneration: Bool {
-        currentItem == nil && isGenerating
+        currentItem == nil && isGenerating && generatedCount > 0
     }
 
     var isComplete: Bool {
@@ -121,6 +125,9 @@ struct SentencePracticeSession {
 
     mutating func finishGeneration() {
         isGenerating = false
+        if items.isEmpty {
+            abort()
+        }
     }
 
     @discardableResult
