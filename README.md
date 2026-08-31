@@ -11,33 +11,33 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--2.0--or--later-blue" alt="GPL-2.0-or-later"></a>
 </p>
 
-Lang4Self combines a fast offline dictionary, speech lookup, spaced-repetition review, word lists, and locally generated example sentences. There is no account, telemetry, or Lang4Self cloud backend. Grammar analysis sends generated German sentences to the public UDPipe API.
+Lang4Self combines a fast offline dictionary, speech lookup and pronunciation, flexible spaced-repetition drills, named word lists, and locally generated sentence practice. There is no account, telemetry, or Lang4Self cloud backend. Grammar analysis sends generated German sentences to the public UDPipe API.
 
 ## Screenshots
 
-| Dictionary | My words |
-|---|---|
-| ![Searching the offline dictionary for Haus](docs/screenshots/dictionary.png) | ![Saved words and word details](docs/screenshots/my-words.png) |
-
-![Generated and saved example sentences](docs/screenshots/sentences.png)
+| Dictionary | My words | Sentence practice |
+|---|---|---|
+| ![Text and speech lookup in the offline dictionary](docs/screenshots/dictionary.png) | ![Saved words, lists, and study details](docs/screenshots/my-words.png) | ![Generated fill-in-the-blank sentence practice](docs/screenshots/sentences.png) |
 
 The screenshots use the app's small deterministic test fixture. They do not contain imported dict.cc or personal data.
 
 ## Features
 
-- Fast SQLite + FTS5 lookup across more than one million imported entries
+- Fast SQLite + FTS5 text and speech lookup across more than one million imported entries
 - English and Russian translations from user-supplied dict.cc exports
 - Optional offline Wiktionary explanations, pronunciation, etymology, related words, and morphology
-- On-device German Apple Speech lookup in Dictionary
-- Named word lists and SM-2-style review scheduling
-- Local example-sentence generation through LM Studio
-- Grammar analysis through the public UDPipe API
-- Keyboard navigation throughout the app
+- Hold-Space German voice search using Apple Speech, including alternative recognitions
+- Local neural German pronunciation through Qwen3-TTS and Apple MLX, with an Apple voice fallback
+- Named word lists with notes, stars, suspended reviews, and cards shared across lists
+- SM-2-style scheduling with translation, writing, speaking, gender, conjugation, plural, and listening drills
+- Local sentence generation through LM Studio with full-sentence, vocabulary-blank, listening, and retry practice
+- Grammar analysis through the public UDPipe API, with inline dictionary inspection for sentence words
+- Keyboard-first navigation, shortcuts, and undo/redo
 - A shared `Lang4SelfCore` library and a small command-line client
 
 ## Run locally
 
-Requirements: macOS 14 or newer, Xcode 15.3 or newer, and the Xcode command-line tools.
+Requirements: an Apple silicon Mac with macOS 14 or newer, Xcode 26 or newer, and the Xcode command-line tools.
 
 ```sh
 git clone https://github.com/Mr3zee/lang4self.git
@@ -45,7 +45,7 @@ cd lang4self
 open Lang4Self.xcodeproj
 ```
 
-In Xcode, select the **Lang4Self** scheme and **My Mac**, then press **⌘R**. The first launch creates a local database and adds a tiny original starter dictionary; no separate download is required to try the app.
+In Xcode, select the **Lang4Self** scheme and **My Mac**, then press **⌘R**. The first launch creates a local database and adds a tiny original starter dictionary. Qwen3-TTS is not bundled: install its approximately 1.8 GB pinned snapshot from Settings when you want neural pronunciation. Later launches load and warm the installed local model without checking for updates. Pronunciation falls back to Apple's German voice until the neural model is ready.
 
 ### Get the full dictionary data
 
@@ -112,7 +112,8 @@ lang4self import-explanations ~/Downloads/dictionary-de.db
 
 | Keys | Action |
 |---|---|
-| ⌘1 … ⌘5 | Select and focus Dictionary, Review, My words, Sentences, or Settings in the sidebar |
+| ⌘1 … ⌘4 | Select and focus Dictionary, Review, My words, or Settings in the sidebar |
+| ⌘[ / ⌘] | Switch Review modes, including sentence practice |
 | ⌘F | Focus Dictionary or My words search |
 | ⌘? | Show all shortcuts |
 | ↑ / ↓ | Navigate results, saved cards, and sentences |

@@ -89,7 +89,6 @@ struct DictionaryView: View {
             releaseRecordingHolds()
         }
         .onAppear {
-            voiceSearchShortcut.startMonitoring()
             if !speech.transcription.isEmpty {
                 state.search(speech.transcription, immediate: true, selectFirstResult: true)
             }
@@ -226,7 +225,7 @@ struct DictionaryView: View {
         .padding(26)
         .frame(maxWidth: .infinity)
         .background {
-            SpeechAuroraBackground()
+            AuroraBackground(style: .speech)
                 .accessibilityHidden(true)
                 .allowsHitTesting(false)
         }
@@ -549,146 +548,6 @@ struct DictionaryView: View {
         let wasRecording = isRecordingRequested
         isManualRecording.toggle()
         recordingRequestChanged(wasRecording: wasRecording)
-    }
-}
-
-struct SpeechAuroraMotion {
-    static func phase(at date: Date, reduceMotion: Bool) -> TimeInterval {
-        reduceMotion ? 0 : date.timeIntervalSinceReferenceDate
-    }
-
-    static func offset(
-        at phase: TimeInterval,
-        period: TimeInterval,
-        xAmplitude: CGFloat,
-        yAmplitude: CGFloat,
-        initialAngle: Double
-    ) -> CGSize {
-        let progress = phase.truncatingRemainder(dividingBy: period) / period
-        let angle = progress * 2 * Double.pi + initialAngle
-        return CGSize(
-            width: cos(angle) * xAmplitude,
-            height: sin(angle) * yAmplitude
-        )
-    }
-}
-
-private struct SpeechAuroraBackground: View {
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Environment(\.colorScheme) private var colorScheme
-
-    var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 18.0, paused: reduceMotion)) { timeline in
-            GeometryReader { geometry in
-                let phase = SpeechAuroraMotion.phase(at: timeline.date, reduceMotion: reduceMotion)
-                let size = geometry.size
-
-                ZStack {
-                    Color(nsColor: .windowBackgroundColor)
-                    Color.black.opacity(colorScheme == .dark ? 0.20 : 0.055)
-
-                    auroraBlob(
-                        color: Gender.masculine.color,
-                        size: CGSize(width: max(size.width * 0.34, 250), height: max(size.height * 0.92, 220)),
-                        position: CGPoint(x: size.width * -0.01, y: size.height * 0.24),
-                        phase: phase,
-                        period: 31,
-                        amplitude: CGSize(width: 18, height: 11),
-                        initialAngle: 0.3,
-                        rotation: -16
-                    )
-
-                    auroraBlob(
-                        color: Gender.feminine.color,
-                        size: CGSize(width: max(size.width * 0.31, 235), height: max(size.height * 0.84, 205)),
-                        position: CGPoint(x: size.width * 1.02, y: size.height * 0.22),
-                        phase: phase,
-                        period: 37,
-                        amplitude: CGSize(width: 15, height: 13),
-                        initialAngle: 2.1,
-                        rotation: 19
-                    )
-
-                    auroraBlob(
-                        color: Gender.plural.color,
-                        size: CGSize(width: max(size.width * 0.29, 220), height: max(size.height * 0.70, 180)),
-                        position: CGPoint(x: size.width * 0.18, y: size.height * 1.04),
-                        phase: phase,
-                        period: 41,
-                        amplitude: CGSize(width: 20, height: 9),
-                        initialAngle: 3.7,
-                        rotation: 11
-                    )
-
-                    auroraBlob(
-                        color: Gender.neuter.color,
-                        size: CGSize(width: max(size.width * 0.27, 210), height: max(size.height * 0.66, 170)),
-                        position: CGPoint(x: size.width * 0.82, y: size.height * 1.06),
-                        phase: phase,
-                        period: 43,
-                        amplitude: CGSize(width: 17, height: 10),
-                        initialAngle: 5.2,
-                        rotation: -12
-                    )
-
-                    RadialGradient(
-                        colors: [.clear, .black.opacity(colorScheme == .dark ? 0.12 : 0.035)],
-                        center: .center,
-                        startRadius: min(size.width, size.height) * 0.30,
-                        endRadius: max(size.width, size.height) * 0.68
-                    )
-
-                    LinearGradient(
-                        colors: [.white.opacity(colorScheme == .dark ? 0.025 : 0.10), .clear],
-                        startPoint: .top,
-                        endPoint: .center
-                    )
-                }
-                .clipped()
-            }
-        }
-    }
-
-    private func auroraBlob(
-        color: Color,
-        size: CGSize,
-        position: CGPoint,
-        phase: TimeInterval,
-        period: TimeInterval,
-        amplitude: CGSize,
-        initialAngle: Double,
-        rotation: Double
-    ) -> some View {
-        let offset = SpeechAuroraMotion.offset(
-            at: phase,
-            period: period,
-            xAmplitude: amplitude.width,
-            yAmplitude: amplitude.height,
-            initialAngle: initialAngle
-        )
-        let intensity = colorScheme == .dark ? 0.14 : 0.09
-
-        return ZStack {
-            Ellipse()
-                .fill(
-                    RadialGradient(
-                        colors: [color.opacity(intensity), color.opacity(intensity * 0.30), .clear],
-                        center: .center,
-                        startRadius: 0,
-                        endRadius: max(size.width, size.height) * 0.48
-                    )
-                )
-
-            Ellipse()
-                .fill(color.opacity(intensity * 0.32))
-                .frame(width: size.width * 0.46, height: size.height * 0.72)
-                .offset(x: size.width * 0.20, y: size.height * -0.08)
-        }
-        .frame(width: size.width, height: size.height)
-        .compositingGroup()
-        .blur(radius: 32)
-        .rotationEffect(.degrees(rotation))
-        .position(x: position.x + offset.width, y: position.y + offset.height)
     }
 }
 

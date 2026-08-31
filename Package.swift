@@ -15,6 +15,10 @@ let package = Package(
         .executable(name: "Lang4SelfDictionaryImporter", targets: ["Lang4SelfDictionaryImporter"]),
         .executable(name: "lang4self", targets: ["Lang4SelfCLI"])
     ],
+    dependencies: [
+        .package(url: "https://github.com/Blaizzy/mlx-audio-swift.git", exact: "0.1.3"),
+        .package(url: "https://github.com/huggingface/swift-huggingface.git", exact: "0.8.1")
+    ],
     targets: [
         .target(
             name: "Lang4SelfCore",
@@ -23,7 +27,12 @@ let package = Package(
         ),
         .executableTarget(
             name: "Lang4Self",
-            dependencies: ["Lang4SelfCore"],
+            dependencies: [
+                "Lang4SelfCore",
+                .product(name: "HuggingFace", package: "swift-huggingface"),
+                .product(name: "MLXAudioCore", package: "mlx-audio-swift"),
+                .product(name: "MLXAudioTTS", package: "mlx-audio-swift")
+            ],
             path: "Apps/macOS/Lang4Self",
             exclude: ["Resources/Info.plist", "Resources/AppIcon-1024.png"],
             resources: [.process("Resources/Assets.xcassets")],

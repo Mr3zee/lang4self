@@ -4,6 +4,9 @@ import Lang4SelfCore
 enum SentenceTestMode: String, CaseIterable, Identifiable {
     case fullSentence
     case vocabularyBlanks
+    case listening
+
+    static let configurableCases: [SentenceTestMode] = [.fullSentence, .vocabularyBlanks]
 
     var id: String { rawValue }
 
@@ -11,6 +14,7 @@ enum SentenceTestMode: String, CaseIterable, Identifiable {
         switch self {
         case .fullSentence: "Write full sentence"
         case .vocabularyBlanks: "Fill vocabulary blanks"
+        case .listening: "Listening"
         }
     }
 }
@@ -84,6 +88,10 @@ struct SentencePracticeSession {
         currentItem == nil && !isGenerating && (!items.isEmpty || requestedGenerationCount > 0)
     }
 
+    var hasStarted: Bool { sourceList != nil }
+
+    var isActive: Bool { hasStarted && !isComplete }
+
     mutating func start(
         mode: SentenceTestMode,
         requestedCount: Int,
@@ -134,10 +142,18 @@ struct SentencePracticeSession {
         isUpdatingRetry = isUpdating
     }
 
+    mutating func setMode(_ mode: SentenceTestMode) {
+        self.mode = mode
+    }
+
     mutating func advance() {
         guard result != nil, !isUpdatingRetry else { return }
         currentIndex += 1
         result = nil
+    }
+
+    mutating func abort() {
+        self = SentencePracticeSession()
     }
 }
 

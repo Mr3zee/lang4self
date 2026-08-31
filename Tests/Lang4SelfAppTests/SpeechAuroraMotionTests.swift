@@ -39,4 +39,14 @@ final class SpeechAuroraMotionTests: XCTestCase {
         XCTAssertEqual(end.width, start.width, accuracy: 0.001)
         XCTAssertEqual(end.height, start.height, accuracy: 0.001)
     }
+
+    func testAuroraColorMotionOscillatesAndLoops() {
+        let start = SpeechAuroraMotion.oscillation(at: 0, period: 20, initialAngle: 0)
+        let quarter = SpeechAuroraMotion.oscillation(at: 5, period: 20, initialAngle: 0)
+        let end = SpeechAuroraMotion.oscillation(at: 20, period: 20, initialAngle: 0)
+
+        XCTAssertEqual(start, 0, accuracy: 0.001)
+        XCTAssertEqual(quarter, 1, accuracy: 0.001)
+        XCTAssertEqual(end, start, accuracy: 0.001)
+    }
 }

@@ -3,6 +3,187 @@ import Foundation
 import SwiftUI
 import Lang4SelfCore
 
+struct SpeechAuroraMotion {
+    static func phase(at date: Date, reduceMotion: Bool) -> TimeInterval {
+        reduceMotion ? 0 : date.timeIntervalSinceReferenceDate
+    }
+
+    static func offset(
+        at phase: TimeInterval,
+        period: TimeInterval,
+        xAmplitude: CGFloat,
+        yAmplitude: CGFloat,
+        initialAngle: Double
+    ) -> CGSize {
+        let angle = loopAngle(at: phase, period: period, initialAngle: initialAngle)
+        return CGSize(
+            width: cos(angle) * xAmplitude,
+            height: sin(angle) * yAmplitude
+        )
+    }
+
+    static func oscillation(
+        at phase: TimeInterval,
+        period: TimeInterval,
+        initialAngle: Double
+    ) -> Double {
+        sin(loopAngle(at: phase, period: period, initialAngle: initialAngle))
+    }
+
+    private static func loopAngle(
+        at phase: TimeInterval,
+        period: TimeInterval,
+        initialAngle: Double
+    ) -> Double {
+        let progress = phase.truncatingRemainder(dividingBy: period) / period
+        return progress * 2 * Double.pi + initialAngle
+    }
+}
+
+struct AuroraBackground: View {
+    enum Style {
+        case speech
+        case review
+    }
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.colorScheme) private var colorScheme
+    let style: Style
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 20.0, paused: reduceMotion)) { timeline in
+            GeometryReader { geometry in
+                let phase = SpeechAuroraMotion.phase(at: timeline.date, reduceMotion: reduceMotion)
+                let size = geometry.size
+
+                ZStack {
+                    Color(nsColor: .windowBackgroundColor)
+                    Color.black.opacity(colorScheme == .dark ? 0.18 : 0.035)
+
+                    auroraBlob(
+                        color: Gender.masculine.color,
+                        size: CGSize(width: max(size.width * 0.40, 270), height: max(size.height * 0.90, 240)),
+                        position: CGPoint(x: size.width * 0.03, y: size.height * 0.20),
+                        phase: phase,
+                        period: 19,
+                        amplitude: amplitude(for: size, x: 0.10, y: 0.08),
+                        initialAngle: 0.3,
+                        rotation: -16
+                    )
+
+                    auroraBlob(
+                        color: Gender.feminine.color,
+                        size: CGSize(width: max(size.width * 0.38, 250), height: max(size.height * 0.82, 220)),
+                        position: CGPoint(x: size.width * 0.97, y: size.height * 0.24),
+                        phase: phase,
+                        period: 23,
+                        amplitude: amplitude(for: size, x: 0.09, y: 0.11),
+                        initialAngle: 2.1,
+                        rotation: 19
+                    )
+
+                    auroraBlob(
+                        color: Gender.plural.color,
+                        size: CGSize(width: max(size.width * 0.36, 235), height: max(size.height * 0.76, 200)),
+                        position: CGPoint(x: size.width * 0.20, y: size.height * 0.94),
+                        phase: phase,
+                        period: 27,
+                        amplitude: amplitude(for: size, x: 0.12, y: 0.07),
+                        initialAngle: 3.7,
+                        rotation: 11
+                    )
+
+                    auroraBlob(
+                        color: Gender.neuter.color,
+                        size: CGSize(width: max(size.width * 0.34, 225), height: max(size.height * 0.70, 185)),
+                        position: CGPoint(x: size.width * 0.80, y: size.height * 0.96),
+                        phase: phase,
+                        period: 31,
+                        amplitude: amplitude(for: size, x: 0.10, y: 0.09),
+                        initialAngle: 5.2,
+                        rotation: -12
+                    )
+
+                    RadialGradient(
+                        colors: [.clear, .black.opacity(colorScheme == .dark ? 0.11 : 0.025)],
+                        center: .center,
+                        startRadius: min(size.width, size.height) * 0.30,
+                        endRadius: max(size.width, size.height) * 0.70
+                    )
+
+                    LinearGradient(
+                        colors: [.white.opacity(colorScheme == .dark ? 0.02 : 0.08), .clear],
+                        startPoint: .top,
+                        endPoint: .center
+                    )
+                }
+                .clipped()
+            }
+        }
+    }
+
+    private func amplitude(for size: CGSize, x: CGFloat, y: CGFloat) -> CGSize {
+        let multiplier: CGFloat = style == .speech ? 1 : 1.15
+        return CGSize(
+            width: max(size.width * x * multiplier, 28),
+            height: max(size.height * y * multiplier, 18)
+        )
+    }
+
+    private func auroraBlob(
+        color: Color,
+        size: CGSize,
+        position: CGPoint,
+        phase: TimeInterval,
+        period: TimeInterval,
+        amplitude: CGSize,
+        initialAngle: Double,
+        rotation: Double
+    ) -> some View {
+        let offset = SpeechAuroraMotion.offset(
+            at: phase,
+            period: period,
+            xAmplitude: amplitude.width,
+            yAmplitude: amplitude.height,
+            initialAngle: initialAngle
+        )
+        let wave = SpeechAuroraMotion.oscillation(
+            at: phase,
+            period: period * 0.72,
+            initialAngle: initialAngle + 0.8
+        )
+        let gradientCenter = UnitPoint(
+            x: 0.5 + 0.16 * cos(wave * .pi),
+            y: 0.5 + 0.13 * sin(wave * .pi)
+        )
+        let baseIntensity = colorScheme == .dark ? 0.15 : 0.095
+        let intensity = baseIntensity * (style == .speech ? 1 : 0.82)
+
+        return ZStack {
+            Ellipse()
+                .fill(
+                    RadialGradient(
+                        colors: [color.opacity(intensity), color.opacity(intensity * 0.30), .clear],
+                        center: gradientCenter,
+                        startRadius: 0,
+                        endRadius: max(size.width, size.height) * 0.50
+                    )
+                )
+
+            Ellipse()
+                .fill(color.opacity(intensity * 0.34))
+                .frame(width: size.width * 0.46, height: size.height * 0.72)
+                .offset(x: size.width * 0.20 * wave, y: size.height * -0.08 * wave)
+        }
+        .frame(width: size.width, height: size.height)
+        .compositingGroup()
+        .blur(radius: 34)
+        .rotationEffect(.degrees(rotation + wave * 12))
+        .scaleEffect(1 + wave * 0.07)
+        .position(x: position.x + offset.width, y: position.y + offset.height)
+    }
+}
+
 enum GermanTextPresentation {
     static let softHyphen = "\u{00AD}"
 
@@ -189,7 +370,8 @@ struct GermanWordView: View {
                     .fixedSize()
             }
             if let parts = GermanMorphology.separableParts(for: entry) {
-                (Text(GermanTextPresentation.hyphenated(parts.prefix)).fontWeight(.semibold)
+                ((GermanMorphology.isReflexive(entry) ? Text("sich ") : Text(""))
+                    + Text(GermanTextPresentation.hyphenated(parts.prefix)).fontWeight(.semibold)
                     + Text("·").foregroundStyle(.secondary)
                     + Text(GermanTextPresentation.hyphenated(parts.stem)))
             } else {
@@ -641,6 +823,11 @@ struct EntryDetailView: View {
                         .foregroundStyle(infoColor(for: row))
                         .fixedSize(horizontal: false, vertical: true)
                         .textSelection(.enabled)
+                        .accessibilityIdentifier(
+                            "entry.info." + row.label
+                                .lowercased()
+                                .replacingOccurrences(of: " ", with: "-")
+                        )
                 }
             }
         }
@@ -1028,11 +1215,13 @@ enum ShortcutKey: Hashable {
     static let rightBracket = character("]", accessibilityName: "Right Bracket")
 
     static func letter(_ value: Character) -> ShortcutKey {
-        symbol(name: "\(value.lowercased()).square", accessibilityName: value.uppercased())
+        let letter = value.uppercased()
+        return character(letter, accessibilityName: letter)
     }
 
     static func digit(_ value: Int) -> ShortcutKey {
-        symbol(name: "\(value).square", accessibilityName: value.formatted())
+        let digit = value.formatted()
+        return character(digit, accessibilityName: digit)
     }
 
     var accessibilityName: String {
@@ -1042,6 +1231,12 @@ enum ShortcutKey: Hashable {
         case .comma: "Comma"
         case .space: "Space"
         }
+    }
+}
+
+enum KeyboardShortcutLabel {
+    static func pressSpace(to action: String) -> String {
+        "Press Space to \(action)"
     }
 }
 
@@ -1178,7 +1373,6 @@ struct AppShortcut: Identifiable {
         .init(id: "global.settings", group: .global, shortcut: .init(chords: [.init(.command, .comma)]), action: "Open Settings"),
         .init(id: "global.find", group: .global, shortcut: .commandF, action: "Focus search in Dictionary or My Words; open Dictionary elsewhere"),
         .init(id: "global.help", group: .global, shortcut: .init(chords: [.init(.command, .slash), .init(.command, .questionMark)], separator: .alternatives), action: "Show this keyboard shortcut reference"),
-        .init(id: "global.voice-search", group: .global, shortcut: .init(chords: [.init(.space)], hold: true), action: "Open Dictionary and search by voice when not typing"),
         .init(id: "global.pronunciation", group: .global, shortcut: .doubleShift, action: "Play the displayed German word or sentence"),
         .init(id: "global.focus", group: .global, shortcut: .init(chords: [.init(.tab), .init(.shift, .tab)]), action: "Move focus forward or backward"),
         .init(id: "dictionary.navigate", group: .dictionary, shortcut: .init(chords: [.init(.up), .init(.down)]), action: "Move through search results"),
@@ -1191,6 +1385,8 @@ struct AppShortcut: Identifiable {
         .init(id: "review.mode", group: .review, shortcut: .init(chords: [.init(.command, .leftBracket), .init(.command, .rightBracket)]), action: "Switch review mode"),
         .init(id: "review.translation", group: .review, shortcut: .init(chords: [.init(.left), .init(.right)]), action: "Move between translations in the current language"),
         .init(id: "review.language", group: .review, shortcut: .init(chords: [.init(.up), .init(.down)]), action: "Move between translation languages"),
+        .init(id: "review.speaking", group: .review, shortcut: .init(chords: [.init(.space)]), action: "Start or stop speaking in the speaking test"),
+        .init(id: "review.gender", group: .review, shortcut: .init(chords: [.init(.digit(1)), .init(.digit(3))], separator: .range), action: "Choose der, die, or das in the gender test"),
         .init(id: "review.rate", group: .review, shortcut: .init(chords: [.init(.digit(1)), .init(.digit(4))], separator: .range), action: "Rate Again, Hard, Good, or Easy after revealing"),
         .init(id: "lists.navigate", group: .lists, shortcut: .init(chords: [.init(.up), .init(.down)]), action: "Move through results, cards, and sentences"),
         .init(id: "lists.words", group: .lists, shortcut: .init(chords: [.init(.left), .init(.right)]), action: "Move between the sentence list and its words, or through words"),

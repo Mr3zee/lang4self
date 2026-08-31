@@ -138,7 +138,6 @@ struct RootView: View {
         case .dictionary: DictionaryView(automaticallyFocusContent: !sidebarFocused)
         case .review: ReviewView(automaticallyFocusContent: !sidebarFocused)
         case .library: LibraryView(automaticallyFocusContent: !sidebarFocused)
-        case .sentences: SentencesView(automaticallyFocusContent: !sidebarFocused)
         case .settings: SettingsView(automaticallyFocusContent: !sidebarFocused)
         }
     }
@@ -156,8 +155,6 @@ struct RootView: View {
             notification = .focusDictionaryContent
         case .library:
             notification = .focusLibraryContent
-        case .sentences:
-            notification = .focusSentenceContent
         case .review:
             notification = .focusReviewContent
         case .settings:
@@ -176,7 +173,6 @@ struct RootView: View {
         case .dictionary: .dictionary
         case .review: .review
         case .library: .library
-        case .sentences: .sentences
         case .settings: nil
         }
         germanSpeech.activate(context)

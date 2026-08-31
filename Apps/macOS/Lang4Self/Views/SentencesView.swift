@@ -1,7 +1,7 @@
 import SwiftUI
 import Lang4SelfCore
 
-struct SentencesView: View {
+struct SentenceReviewView: View {
     @EnvironmentObject private var state: AppState
     @EnvironmentObject private var germanSpeech: GermanSpeechController
     @State private var generationCount = 5
@@ -13,22 +13,41 @@ struct SentencesView: View {
     @State private var answer = ""
     @FocusState private var focusedControl: FocusControl?
     let automaticallyFocusContent: Bool
+    let forcedTestMode: SentenceTestMode?
 
     private enum FocusControl: Hashable { case style, answer }
 
+    init(
+        automaticallyFocusContent: Bool,
+        forcedTestMode: SentenceTestMode? = nil
+    ) {
+        self.automaticallyFocusContent = automaticallyFocusContent
+        self.forcedTestMode = forcedTestMode
+    }
+
     var body: some View {
-        ScrollView {
-            VStack(spacing: 18) {
-                generationControls
-                practiceContent
+        GeometryReader { geometry in
+            ScrollView {
+                VStack(spacing: 18) {
+                    if state.sentencePractice.hasStarted {
+                        practiceContent
+                    } else {
+                        VStack(spacing: 18) {
+                            Text("Choose the run settings, then start practicing.")
+                                .foregroundStyle(.secondary)
+                            generationControls
+                        }
+                    }
+                }
+                .frame(maxWidth: 920)
+                .frame(maxWidth: .infinity)
+                .frame(minHeight: geometry.size.height, alignment: .center)
+                .padding(.horizontal, 20)
             }
-            .frame(maxWidth: 920)
-            .frame(maxWidth: .infinity)
-            .padding(20)
+            .accessibilityIdentifier("sentences.scroll")
         }
-        .accessibilityIdentifier("sentences.scroll")
-        .navigationTitle("Sentence test")
         .onAppear {
+            applyForcedTestMode()
             updateGermanSpeechTarget()
             if automaticallyFocusContent { focusPrimaryContent() }
         }
@@ -42,9 +61,28 @@ struct SentencesView: View {
         .onChange(of: state.sentencePractice.result) { _, _ in
             updateGermanSpeechTarget()
         }
-        .onDisappear { germanSpeech.setTarget(nil, in: .sentences) }
-        .onReceive(NotificationCenter.default.publisher(for: .focusSentenceContent)) { _ in
+        .onChange(of: state.sentencePractice.hasStarted) { _, _ in
+            answer = ""
+            updateGermanSpeechTarget()
+            if automaticallyFocusContent { focusPrimaryContent() }
+        }
+        .onChange(of: state.sentencePractice.mode) { _, _ in
+            updateGermanSpeechTarget()
+        }
+        .onChange(of: forcedTestMode) { _, _ in
+            applyForcedTestMode()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .focusReviewContent)) { _ in
             focusPrimaryContent()
+        }
+        .task(id: automaticListeningItemID) {
+            guard isListeningPractice,
+                  state.sentencePractice.result == nil,
+                  let item = state.sentencePractice.currentItem
+            else { return }
+            await Task.yield()
+            guard !Task.isCancelled else { return }
+            germanSpeech.speak(item.draft.german)
         }
     }
 
@@ -52,17 +90,6 @@ struct SentencesView: View {
         GroupBox {
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
-                    Picker("Vocabulary", selection: Binding(
-                        get: { state.selectedListID },
-                        set: { state.selectWordList($0) }
-                    )) {
-                        ForEach(state.wordLists) { list in Text(list.name).tag(list.id) }
-                    }
-                    .pickerStyle(.menu)
-                    .accessibilityIdentifier("sentences.list-picker")
-
-                    Spacer(minLength: 12)
-
                     numericStepper(
                         title: "Sentence count",
                         value: generationCountBinding,
@@ -73,12 +100,14 @@ struct SentencesView: View {
                     )
                     .help("Number of new sentences (maximum 50)")
 
-                    Button("Start test") {
+                    Spacer(minLength: 12)
+
+                    Button("Start run") {
                         commitNumericInputs()
                         answer = ""
                         state.startSentencePractice(
                             count: generationCount,
-                            mode: testMode,
+                            mode: selectedTestMode,
                             options: generationOptions
                         )
                     }
@@ -91,14 +120,20 @@ struct SentencesView: View {
                     .accessibilityIdentifier("sentences.generate")
                 }
 
-                Picker("Test mode", selection: $testMode) {
-                    ForEach(SentenceTestMode.allCases) { mode in
-                        Text(mode.title).tag(mode)
+                if forcedTestMode == nil {
+                    Picker("Test mode", selection: $testMode) {
+                        ForEach(SentenceTestMode.configurableCases) { mode in
+                            Text(mode.title).tag(mode)
+                        }
                     }
+                    .pickerStyle(.segmented)
+                    .disabled(state.sentencePractice.isGenerating)
+                    .accessibilityIdentifier("sentences.mode")
+                } else {
+                    Label("Listen to each generated sentence and write what you hear.", systemImage: "waveform")
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("sentences.listening-description")
                 }
-                .pickerStyle(.segmented)
-                .disabled(state.sentencePractice.isGenerating)
-                .accessibilityIdentifier("sentences.mode")
 
                 HStack(spacing: 8) {
                     Text("Level")
@@ -164,7 +199,7 @@ struct SentencesView: View {
             }
             .padding(4)
         } label: {
-            Text("Create a test")
+            Text("Sentence run settings")
         }
     }
 
@@ -212,10 +247,18 @@ struct SentencesView: View {
                 .accessibilityIdentifier("sentences.waiting")
             }
         } else if state.sentencePractice.isComplete {
-            ContentUnavailableView {
-                Label("Test complete", systemImage: "checkmark.circle")
-            } description: {
-                Text("Answered \(state.sentencePractice.answeredCount) prompt\(state.sentencePractice.answeredCount == 1 ? "" : "s"). Start another test when you’re ready.")
+            VStack(spacing: 16) {
+                ContentUnavailableView {
+                    Label("Sentence run complete", systemImage: "checkmark.circle")
+                } description: {
+                    Text("Answered \(state.sentencePractice.answeredCount) prompt\(state.sentencePractice.answeredCount == 1 ? "" : "s").")
+                }
+                Button("Set up another run") {
+                    state.abortSentencePractice()
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .accessibilityIdentifier("sentences.restart")
             }
             .frame(minHeight: 260)
             .accessibilityIdentifier("sentences.complete")
@@ -230,24 +273,40 @@ struct SentencesView: View {
     }
 
     private func testCard(_ item: SentencePracticeItem) -> some View {
-        GroupBox {
-            VStack(alignment: .leading, spacing: 18) {
-                HStack {
-                    Text("Prompt \(state.sentencePractice.currentIndex + 1)")
-                        .font(.headline)
-                    Text("· \(max(0, state.sentencePractice.items.count - state.sentencePractice.currentIndex - 1)) ready after this")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    if state.sentencePractice.pendingGenerationCount > 0 {
-                        ProgressView()
-                            .controlSize(.small)
-                            .help("More sentences are being generated")
-                    }
-                }
+        VStack(spacing: 22) {
+            HStack(spacing: 5) {
+                Text("Prompt \(state.sentencePractice.currentIndex + 1)")
+                Text("· \(max(0, state.sentencePractice.items.count - state.sentencePractice.currentIndex - 1)) ready after this")
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
 
+            if isListeningPractice {
+                VStack(spacing: 14) {
+                    Image(systemName: "waveform")
+                        .font(.system(size: 44, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .accessibilityHidden(true)
+                    Text("Listen and write the sentence")
+                        .font(.title2.weight(.semibold))
+                    Button {
+                        germanSpeech.speak(item.draft.german)
+                    } label: {
+                        Label("Replay", systemImage: "speaker.wave.2.fill")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Replay the sentence — press Shift twice")
+                    .accessibilityIdentifier("sentences.listening-replay")
+                    KeyboardShortcutHint(.doubleShift)
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                        .accessibilityHidden(true)
+                }
+                .accessibilityIdentifier("sentences.listening-prompt")
+            } else {
                 Text(item.draft.translation)
-                    .font(.title2.weight(.semibold))
+                    .font(.system(size: 36, weight: .bold, design: .rounded))
+                    .multilineTextAlignment(.center)
                     .textSelection(.enabled)
                     .accessibilityIdentifier("sentences.translation")
 
@@ -265,27 +324,30 @@ struct SentencesView: View {
                     )
                     .foregroundStyle(.secondary)
                 }
+            }
 
-                HStack(alignment: .firstTextBaseline, spacing: 10) {
+            if state.sentencePractice.result == nil {
+                VStack(spacing: 14) {
                     TextField(answerPlaceholder(for: item), text: $answer)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.title3)
-                        .disabled(state.sentencePractice.result != nil)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 30, weight: .semibold, design: .rounded))
+                        .multilineTextAlignment(.center)
                         .focused($focusedControl, equals: .answer)
                         .onSubmit { submitAnswer() }
                         .accessibilityIdentifier("sentences.answer")
 
                     Button("Check") { submitAnswer() }
                         .buttonStyle(.borderedProminent)
-                        .disabled(
-                            answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
-                            state.sentencePractice.result != nil
-                        )
+                        .controlSize(.large)
+                        .disabled(answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                         .accessibilityIdentifier("sentences.check")
                 }
+                .frame(maxWidth: 560)
             }
-            .padding(8)
         }
+        .frame(maxWidth: .infinity)
+        .padding(.top, 18)
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("sentences.test-card")
     }
 
@@ -353,10 +415,33 @@ struct SentencesView: View {
     }
 
     private func updateGermanSpeechTarget() {
-        let sentence = state.sentencePractice.result == nil
-            ? nil
-            : state.sentencePractice.currentItem?.draft.german
-        germanSpeech.setTarget(sentence, in: .sentences)
+        let sentence = isListeningPractice || state.sentencePractice.result != nil
+            ? state.sentencePractice.currentItem?.draft.german
+            : nil
+        germanSpeech.setTarget(sentence, in: .review)
+    }
+
+    private func applyForcedTestMode() {
+        guard let forcedTestMode,
+              state.sentencePractice.hasStarted,
+              state.sentencePractice.mode != forcedTestMode
+        else { return }
+        state.setSentencePracticeMode(forcedTestMode)
+    }
+
+    private var selectedTestMode: SentenceTestMode {
+        forcedTestMode ?? testMode
+    }
+
+    private var isListeningPractice: Bool {
+        state.sentencePractice.hasStarted
+            ? state.sentencePractice.mode == .listening
+            : forcedTestMode == .listening
+    }
+
+    private var automaticListeningItemID: SentencePracticeItem.ID? {
+        guard isListeningPractice, state.sentencePractice.result == nil else { return nil }
+        return state.sentencePractice.currentItem?.id
     }
 
     private var generationCountBinding: Binding<Int> {
@@ -654,7 +739,6 @@ private struct SentenceInspector: View {
 
 extension Notification.Name {
     static let focusSentenceInspector = Notification.Name("focusSentenceInspector")
-    static let focusSentenceContent = Notification.Name("focusSentenceContent")
 }
 
 private struct TokenFlowLayout: Layout {

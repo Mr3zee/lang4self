@@ -24,9 +24,22 @@ final class ReviewPracticeTests: XCTestCase {
     }
 
     func testModesCycleAndWrapInBothDirections() {
-        XCTAssertEqual(ReviewTestMode.flashcard.advanced(by: -1), .plural)
+        XCTAssertEqual(ReviewTestMode.flashcard.advanced(by: -1), .listeningWords)
         XCTAssertEqual(ReviewTestMode.flashcard.advanced(by: 1), .writing)
-        XCTAssertEqual(ReviewTestMode.plural.advanced(by: 1), .flashcard)
+        XCTAssertEqual(ReviewTestMode.plural.advanced(by: 1), .listeningWords)
+        XCTAssertEqual(ReviewTestMode.listeningWords.advanced(by: 1), .flashcard)
+    }
+
+    func testListeningWordsChecksOnlyTheHeardGermanSpelling() throws {
+        let challenge = try XCTUnwrap(ReviewChallenge(
+            card: PersonalCard(german: "Straße", english: ""),
+            mode: .listeningWords
+        ))
+
+        XCTAssertTrue(challenge.accepts("straße"))
+        XCTAssertFalse(challenge.accepts("street"))
+        XCTAssertTrue(ReviewTestMode.listeningWords.requiresWrittenAnswer)
+        XCTAssertFalse(ReviewTestMode.listeningWords.usesTranslationCarousel)
     }
 
     func testWritingRequiresTheGermanSpellingButIgnoresCaseAndOuterPunctuation() throws {
@@ -146,6 +159,105 @@ final class ReviewPracticeTests: XCTestCase {
         XCTAssertEqual(challenge.conjugationPronoun, "du")
         XCTAssertEqual(challenge.acceptedAnswers.first, "freust dich")
         XCTAssertTrue(challenge.accepts("du freust dich"))
+        XCTAssertFalse(challenge.accepts("du freust dir"))
+    }
+
+    func testConjugationSupportsDativeReflexivePronouns() throws {
+        let challenge = try XCTUnwrap(ReviewChallenge(
+            card: PersonalCard(
+                german: "sich merken",
+                english: "to remember",
+                kind: .verb,
+                rawGerman: "sich [Dat.] merken {vr}"
+            ),
+            mode: .conjugation,
+            conjugationIndex: 1
+        ))
+
+        XCTAssertEqual(challenge.acceptedAnswers.first, "merkst dir")
+        XCTAssertTrue(challenge.accepts("du merkst dir"))
+        XCTAssertFalse(challenge.accepts("du merkst dich"))
+    }
+
+    func testConjugationAcceptsExplicitAccusativeAndDativeAlternatives() throws {
+        let forms = [
+            DictionaryForm(form: "wasche", tags: ["first-person", "present", "singular"]),
+            DictionaryForm(form: "wäschst", tags: ["second-person", "present", "singular"]),
+            DictionaryForm(form: "wäscht", tags: ["third-person", "present", "singular"])
+        ]
+        let challenge = try XCTUnwrap(ReviewChallenge(
+            card: PersonalCard(
+                german: "sich waschen",
+                english: "to wash oneself",
+                kind: .verb,
+                rawGerman: "sich [Akk.]/[Dat.] waschen {vr}",
+                forms: forms
+            ),
+            mode: .conjugation,
+            conjugationIndex: 1
+        ))
+
+        XCTAssertTrue(challenge.accepts("wäschst dich"))
+        XCTAssertTrue(challenge.accepts("du wäschst dir"))
+    }
+
+    func testConjugationAcceptsEveryThirdPersonGenderAndFormalSie() throws {
+        let card = PersonalCard(
+            german: "sich freuen",
+            english: "to be happy",
+            kind: .verb
+        )
+        let thirdPerson = try XCTUnwrap(ReviewChallenge(
+            card: card,
+            mode: .conjugation,
+            conjugationIndex: 2
+        ))
+        let pluralAndFormal = try XCTUnwrap(ReviewChallenge(
+            card: card,
+            mode: .conjugation,
+            conjugationIndex: 5
+        ))
+
+        XCTAssertEqual(thirdPerson.conjugationPronoun, "er/sie/es")
+        XCTAssertTrue(thirdPerson.accepts("er freut sich"))
+        XCTAssertTrue(thirdPerson.accepts("sie freut sich"))
+        XCTAssertTrue(thirdPerson.accepts("es freut sich"))
+        XCTAssertEqual(pluralAndFormal.conjugationPronoun, "sie/Sie")
+        XCTAssertTrue(pluralAndFormal.accepts("Sie freuen sich"))
+    }
+
+    func testSeparableReflexivePronounPrecedesTheDetachedPrefix() throws {
+        let forms = [
+            DictionaryForm(form: "anziehe", tags: ["first-person", "present", "singular"]),
+            DictionaryForm(form: "anziehst", tags: ["second-person", "present", "singular"]),
+            DictionaryForm(form: "anzieht", tags: ["third-person", "present", "singular"])
+        ]
+        let card = PersonalCard(
+            german: "sich anziehen",
+            english: "to get dressed",
+            kind: .verb,
+            rawGerman: "sich an|ziehen {vr}",
+            forms: forms
+        )
+        let challenge = try XCTUnwrap(ReviewChallenge(
+            card: card,
+            mode: .conjugation,
+            conjugationIndex: 1
+        ))
+        let info = GermanMorphology.info(for: DictionaryEntry(
+            german: card.german,
+            english: card.english,
+            rawGerman: card.rawGerman,
+            kind: card.kind,
+            forms: forms
+        ))
+
+        XCTAssertEqual(challenge.acceptedAnswers.first, "ziehst dich an")
+        XCTAssertTrue(challenge.accepts("du ziehst dich an"))
+        XCTAssertEqual(info.headline, "sich anziehen")
+        XCTAssertEqual(info.rows.first { $0.label == "Infinitive" }?.value, "sich anziehen")
+        XCTAssertTrue(info.rows.first { $0.label == "Present" }?.value.contains("er/sie/es zieht sich an") == true)
+        XCTAssertFalse(info.rows.contains { $0.value.contains("zieht an sich") })
     }
 
     func testPluralOnlyIncludesNounsWithAtLeastOneKnownForm() throws {

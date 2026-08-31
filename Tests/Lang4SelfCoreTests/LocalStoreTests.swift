@@ -1149,6 +1149,10 @@ final class LocalStoreTests: XCTestCase {
         let lector = directory.appendingPathComponent("dictionary-de.db")
         try """
         wohnen\tto live\tverb\t
+        freuen\tto delight\tverb\t
+        sich freuen {vr}\tto be happy\tverb\t
+        sich merken {vr}\tto remember\tverb\t
+        sich an|ziehen {vr}\tto get dressed\tverb\t
         gehen\tto go\tverb\t
         haben\tto have\tverb\t
         auf|stehen\tto get up\tverb\t
@@ -1176,7 +1180,7 @@ final class LocalStoreTests: XCTestCase {
         let wohnenInfo = GermanMorphology.info(for: wohnen)
         XCTAssertEqual(wohnenInfo.rows.map(\.value), [
             "wohnen",
-            "ich wohne · du wohnst · er/sie wohnt · wir wohnen · ihr wohnt · sie wohnen",
+            "ich wohne · du wohnst · er/sie/es wohnt · wir wohnen · ihr wohnt · sie/Sie wohnen",
             "wohnte",
             "haben gewohnt",
             "werden + wohnen"
@@ -1186,6 +1190,15 @@ final class LocalStoreTests: XCTestCase {
         let participleResults = try await store.searchDictionary("gewohnt")
         XCTAssertEqual(participleResults.first?.german, "wohnen")
         XCTAssertEqual(participleResults.first?.kind, .verb)
+
+        for query in ["ich freue mich", "du freust dich", "er freut sich"] {
+            let results = try await store.searchDictionary(query)
+            XCTAssertEqual(results.first?.german, "sich freuen", query)
+        }
+        let dativeReflexiveResults = try await store.searchDictionary("du merkst dir")
+        XCTAssertEqual(dativeReflexiveResults.first?.german, "sich merken")
+        let separatedReflexiveResults = try await store.searchDictionary("sie zieht sich an")
+        XCTAssertEqual(separatedReflexiveResults.first?.german, "sich anziehen")
 
         let auxiliaryResults = try await store.searchDictionary("haben")
         XCTAssertEqual(auxiliaryResults.first?.german, "haben")
@@ -1204,7 +1217,7 @@ final class LocalStoreTests: XCTestCase {
         let aufstehenInfo = GermanMorphology.info(for: aufstehen)
         XCTAssertEqual(
             aufstehenInfo.rows.first { $0.label == "Present" }?.value,
-            "ich stehe auf · du stehst auf · er/sie steht auf · wir stehen auf · ihr steht auf · sie stehen auf"
+            "ich stehe auf · du stehst auf · er/sie/es steht auf · wir stehen auf · ihr steht auf · sie/Sie stehen auf"
         )
         XCTAssertEqual(aufstehenInfo.rows.first { $0.label == "Simple past" }?.value, "stand auf")
         XCTAssertEqual(aufstehenInfo.rows.first { $0.label == "Perfect" }?.value, "haben/sein aufgestanden")
@@ -1883,6 +1896,11 @@ private func createLectorMorphologyFixture(at url: URL) throws {
           ('wohnt', 'wohnen', 'present,singular,third-person'),
           ('wohnte', 'wohnen', 'past'),
           ('gewohnt', 'wohnen', 'participle,past'),
+          ('freue', 'freuen', 'first-person,indicative,present,singular'),
+          ('freust', 'freuen', 'indicative,present,second-person,singular'),
+          ('freut', 'freuen', 'present,singular,third-person'),
+          ('merkst', 'merken', 'indicative,present,second-person,singular'),
+          ('anzieht', 'anziehen', 'present,singular,third-person,subordinate-clause'),
           ('sein', 'gehen', 'auxiliary'),
           ('gehe', 'gehen', 'first-person,indicative,present,singular'),
           ('gehst', 'gehen', 'indicative,present,second-person,singular'),

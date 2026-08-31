@@ -62,6 +62,47 @@ final class SentenceGenerationContractTests: XCTestCase {
         XCTAssertTrue(drafts.isEmpty)
     }
 
+    func testAcceptsAccusativeDativeAndSeparatedReflexiveForms() {
+        let vocabulary = [
+            card(
+                id: 1,
+                german: "sich freuen",
+                kind: .verb,
+                forms: [DictionaryForm(form: "freust", tags: ["present"])]
+            ),
+            card(
+                id: 2,
+                german: "sich merken",
+                kind: .verb,
+                forms: [DictionaryForm(form: "merkst", tags: ["present"])]
+            ),
+            card(
+                id: 3,
+                german: "sich anziehen",
+                kind: .verb,
+                forms: [DictionaryForm(form: "anzieht", tags: ["present"])]
+            ),
+            card(id: 4, german: "sich freuen", kind: .verb)
+        ]
+        let response = SentenceGenerationEnvelope(sentences: [
+            candidate("Du freust dich heute sehr.", id: 1, surfaceTokens: ["freust", "dich"]),
+            candidate("Du merkst dir den Termin.", id: 2, surfaceTokens: ["merkst", "dir"]),
+            candidate("Sie zieht sich heute an.", id: 3, surfaceTokens: ["zieht", "sich", "an"]),
+            candidate("Er freut sich heute sehr.", id: 4, surfaceTokens: ["freut", "sich"])
+        ])
+
+        let drafts = GeneratedSentenceValidator(vocabulary: vocabulary)
+            .validatedDrafts(from: response, limit: 4)
+
+        XCTAssertEqual(drafts.count, 4)
+        XCTAssertEqual(drafts[2].tokens.filter { $0.cardID == 3 }.map(\.surface), ["zieht", "sich", "an."])
+        XCTAssertTrue(
+            SentenceGenerationContract(vocabulary: vocabulary)
+                .systemPrompt(count: 1)
+                .contains("a separated reflexive verb has three surface tokens")
+        )
+    }
+
     func testRejectsDuplicateSentencesAndMalformedMultiTokenField() {
         let vocabulary = [card(id: 5, german: "Hund", kind: .noun)]
         let response = SentenceGenerationEnvelope(sentences: [

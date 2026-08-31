@@ -4,6 +4,7 @@ import Lang4SelfCore
 
 struct SettingsView: View {
     @EnvironmentObject private var state: AppState
+    @EnvironmentObject private var germanSpeech: GermanSpeechController
     @State private var showingImporter = false
     @State private var showingExplanationImporter = false
     @FocusState private var firstControlFocused: Bool
@@ -96,6 +97,39 @@ struct SettingsView: View {
                 }
 
                 settingsSection("Speech", symbol: "waveform") {
+                    HStack(alignment: .top, spacing: 18) {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Neural German pronunciation")
+                                .font(.headline)
+                            Text(speechModelStatusTitle)
+                                .foregroundStyle(speechModelStatusColor)
+                                .accessibilityIdentifier("settings.speech-model-status")
+                            Text(speechModelStatusDetail)
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Spacer()
+                        if speechModelIsBusy {
+                            ProgressView()
+                                .controlSize(.small)
+                                .accessibilityIdentifier("settings.speech-model-progress")
+                        } else if speechModelCanDownload {
+                            Button {
+                                germanSpeech.downloadModel()
+                            } label: {
+                                Label(speechModelDownloadTitle, systemImage: "arrow.down.circle")
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .accessibilityIdentifier("settings.download-speech-model")
+                        } else if germanSpeech.modelStatus == .ready {
+                            Label("Ready", systemImage: "checkmark.circle.fill")
+                                .foregroundStyle(.green)
+                        }
+                    }
+
+                    Divider()
+
                     Text("Speech recognition is forced to German on-device mode. Install German under System Settings → Keyboard → Dictation Languages if macOS reports that the model is unavailable.")
                         .foregroundStyle(.secondary)
                     Label("Audio and recognized text never leave this Mac", systemImage: "lock.shield")
@@ -288,6 +322,60 @@ struct SettingsView: View {
         return languages.isEmpty
             ? "Starter dictionary only"
             : "dict.cc \(languages.joined(separator: " + ")) installed"
+    }
+
+    private var speechModelStatusTitle: String {
+        switch germanSpeech.modelStatus {
+        case .checking: "Checking local model…"
+        case .notDownloaded: "Not downloaded"
+        case .downloading: "Downloading model…"
+        case .loading: "Loading model…"
+        case .warming: "Warming model…"
+        case .ready: "Installed and ready"
+        case .failed: "Model unavailable"
+        }
+    }
+
+    private var speechModelStatusDetail: String {
+        switch germanSpeech.modelStatus {
+        case .notDownloaded:
+            "Download Qwen3-TTS (about 1.8 GB). It is stored in your user cache and is not bundled with the app."
+        case .downloading:
+            "Downloading the pinned Qwen3-TTS snapshot to your user cache."
+        case .loading, .warming:
+            "Apple's German voice remains available until the neural model is ready."
+        case .failed(let message):
+            message
+        case .checking, .ready:
+            "Qwen3-TTS runs entirely on this Mac. The app checks for the pinned local snapshot without refreshing it in the background."
+        }
+    }
+
+    private var speechModelStatusColor: Color {
+        switch germanSpeech.modelStatus {
+        case .ready: .green
+        case .failed: .orange
+        default: .secondary
+        }
+    }
+
+    private var speechModelIsBusy: Bool {
+        switch germanSpeech.modelStatus {
+        case .checking, .downloading, .loading, .warming: true
+        case .notDownloaded, .ready, .failed: false
+        }
+    }
+
+    private var speechModelCanDownload: Bool {
+        switch germanSpeech.modelStatus {
+        case .notDownloaded, .failed: true
+        default: false
+        }
+    }
+
+    private var speechModelDownloadTitle: String {
+        if case .failed = germanSpeech.modelStatus { return "Retry" }
+        return "Download Model"
     }
 
     private func settingsSection<Content: View>(_ title: String, symbol: String, @ViewBuilder content: () -> Content) -> some View {

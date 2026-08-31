@@ -1,6 +1,11 @@
 import Foundation
 
 public enum GermanMorphology {
+    private enum ReflexiveCase: Hashable {
+        case accusative
+        case dative
+    }
+
     private struct VerbForms {
         let present: String
         let past: String
@@ -115,7 +120,13 @@ public enum GermanMorphology {
             return .init(headline: term, kind: .noun, gender: entry.gender, separablePrefix: nil, stem: term, rows: rows, isEstimated: false)
 
         case .verb:
-            return verbInfo(for: term, raw: entry.rawGerman, gender: entry.gender, importedForms: entry.forms)
+            return verbInfo(
+                for: term,
+                raw: entry.rawGerman,
+                gender: entry.gender,
+                importedForms: entry.forms,
+                reflexiveCases: reflexiveCases(for: entry)
+            )
 
         case .adjective:
             let base = term.lowercased()
@@ -157,6 +168,18 @@ public enum GermanMorphology {
         return (prefix, String(term.dropFirst(prefix.count)))
     }
 
+    public static func isReflexive(_ entry: DictionaryEntry) -> Bool {
+        guard entry.kind == .verb else { return false }
+        let term = DictCCParser.cleanedTerm(entry.german)
+            .lowercased(with: Locale(identifier: "de_DE"))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return term == "sich" || term.hasPrefix("sich ")
+    }
+
+    public static func isReflexivePronoun(_ value: String) -> Bool {
+        reflexivePronouns.contains(DictCCParser.normalized(value))
+    }
+
     public static func separablePrefix(in infinitive: String) -> String? {
         let term = canonicalGerman(infinitive).lowercased().replacingOccurrences(of: "|", with: "")
         return separablePrefixes.first {
@@ -172,7 +195,16 @@ public enum GermanMorphology {
 
         var result = [normalized]
         let words = normalized.split(whereSeparator: { $0.isWhitespace }).map(String.init)
-        let lexicalWords = Array(words.drop(while: { leadingDeterminers.contains($0) }))
+        var lexicalWords = Array(words.drop(while: { leadingDeterminers.contains($0) }))
+        let hasReflexivePronoun = lexicalWords.contains(where: reflexivePronouns.contains)
+        if hasReflexivePronoun,
+           lexicalWords.count > 1,
+           subjectPronouns.contains(lexicalWords[0]) {
+            lexicalWords.removeFirst()
+        }
+        if hasReflexivePronoun {
+            lexicalWords.removeAll(where: reflexivePronouns.contains)
+        }
         let lexicalTerm = lexicalWords.joined(separator: " ")
         if !lexicalTerm.isEmpty { appendUnique(lexicalTerm, to: &result) }
 
@@ -187,6 +219,7 @@ public enum GermanMorphology {
         if lexicalWords.count == 1, let word = lexicalWords.first {
             for candidate in baseFormCandidates(for: word) {
                 appendUnique(candidate, to: &result)
+                if hasReflexivePronoun { appendUnique("sich " + candidate, to: &result) }
             }
         } else if lexicalWords.count == 2,
                   let inflected = lexicalWords.first,
@@ -194,6 +227,7 @@ public enum GermanMorphology {
                   normalizedSeparablePrefixes.contains(prefix) {
             for infinitive in verbBaseCandidates(for: inflected) {
                 appendUnique(prefix + infinitive, to: &result)
+                if hasReflexivePronoun { appendUnique("sich " + prefix + infinitive, to: &result) }
             }
         }
         return result
@@ -230,7 +264,8 @@ public enum GermanMorphology {
         for termValue: String,
         raw: String,
         gender: Gender,
-        importedForms: [DictionaryForm]
+        importedForms: [DictionaryForm],
+        reflexiveCases: [ReflexiveCase]
     ) -> WordInfo {
         let infinitive = termValue.lowercased().replacingOccurrences(of: "|", with: "")
         let synthetic = DictionaryEntry(german: termValue, english: "", rawGerman: raw, kind: .verb, gender: gender)
@@ -267,7 +302,11 @@ public enum GermanMorphology {
             .uniqued()
             .sorted()
 
-        let present = importedPresent ?? fallbackPresent
+        let present = displayPresentParadigm(
+            importedPresent ?? fallbackPresent,
+            reflexiveCases: reflexiveCases,
+            separablePrefix: parts?.prefix
+        )
         let past = importedPast ?? fallbackPast
         let participle = importedParticiple ?? fallbackParticiple
         let auxiliary = importedAuxiliaries.isEmpty
@@ -280,21 +319,121 @@ public enum GermanMorphology {
                 || importedAuxiliaries.isEmpty
         )
 
+        let isReflexive = !reflexiveCases.isEmpty
+        let displayedInfinitive = isReflexive ? "sich " + infinitive : infinitive
+        let displayedPast = isReflexive
+            ? insertingReflexivePronoun("sich", into: past, separablePrefix: parts?.prefix)
+            : past
+        let displayedPerfect = isReflexive
+            ? auxiliary + " sich " + participle
+            : auxiliary + " " + participle
+
         return .init(
-            headline: infinitive,
+            headline: displayedInfinitive,
             kind: .verb,
             gender: .unknown,
             separablePrefix: parts?.prefix,
             stem: parts?.stem ?? infinitive,
             rows: [
-                .init("Infinitive", infinitive),
+                .init("Infinitive", displayedInfinitive),
                 .init("Present", present),
-                .init("Simple past", past),
-                .init("Perfect", auxiliary + " " + participle),
-                .init("Future I", "werden + " + infinitive)
+                .init("Simple past", displayedPast),
+                .init("Perfect", displayedPerfect),
+                .init("Future I", "werden + " + displayedInfinitive)
             ],
             isEstimated: usedGeneratedFallback
         )
+    }
+
+    private static func displayPresentParadigm(
+        _ value: String,
+        reflexiveCases: [ReflexiveCase],
+        separablePrefix: String?
+    ) -> String {
+        let forms = value.split(separator: "·").compactMap { item -> String? in
+            let components = item
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .split(maxSplits: 1, whereSeparator: { $0.isWhitespace })
+            return components.count == 2 ? String(components[1]) : nil
+        }
+        guard forms.count == presentSubjectLabels.count else { return value }
+
+        return forms.enumerated().map { index, form in
+            guard !reflexiveCases.isEmpty else {
+                return "\(presentSubjectLabels[index]) \(form)"
+            }
+            let pronouns = reflexiveCases.map { reflexivePronoun(for: index, grammaticalCase: $0) }
+            let displayedForm = insertingReflexivePronoun(
+                pronouns.joined(separator: "/"),
+                into: form,
+                separablePrefix: separablePrefix
+            )
+            return "\(presentSubjectLabels[index]) \(displayedForm)"
+        }.joined(separator: " · ")
+    }
+
+    private static func reflexivePronoun(
+        for personIndex: Int,
+        grammaticalCase: ReflexiveCase
+    ) -> String {
+        switch (personIndex, grammaticalCase) {
+        case (0, .accusative): "mich"
+        case (0, .dative): "mir"
+        case (1, .accusative): "dich"
+        case (1, .dative): "dir"
+        case (3, _): "uns"
+        case (4, _): "euch"
+        default: "sich"
+        }
+    }
+
+    private static func insertingReflexivePronoun(
+        _ pronoun: String,
+        into form: String,
+        separablePrefix: String?
+    ) -> String {
+        guard let separablePrefix else { return form + " " + pronoun }
+        let suffix = " " + separablePrefix
+        guard form.lowercased(with: Locale(identifier: "de_DE"))
+            .hasSuffix(suffix.lowercased(with: Locale(identifier: "de_DE"))) else {
+            return form + " " + pronoun
+        }
+        return String(form.dropLast(suffix.count)) + " " + pronoun + suffix
+    }
+
+    private static func reflexiveCases(for entry: DictionaryEntry) -> [ReflexiveCase] {
+        guard isReflexive(entry) else { return [] }
+        let rawValues = [entry.rawGerman] + entry.meanings.compactMap(\.rawGerman)
+        let markers = rawValues.compactMap(reflexiveCaseMarkers).joined(separator: " ")
+        var result: [ReflexiveCase] = []
+        if markers.contains("akk") || markers.contains("acc") {
+            result.append(.accusative)
+        }
+        if markers.contains("dat") {
+            result.append(.dative)
+        }
+        return result.isEmpty ? [.accusative] : result
+    }
+
+    private static func reflexiveCaseMarkers(in value: String) -> String? {
+        let lowered = value
+            .precomposedStringWithCanonicalMapping
+            .lowercased(with: Locale(identifier: "de_DE"))
+        let patterns = [
+            #"sich(?:\s*[/,]?\s*[\[\(\{<][^\]\)\}>]{1,20}[\]\)\}>])+"#,
+            #"(?:[\[\(\{<][^\]\)\}>]{1,20}[\]\)\}>]\s*[/,]?\s*)+sich"#,
+            #"sich\s+(?:akk(?:usativ)?|acc(?:usative)?|dat(?:iv|ive)?)[\.:]?"#,
+            #"(?:akk(?:usativ)?|acc(?:usative)?|dat(?:iv|ive)?)[\.:]?\s+sich"#
+        ]
+        for pattern in patterns {
+            let expression = try! NSRegularExpression(pattern: pattern)
+            let range = NSRange(lowered.startIndex..., in: lowered)
+            if let match = expression.firstMatch(in: lowered, range: range),
+               let matchRange = Range(match.range, in: lowered) {
+                return String(lowered[matchRange])
+            }
+        }
+        return nil
     }
 
     private static func importedPresentParadigm(
@@ -392,8 +531,18 @@ public enum GermanMorphology {
 
     private static func canonicalGerman(_ value: String) -> String {
         var term = DictCCParser.cleanedTerm(value)
-        for marker in ["jdn. ", "jdm. ", "etw. ", "sich "] where term.lowercased().hasPrefix(marker) {
+        let markers = [
+            "jdn. ", "jdm. ", "etw. ", "sich ",
+            "(akk.) ", "(akk) ", "(acc.) ", "(acc) ",
+            "(dat.) ", "(dat) ", "(dativ) ",
+            "akk. ", "akk ", "akkusativ ", "acc. ", "acc ",
+            "dat. ", "dat ", "dativ "
+        ]
+        while let marker = markers.first(where: {
+            term.lowercased(with: Locale(identifier: "de_DE")).hasPrefix($0)
+        }) {
             term = String(term.dropFirst(marker.count))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
         }
         return term.trimmingCharacters(in: .whitespaces)
     }
@@ -405,6 +554,18 @@ public enum GermanMorphology {
     private static let leadingDeterminers: Set<String> = [
         "der", "die", "das", "den", "dem", "des",
         "ein", "eine", "einen", "einem", "einer", "eines"
+    ]
+
+    private static let subjectPronouns: Set<String> = [
+        "ich", "du", "er", "sie", "es", "wir", "ihr"
+    ]
+
+    private static let reflexivePronouns: Set<String> = [
+        "mich", "dich", "sich", "mir", "dir", "uns", "euch"
+    ]
+
+    private static let presentSubjectLabels = [
+        "ich", "du", "er/sie/es", "wir", "ihr", "sie/Sie"
     ]
 
     private static func baseFormCandidates(for word: String) -> [String] {

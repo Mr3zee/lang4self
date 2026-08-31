@@ -9,6 +9,7 @@ public enum ReviewTestMode: String, CaseIterable, Identifiable, Sendable {
     case germanToEnglishWriting
     case conjugation
     case plural
+    case listeningWords
 
     public var id: String { rawValue }
 
@@ -22,12 +23,13 @@ public enum ReviewTestMode: String, CaseIterable, Identifiable, Sendable {
         case .germanToEnglishWriting: "German → English · Writing"
         case .conjugation: "Conjugation"
         case .plural: "Plural"
+        case .listeningWords: "Listening words"
         }
     }
 
     public var requiresWrittenAnswer: Bool {
         switch self {
-        case .writing, .germanToEnglishWriting, .conjugation, .plural: true
+        case .writing, .germanToEnglishWriting, .conjugation, .plural, .listeningWords: true
         case .flashcard, .speaking, .gender, .germanToEnglish: false
         }
     }
@@ -68,6 +70,14 @@ public struct ReviewChallenge: Equatable, Sendable {
                 : [card.german]
             conjugationPronoun = nil
 
+        case .listeningWords:
+            guard !card.german.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                return nil
+            }
+            prompt = card.german
+            acceptedAnswers = [card.german]
+            conjugationPronoun = nil
+
         case .germanToEnglish, .germanToEnglishWriting:
             let answers = Self.englishAnswers(for: card)
             guard !answers.isEmpty else { return nil }
@@ -91,7 +101,15 @@ public struct ReviewChallenge: Equatable, Sendable {
             let index = (rawIndex % conjugations.count + conjugations.count) % conjugations.count
             let conjugation = conjugations[index]
             prompt = card.german
-            acceptedAnswers = [conjugation.form, "\(conjugation.pronoun) \(conjugation.form)"]
+            let subjectPronouns = conjugation.pronoun
+                .split(separator: "/")
+                .map(String.init)
+            acceptedAnswers = (
+                conjugation.forms
+                    + subjectPronouns.flatMap { pronoun in
+                        conjugation.forms.map { "\(pronoun) \($0)" }
+                    }
+            ).uniquedReviewAnswers()
             conjugationPronoun = conjugation.pronoun
 
         case .plural:
@@ -143,25 +161,26 @@ public struct ReviewChallenge: Equatable, Sendable {
 
     private static func presentTenseConjugations(
         for card: PersonalCard
-    ) -> [(pronoun: String, form: String)] {
+    ) -> [(pronoun: String, forms: [String])] {
         let present = GermanMorphology.info(for: entry(for: card)).rows
             .first { $0.label == "Present" }?.value ?? ""
-        let isReflexive = DictCCParser.cleanedTerm(card.german)
-            .lowercased(with: Locale(identifier: "de_DE"))
-            .hasPrefix("sich ")
-        let reflexivePronouns = [
-            "ich": "mich", "du": "dich", "er/sie": "sich",
-            "wir": "uns", "ihr": "euch", "sie": "sich"
-        ]
         return present.split(separator: "·").compactMap { item in
             let components = item
                 .trimmingCharacters(in: .whitespacesAndNewlines)
                 .split(maxSplits: 1, whereSeparator: { $0.isWhitespace })
                 .map(String.init)
             guard components.count == 2 else { return nil }
-            let reflexive = isReflexive ? reflexivePronouns[components[0]] : nil
-            let form = [components[1], reflexive].compactMap { $0 }.joined(separator: " ")
-            return (components[0], form)
+            return (components[0], slashAlternatives(in: components[1]))
+        }
+    }
+
+    private static func slashAlternatives(in value: String) -> [String] {
+        let words = value.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+        guard let index = words.firstIndex(where: { $0.contains("/") }) else { return [value] }
+        return words[index].split(separator: "/").map { alternative in
+            var result = words
+            result[index] = String(alternative)
+            return result.joined(separator: " ")
         }
     }
 

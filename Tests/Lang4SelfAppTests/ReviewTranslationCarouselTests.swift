@@ -3,6 +3,14 @@ import Lang4SelfCore
 @testable import Lang4Self
 
 final class ReviewTranslationCarouselTests: XCTestCase {
+    func testSentencePracticeIsPartOfReviewModeCycling() {
+        XCTAssertEqual(ReviewMode.card(.plural).advanced(by: 1), .sentences)
+        XCTAssertEqual(ReviewMode.sentences.advanced(by: 1), .card(.listeningWords))
+        XCTAssertEqual(ReviewMode.card(.listeningWords).advanced(by: 1), .listeningSentences)
+        XCTAssertEqual(ReviewMode.listeningSentences.advanced(by: 1), .card(.flashcard))
+        XCTAssertEqual(ReviewMode.card(.flashcard).advanced(by: -1), .listeningSentences)
+    }
+
     func testCyclesTranslationsAndLanguagesWhileKeepingEachLanguageSelection() {
         var carousel = ReviewTranslationCarousel(
             cardEnglish: "first; second; third; первый; второй",

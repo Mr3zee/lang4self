@@ -2,7 +2,9 @@
 
 `Lang4SelfCore` owns domain models, dict.cc parsing, morphology, SQLite storage, FTS search, and spaced repetition. It contains no UI or speech code. `LocalStoreSchema` is the only schema/migration owner; `LocalStore` implements runtime data capabilities.
 
-`Apps/macOS/Lang4Self` owns SwiftUI views, the macOS on-device speech adapter, and the localhost-only LM Studio adapter. `AppState` is the UI boundary around the actor-isolated local store. Production dependencies are created in `Lang4SelfApp`; `AppState` talks to storage, dictionary-file preparation, sentence generation, and settings through narrow protocols. Runtime flags, clocks, calendars, preferences, and speech configuration enter through this composition root rather than hidden globals.
+`Apps/macOS/Lang4Self` owns SwiftUI views, the macOS on-device speech adapters, and the localhost-only LM Studio adapter. `AppState` is the UI boundary around the actor-isolated local store. Production dependencies are created in `Lang4SelfApp`; `AppState` talks to storage, dictionary-file preparation, sentence generation, and settings through narrow protocols. Runtime flags, clocks, calendars, preferences, and speech configuration enter through this composition root rather than hidden globals.
+
+German pronunciation uses a pinned Qwen3-TTS MLX snapshot downloaded on user request from Settings. When installed, app launch loads it, performs one warm-up synthesis, and retains the model for the process lifetime. There is no background model refresh; changing the pinned revision is an app release decision. Visible pronunciation targets are prepared speculatively for immediate playback, with Apple speech as the startup and failure fallback.
 
 `Templates/iOS` and `Templates/Server` are intentionally disconnected. They document the later entry points without enabling sync or adding a server dependency today.
 

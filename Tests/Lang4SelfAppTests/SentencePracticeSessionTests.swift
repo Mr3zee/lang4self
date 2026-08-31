@@ -52,6 +52,26 @@ final class SentencePracticeSessionTests: XCTestCase {
         ))
     }
 
+    func testListeningSentenceChecksTheFullSentenceWithoutVocabularyBlanks() {
+        let item = practiceItem(
+            german: "Das Haus ist schön.",
+            targetSurfaces: ["Haus"],
+            lookupTerm: "Haus"
+        )
+
+        XCTAssertFalse(SentenceAnswerEvaluator.usesVocabularyBlanks(for: item, mode: .listening))
+        XCTAssertTrue(SentenceAnswerEvaluator.isCorrect(
+            "Das Haus ist schön",
+            for: item,
+            mode: .listening
+        ))
+        XCTAssertFalse(SentenceAnswerEvaluator.isCorrect(
+            "Haus",
+            for: item,
+            mode: .listening
+        ))
+    }
+
     func testFailedAnswerIsRequeuedAndSessionWaitsForNextBatch() {
         let source = WordList(id: WordList.defaultID, name: "My words")
         let item = practiceItem(
@@ -84,6 +104,56 @@ final class SentencePracticeSessionTests: XCTestCase {
         session.appendGenerated(Array(repeating: item.draft, count: 2))
         XCTAssertNotNil(session.currentItem)
         XCTAssertFalse(session.isWaitingForGeneration)
+    }
+
+    func testAbortClearsAnActiveRunAndReturnsToSetupState() {
+        let source = WordList(id: WordList.defaultID, name: "My words")
+        var session = SentencePracticeSession()
+        session.start(
+            mode: .fullSentence,
+            requestedCount: 5,
+            retries: [],
+            sourceList: source
+        )
+        session.appendGenerated([
+            practiceItem(
+                german: "Das Haus ist groß.",
+                targetSurfaces: ["Haus"],
+                lookupTerm: "Haus"
+            ).draft
+        ])
+
+        XCTAssertTrue(session.hasStarted)
+        XCTAssertTrue(session.isActive)
+
+        session.abort()
+
+        XCTAssertFalse(session.hasStarted)
+        XCTAssertFalse(session.isActive)
+        XCTAssertNil(session.currentItem)
+        XCTAssertEqual(session.requestedGenerationCount, 0)
+    }
+
+    func testActiveRunCanSwitchToListeningWithoutDiscardingGeneratedItems() {
+        let source = WordList(id: WordList.defaultID, name: "My words")
+        let item = practiceItem(
+            german: "Das Haus ist groß.",
+            targetSurfaces: ["Haus"],
+            lookupTerm: "Haus"
+        )
+        var session = SentencePracticeSession()
+        session.start(
+            mode: .vocabularyBlanks,
+            requestedCount: 1,
+            retries: [],
+            sourceList: source
+        )
+        session.appendGenerated([item.draft])
+
+        session.setMode(.listening)
+
+        XCTAssertEqual(session.mode, .listening)
+        XCTAssertEqual(session.currentItem?.draft, item.draft)
     }
 
     private func practiceItem(

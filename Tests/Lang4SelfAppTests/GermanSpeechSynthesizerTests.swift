@@ -4,6 +4,59 @@ import XCTest
 
 @MainActor
 final class GermanSpeechControllerTests: XCTestCase {
+    func testStartWarmsSynthesizer() {
+        let synthesizer = TestGermanSpeechSynthesizer()
+        let controller = GermanSpeechController(synthesizer: synthesizer)
+
+        controller.start()
+
+        XCTAssertEqual(synthesizer.startCount, 1)
+    }
+
+    func testSpeechModelStatusAndDownloadAreForwarded() {
+        let synthesizer = TestGermanSpeechSynthesizer()
+        let modelManager = TestGermanSpeechModelManager()
+        let controller = GermanSpeechController(
+            synthesizer: synthesizer,
+            modelManager: modelManager
+        )
+
+        XCTAssertEqual(controller.modelStatus, .notDownloaded)
+
+        controller.downloadModel()
+
+        XCTAssertEqual(modelManager.downloadCount, 1)
+        XCTAssertEqual(controller.modelStatus, .downloading)
+    }
+
+    func testCurrentTargetIsPreparedWhenSpeechModelBecomesReady() {
+        let synthesizer = TestGermanSpeechSynthesizer()
+        let modelManager = TestGermanSpeechModelManager()
+        let controller = GermanSpeechController(
+            synthesizer: synthesizer,
+            modelManager: modelManager
+        )
+        controller.activate(.dictionary)
+        controller.setTarget("Haus", in: .dictionary)
+
+        modelManager.updateStatus(.ready)
+
+        XCTAssertEqual(synthesizer.preparedTexts, ["Haus", "Haus"])
+    }
+
+    func testActiveTargetIsPreparedAndCleared() {
+        let synthesizer = TestGermanSpeechSynthesizer()
+        let controller = GermanSpeechController(synthesizer: synthesizer)
+
+        controller.activate(.dictionary)
+        controller.setTarget("  Donau\u{00AD}dampfschiff  ", in: .dictionary)
+        controller.activate(nil)
+
+        XCTAssertEqual(synthesizer.preparedTexts.count, 2)
+        XCTAssertEqual(synthesizer.preparedTexts[0], "Donaudampfschiff")
+        XCTAssertNil(synthesizer.preparedTexts[1])
+    }
+
     func testSpeaksOnlyTheNormalizedCurrentTarget() {
         let synthesizer = TestGermanSpeechSynthesizer()
         let controller = GermanSpeechController(synthesizer: synthesizer)
@@ -111,11 +164,38 @@ final class DoubleShiftKeyDetectorTests: XCTestCase {
 
 @MainActor
 private final class TestGermanSpeechSynthesizer: GermanSpeechSynthesizing {
+    private(set) var startCount = 0
+    private(set) var preparedTexts: [String?] = []
     private(set) var spokenTexts: [String] = []
+
+    func start() {
+        startCount += 1
+    }
+
+    func prepare(_ text: String?) {
+        preparedTexts.append(text)
+    }
 
     func speak(_ text: String) {
         spokenTexts.append(text)
     }
 
     func stop() {}
+}
+
+@MainActor
+private final class TestGermanSpeechModelManager: GermanSpeechModelManaging {
+    private(set) var modelStatus: GermanSpeechModelStatus = .notDownloaded
+    var modelStatusDidChange: ((GermanSpeechModelStatus) -> Void)?
+    private(set) var downloadCount = 0
+
+    func downloadModel() {
+        downloadCount += 1
+        updateStatus(.downloading)
+    }
+
+    func updateStatus(_ status: GermanSpeechModelStatus) {
+        modelStatus = status
+        modelStatusDidChange?(status)
+    }
 }

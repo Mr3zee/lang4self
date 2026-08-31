@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import Lang4SelfCore
+import MLXAudioCore
 
 @main
 struct Lang4SelfApp: App {
@@ -68,10 +69,41 @@ private final class Lang4SelfDependencies: ObservableObject {
                 ? 0
                 : processInfo.arguments.contains("--ui-testing-single-voice-alternative") ? 1 : 3
         )
+        let germanSpeechSynthesizer: any GermanSpeechSynthesizing
+        let germanSpeechModelManager: (any GermanSpeechModelManaging)?
+        if isUITesting {
+            let synthesizer = UITestingGermanSpeechSynthesizer()
+            germanSpeechSynthesizer = synthesizer
+            germanSpeechModelManager = synthesizer
+        } else {
+            let modelCacheDirectory = FileManager.default
+                .urls(for: .cachesDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent("com.alexsysoev.Lang4Self/Models", isDirectory: true)
+            let configuration = MLXGermanSpeechConfiguration(
+                repositoryID: "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-8bit",
+                revision: "049ef77fe8816b536193c0c25f9a214d17921282",
+                cacheDirectory: modelCacheDirectory,
+                voice: "Aiden",
+                language: "German",
+                warmupText: "Hallo.",
+                streamingInterval: 0.08
+            )
+            let synthesizer = MLXGermanSpeechSynthesizer(
+                configuration: configuration,
+                modelLoader: HuggingFaceMLXGermanSpeechModelLoader(
+                    repositoryID: configuration.repositoryID,
+                    revision: configuration.revision,
+                    cacheDirectory: configuration.cacheDirectory
+                ),
+                fallback: AppleGermanSpeechSynthesizer(),
+                player: AudioPlayer()
+            )
+            germanSpeechSynthesizer = synthesizer
+            germanSpeechModelManager = synthesizer
+        }
         let germanSpeech = GermanSpeechController(
-            synthesizer: isUITesting
-                ? UITestingGermanSpeechSynthesizer()
-                : AppleGermanSpeechSynthesizer()
+            synthesizer: germanSpeechSynthesizer,
+            modelManager: germanSpeechModelManager
         )
         self.germanSpeech = germanSpeech
         pronunciationShortcut = DoubleShiftShortcutController { [weak germanSpeech] in
@@ -119,22 +151,10 @@ private final class Lang4SelfDependencies: ObservableObject {
                 calendar: .autoupdatingCurrent
             )
             self.state = state
-            let reportForwardedSpaceEvent: () -> Void = isUITesting
-                ? {
-                    DistributedNotificationCenter.default().postNotificationName(
-                        Notification.Name("Lang4SelfUITestingSpaceEventLeaked"),
-                        object: nil,
-                        userInfo: nil,
-                        deliverImmediately: true
-                    )
-                }
-                : {}
             voiceSearchShortcut = VoiceSearchShortcutController(
                 router: state,
                 speech: speech,
-                context: AppKitVoiceSearchShortcutContext(application: .shared),
-                holdDelay: 0.18,
-                onForwardedSpaceEvent: reportForwardedSpaceEvent
+                context: AppKitVoiceSearchShortcutContext(application: .shared)
             )
             startupFailure = nil
         } catch {
@@ -169,13 +189,12 @@ private final class Lang4SelfAppDelegate: NSObject, NSApplicationDelegate {
     private var shortcutKeyMonitor: Any?
     private var uiTestingInputObserver: NSObjectProtocol?
     private var uiTestingDoubleShiftObserver: NSObjectProtocol?
-    private var uiTestingDisableMonitorObserver: NSObjectProtocol?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         if let application = notification.object as? NSApplication {
             scrollbarStyler?.start(application: application)
         }
-        voiceSearchShortcut?.startMonitoring()
+        germanSpeech?.start()
         pronunciationShortcut?.startMonitoring()
         installShortcutKeyMonitor()
 
@@ -193,15 +212,6 @@ private final class Lang4SelfAppDelegate: NSObject, NSApplicationDelegate {
             queue: .main
         ) { _ in
             UITestingInput.postDoubleShift()
-        }
-        uiTestingDisableMonitorObserver = DistributedNotificationCenter.default().addObserver(
-            forName: Notification.Name("Lang4SelfUITestingDisableSpaceMonitor"),
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                self?.voiceSearchShortcut?.stopMonitoring()
-            }
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
             guard !NSApp.windows.contains(where: \.isVisible),
@@ -234,7 +244,7 @@ private final class Lang4SelfAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         scrollbarStyler?.stop()
-        voiceSearchShortcut?.stopMonitoring()
+        voiceSearchShortcut?.cancelSpaceHold()
         pronunciationShortcut?.stopMonitoring()
         germanSpeech?.stop()
         if let shortcutKeyMonitor { NSEvent.removeMonitor(shortcutKeyMonitor) }
@@ -247,10 +257,6 @@ private final class Lang4SelfAppDelegate: NSObject, NSApplicationDelegate {
             DistributedNotificationCenter.default().removeObserver(uiTestingDoubleShiftObserver)
         }
         uiTestingDoubleShiftObserver = nil
-        if let uiTestingDisableMonitorObserver {
-            DistributedNotificationCenter.default().removeObserver(uiTestingDisableMonitorObserver)
-        }
-        uiTestingDisableMonitorObserver = nil
     }
 
     private func installShortcutKeyMonitor() {
@@ -279,6 +285,9 @@ private final class Lang4SelfAppDelegate: NSObject, NSApplicationDelegate {
                     )
                     return true
                 },
+                cycleDictionaryVoiceAlternative: { [weak self] offset in
+                    self?.voiceSearchShortcut?.cycleVoiceAlternative(by: offset) ?? false
+                },
                 isEditingText: { event.window?.firstResponder is NSTextView }
             )
             .handle(event)
@@ -294,6 +303,7 @@ struct AppShortcutKeyHandler {
     let undo: () -> Bool
     let redo: () -> Bool
     let cycleReviewMode: (Int) -> Bool
+    let cycleDictionaryVoiceAlternative: (Int) -> Bool
     let isEditingText: () -> Bool
 
     init(
@@ -302,6 +312,7 @@ struct AppShortcutKeyHandler {
         undo: @escaping () -> Bool = { false },
         redo: @escaping () -> Bool = { false },
         cycleReviewMode: @escaping (Int) -> Bool = { _ in false },
+        cycleDictionaryVoiceAlternative: @escaping (Int) -> Bool = { _ in false },
         isEditingText: @escaping () -> Bool = { false }
     ) {
         self.openSettings = openSettings
@@ -309,6 +320,7 @@ struct AppShortcutKeyHandler {
         self.undo = undo
         self.redo = redo
         self.cycleReviewMode = cycleReviewMode
+        self.cycleDictionaryVoiceAlternative = cycleDictionaryVoiceAlternative
         self.isEditingText = isEditingText
     }
 
@@ -333,7 +345,8 @@ struct AppShortcutKeyHandler {
         case "[" where !modifiers.contains(.shift),
              "]" where !modifiers.contains(.shift):
             guard !event.isARepeat else { return event }
-            let handled = cycleReviewMode(characters == "[" ? -1 : 1)
+            let offset = characters == "[" ? -1 : 1
+            let handled = cycleDictionaryVoiceAlternative(offset) || cycleReviewMode(offset)
             return handled ? nil : event
         default:
             return event
@@ -488,9 +501,19 @@ final class OverlayScrollbarStyler: AppScrollbarStyling {
 }
 
 @MainActor
-private final class UITestingGermanSpeechSynthesizer: GermanSpeechSynthesizing {
+private final class UITestingGermanSpeechSynthesizer: GermanSpeechSynthesizing, GermanSpeechModelManaging {
+    private(set) var modelStatus: GermanSpeechModelStatus = .notDownloaded
+    var modelStatusDidChange: ((GermanSpeechModelStatus) -> Void)?
+
+    func start() {}
+    func prepare(_ text: String?) {}
     func speak(_ text: String) {}
     func stop() {}
+
+    func downloadModel() {
+        modelStatus = .ready
+        modelStatusDidChange?(.ready)
+    }
 }
 
 private struct Lang4SelfCommands: Commands {

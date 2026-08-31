@@ -232,6 +232,9 @@ final class LMStudioService: SentenceGenerating {
             guard drafts.count == count else { throw LMStudioError.noValidSentences }
             progress = .ready(model.displayName)
             return drafts
+        } catch where Task.isCancelled || error is CancellationError {
+            progress = .idle
+            throw CancellationError()
         } catch {
             guard !isShuttingDown else { throw CancellationError() }
             progress = .failed(error.localizedDescription)

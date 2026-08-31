@@ -6,7 +6,6 @@ enum AppRoute: String, CaseIterable, Identifiable {
     case dictionary
     case review
     case library
-    case sentences
     case settings
 
     var id: String { rawValue }
@@ -16,7 +15,6 @@ enum AppRoute: String, CaseIterable, Identifiable {
         case .dictionary: "Dictionary"
         case .review: "Review"
         case .library: "My words"
-        case .sentences: "Sentence test"
         case .settings: "Settings"
         }
     }
@@ -26,7 +24,6 @@ enum AppRoute: String, CaseIterable, Identifiable {
         case .dictionary: "character.book.closed"
         case .review: "rectangle.on.rectangle.angled"
         case .library: "books.vertical"
-        case .sentences: "text.badge.checkmark"
         case .settings: "gearshape"
         }
     }
@@ -875,6 +872,17 @@ final class AppState: ObservableObject {
 
     func advanceSentencePractice() {
         sentencePractice.advance()
+    }
+
+    func setSentencePracticeMode(_ mode: SentenceTestMode) {
+        sentencePractice.setMode(mode)
+    }
+
+    func abortSentencePractice() {
+        sentenceGenerationID = UUID()
+        sentenceGenerationTask?.cancel()
+        sentenceGenerationTask = nil
+        sentencePractice.abort()
     }
 
     private func uiTestingSentenceDrafts(

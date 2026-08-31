@@ -4,13 +4,44 @@ import Foundation
 
 @MainActor
 protocol GermanSpeechSynthesizing: AnyObject {
+    func start()
+    func prepare(_ text: String?)
     func speak(_ text: String)
     func stop()
+}
+
+enum GermanSpeechModelStatus: Equatable {
+    case checking
+    case notDownloaded
+    case downloading
+    case loading
+    case warming
+    case ready
+    case failed(String)
+}
+
+@MainActor
+protocol GermanSpeechModelManaging: AnyObject {
+    var modelStatus: GermanSpeechModelStatus { get }
+    var modelStatusDidChange: ((GermanSpeechModelStatus) -> Void)? { get set }
+    func downloadModel()
 }
 
 @MainActor
 final class AppleGermanSpeechSynthesizer: GermanSpeechSynthesizing {
     private let synthesizer = AVSpeechSynthesizer()
+    private var hasStarted = false
+
+    func start() {
+        guard !hasStarted else { return }
+        hasStarted = true
+
+        let utterance = AVSpeechUtterance(string: "Hallo.")
+        utterance.voice = AVSpeechSynthesisVoice(language: "de-DE")
+        synthesizer.write(utterance) { _ in }
+    }
+
+    func prepare(_ text: String?) {}
 
     func speak(_ text: String) {
         if synthesizer.isSpeaking {
@@ -38,13 +69,34 @@ final class GermanSpeechController: ObservableObject {
 
     @Published private(set) var target: String?
     @Published private(set) var lastSpokenText: String?
+    @Published private(set) var modelStatus: GermanSpeechModelStatus
 
     private let synthesizer: any GermanSpeechSynthesizing
+    private let modelManager: (any GermanSpeechModelManaging)?
     private var targets: [Context: String] = [:]
     private var activeContext: Context?
 
-    init(synthesizer: any GermanSpeechSynthesizing) {
+    init(
+        synthesizer: any GermanSpeechSynthesizing,
+        modelManager: (any GermanSpeechModelManaging)? = nil
+    ) {
         self.synthesizer = synthesizer
+        self.modelManager = modelManager
+        modelStatus = modelManager?.modelStatus ?? .notDownloaded
+        modelManager?.modelStatusDidChange = { [weak self] status in
+            self?.modelStatus = status
+            if status == .ready, let target = self?.target {
+                self?.synthesizer.prepare(target)
+            }
+        }
+    }
+
+    func start() {
+        synthesizer.start()
+    }
+
+    func downloadModel() {
+        modelManager?.downloadModel()
     }
 
     func activate(_ context: Context?) {
@@ -75,7 +127,10 @@ final class GermanSpeechController: ObservableObject {
     }
 
     private func publishTarget() {
-        target = activeContext.flatMap { targets[$0] }
+        let nextTarget = activeContext.flatMap { targets[$0] }
+        guard target != nextTarget else { return }
+        target = nextTarget
+        synthesizer.prepare(nextTarget)
     }
 
     private static func normalized(_ text: String?) -> String? {

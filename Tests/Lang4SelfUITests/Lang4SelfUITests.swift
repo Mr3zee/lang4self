@@ -1,3 +1,4 @@
+import AppKit
 import XCTest
 
 @MainActor
@@ -51,15 +52,14 @@ final class Lang4SelfUITests: XCTestCase {
             ("1", "dictionary"),
             ("2", "review"),
             ("3", "library"),
-            ("4", "sentences"),
-            ("5", "settings")
+            ("4", "settings")
         ] {
             app.typeKey(key, modifierFlags: .command)
             XCTAssertTrue(routeElement(route).waitForExistence(timeout: 3), "⌘\(key) did not open \(route)")
             assertFocused(element("sidebar.routes"))
         }
 
-        for route in ["dictionary", "review", "library", "sentences", "settings"] {
+        for route in ["dictionary", "review", "library", "settings"] {
             element("sidebar.\(route)").click()
             XCTAssertTrue(routeElement(route).waitForExistence(timeout: 3), "Sidebar did not open \(route)")
         }
@@ -109,9 +109,9 @@ final class Lang4SelfUITests: XCTestCase {
         app.typeKey(.upArrow, modifierFlags: [])
         XCTAssertTrue(routeElement("settings").waitForExistence(timeout: 3))
         app.typeKey(.upArrow, modifierFlags: [])
-        XCTAssertTrue(routeElement("sentences").waitForExistence(timeout: 3))
+        XCTAssertTrue(routeElement("library").waitForExistence(timeout: 3))
 
-        app.typeKey("5", modifierFlags: .command)
+        app.typeKey("4", modifierFlags: .command)
         assertFocused(element("sidebar.routes"))
         app.typeKey(.downArrow, modifierFlags: [])
         XCTAssertTrue(routeElement("dictionary").waitForExistence(timeout: 3))
@@ -155,24 +155,21 @@ final class Lang4SelfUITests: XCTestCase {
         app.typeKey(.return, modifierFlags: [])
         assertFocused(app.textFields["library.search"])
 
-        element("sidebar.sentences").click()
-        XCTAssertTrue(element("sentences.test-card").waitForExistence(timeout: 3))
+        openSentenceReview()
         app.typeKey(.return, modifierFlags: [])
         assertFocused(app.textFields["sentences.answer"])
         app.typeText("Haus")
         app.typeKey(.return, modifierFlags: [])
         XCTAssertTrue(element("sentences.revealed").waitForExistence(timeout: 3))
 
-        element("sidebar.sentences").click()
+        element("sidebar.review").click()
         app.typeKey(.return, modifierFlags: [])
         assertFocused(app.buttons["sentence.token.0"])
 
-        for route in ["review", "settings"] {
-            element("sidebar.\(route)").click()
-            assertFocused(sidebar)
-            app.typeKey(.return, modifierFlags: [])
-            assertFocused(sidebar)
-        }
+        element("sidebar.settings").click()
+        assertFocused(sidebar)
+        app.typeKey(.return, modifierFlags: [])
+        assertFocused(sidebar)
     }
 
     func testCommandNOnlyCreatesAListInMyWords() {
@@ -245,7 +242,7 @@ final class Lang4SelfUITests: XCTestCase {
             self.elementText(self.element("speech.last-spoken")) == "Last pronounced German: Haus"
         })
 
-        openRoute("4", route: "sentences")
+        openSentenceReview()
         let displayedSentence = "Das Haus ist groß."
         let answer = element("sentences.answer")
         XCTAssertTrue(answer.waitForExistence(timeout: 8))
@@ -277,7 +274,7 @@ final class Lang4SelfUITests: XCTestCase {
     }
 
     func testSentenceBlankFailureRevealsAndPersistsTheRetry() {
-        openRoute("4", route: "sentences")
+        openSentenceReview()
 
         XCTAssertTrue(element("sentences.masked-sentence").waitForExistence(timeout: 3))
         XCTAssertFalse(app.staticTexts["Das Haus ist groß."].exists)
@@ -376,7 +373,7 @@ final class Lang4SelfUITests: XCTestCase {
         app.typeKey("z", modifierFlags: .command)
         XCTAssertTrue(app.staticTexts["Mädchen"].waitForExistence(timeout: 3))
 
-        openRoute("4", route: "sentences")
+        openSentenceReview()
         XCTAssertTrue(element("sentences.retry-count").waitForExistence(timeout: 3))
     }
 
@@ -551,42 +548,24 @@ final class Lang4SelfUITests: XCTestCase {
         )
     }
 
-    func testConsecutiveSpaceVoiceSearchesStayKeyboardOperable() {
-        let leakedSpace = expectation(description: "No Space event reaches the focused results control")
-        leakedSpace.isInverted = true
-        leakedSpace.assertForOverFulfill = false
-        let observer = DistributedNotificationCenter.default().addObserver(
-            forName: Notification.Name("Lang4SelfUITestingSpaceEventLeaked"),
-            object: nil,
-            queue: .main
-        ) { _ in
-            leakedSpace.fulfill()
-        }
-        defer { DistributedNotificationCenter.default().removeObserver(observer) }
+    func testSeparableReflexiveEntryKeepsSichAndCorrectWordOrder() {
+        app.typeKey("f", modifierFlags: .command)
+        app.typeText("sich anziehen")
 
-        let recordButton = app.buttons["dictionary.voice-search"]
-        assertFocused(recordButton)
-
-        app.typeKey(.space, modifierFlags: [])
-        let results = element("dictionary.results")
-        XCTAssertTrue(results.waitForExistence(timeout: 3))
-        assertFocused(results)
-
-        simulateHeldSpaceWithRepeats()
-        XCTAssertTrue(results.waitForExistence(timeout: 3))
-        assertFocused(results)
-        XCTAssertEqual(app.textFields["dictionary.search"].value as? String, "Der Hund")
-        wait(for: [leakedSpace], timeout: 0.5)
+        let detail = element("entry.detail")
+        XCTAssertTrue(detail.waitForExistence(timeout: 3))
+        XCTAssertEqual(elementText(element("entry.word")), "sich anziehen")
+        XCTAssertEqual(
+            elementText(element("entry.info.present"))
+                .replacingOccurrences(of: "\u{00AD}", with: ""),
+            "ich ziehe mich an · du ziehst dich an · er/sie/es zieht sich an · wir ziehen uns an · ihr zieht euch an · sie/Sie ziehen sich an"
+        )
+        XCTAssertFalse(detail.staticTexts["ich ziehe an mich"].exists)
     }
 
-    func testDictionaryViewHandlesConsecutiveSpaceHoldsWithoutGlobalMonitor() {
-        DistributedNotificationCenter.default().postNotificationName(
-            Notification.Name("Lang4SelfUITestingDisableSpaceMonitor"),
-            object: nil,
-            userInfo: nil,
-            deliverImmediately: true
-        )
-        waitForUIToSettle(0.2)
+    func testDictionaryViewHandlesConsecutiveSpaceHolds() {
+        let recordButton = app.buttons["dictionary.voice-search"]
+        assertFocused(recordButton)
 
         app.typeKey(.space, modifierFlags: [])
         let results = element("dictionary.results")
@@ -627,24 +606,22 @@ final class Lang4SelfUITests: XCTestCase {
         assertFocused(element("dictionary.results"))
     }
 
-    func testSpaceOpensDictionaryVoiceSearchFromAnotherPage() {
-        openRoute("5", route: "settings")
+    func testSpaceDoesNotOpenDictionaryVoiceSearchFromAnotherPage() {
+        openRoute("4", route: "settings")
 
         app.typeKey(.space, modifierFlags: [])
 
-        XCTAssertTrue(app.buttons["dictionary.voice-search"].waitForExistence(timeout: 3))
-        XCTAssertEqual(app.textFields["dictionary.search"].value as? String, "Der Hund")
-        XCTAssertTrue(app.buttons["dictionary.add-selected"].waitForExistence(timeout: 3))
-        let results = element("dictionary.results")
-        XCTAssertTrue(results.waitForExistence(timeout: 3))
-        assertFocused(results)
+        XCTAssertTrue(app.buttons["settings.import-dictionary"].exists)
+        XCTAssertFalse(app.buttons["dictionary.voice-search"].exists)
     }
 
     func testReviewRevealAndEveryRatingShortcut() {
         for rating in ["1", "2", "3", "4"] {
             relaunchFixture()
             openRoute("2", route: "review")
-            XCTAssertTrue(app.buttons["review.reveal"].waitForExistence(timeout: 3))
+            let revealButton = app.buttons["review.reveal"]
+            XCTAssertTrue(revealButton.waitForExistence(timeout: 3))
+            XCTAssertEqual(revealButton.label, "Press Space to show answer")
 
             app.typeKey(.space, modifierFlags: [])
             XCTAssertTrue(app.buttons["review.rating.\(rating)"].waitForExistence(timeout: 3))
@@ -660,6 +637,66 @@ final class Lang4SelfUITests: XCTestCase {
         XCTAssertTrue(partOfSpeech.waitForExistence(timeout: 3))
         XCTAssertTrue(app.staticTexts["Part of speech: Noun"].waitForExistence(timeout: 3))
         XCTAssertTrue(app.buttons["review.reveal"].exists)
+    }
+
+    func testReviewModeTitleStaysAtTopAndIsSmallerThanReviewedText() {
+        openRoute("2", route: "review")
+
+        let title = element("review.mode-title")
+        let reviewedText = element("review.translation.current")
+        let content = element("review.content")
+        XCTAssertTrue(title.waitForExistence(timeout: 3))
+        XCTAssertTrue(reviewedText.waitForExistence(timeout: 3))
+        XCTAssertTrue(content.waitForExistence(timeout: 3))
+
+        let initialTitleY = title.frame.midY
+        let initialContentY = content.frame.midY
+        XCTAssertLessThan(title.frame.maxY, content.frame.minY)
+        XCTAssertLessThan(title.frame.height, reviewedText.frame.height)
+
+        app.typeKey("]", modifierFlags: .command)
+        XCTAssertTrue(app.textFields["review.answer"].waitForExistence(timeout: 3))
+        XCTAssertEqual(title.frame.midY, initialTitleY, accuracy: 1)
+        XCTAssertEqual(content.frame.midY, initialContentY, accuracy: 1)
+    }
+
+    func testGenderChoicesUseOneTwoThreeShortcuts() {
+        for (key, expectedAnswer) in [("1", "der"), ("2", "die"), ("3", "das")] {
+            relaunchFixture()
+            openRoute("2", route: "review")
+            for _ in 0..<3 {
+                app.typeKey("]", modifierFlags: .command)
+            }
+            XCTAssertTrue(app.buttons["review.gender.neuter"].waitForExistence(timeout: 3))
+
+            app.typeKey(key, modifierFlags: [])
+
+            let result = element("review.answer-result")
+            XCTAssertTrue(result.waitForExistence(timeout: 3))
+            if expectedAnswer == "das" {
+                XCTAssertEqual(elementText(result), "Correct")
+            } else {
+                XCTAssertEqual(elementText(element("review.submitted-answer")), "Your answer: \(expectedAnswer)")
+            }
+        }
+    }
+
+    func testSpaceControlsSpeakingAndShowsIncorrectRecognition() {
+        openRoute("2", route: "review")
+        for _ in 0..<2 {
+            app.typeKey("]", modifierFlags: .command)
+        }
+        let speechButton = app.buttons["review.speech"]
+        XCTAssertTrue(speechButton.waitForExistence(timeout: 3))
+        XCTAssertEqual(speechButton.label, "Press Space to start speaking")
+
+        app.typeKey(.space, modifierFlags: [])
+
+        XCTAssertTrue(waitUntil { speechButton.label == "Press Space to stop and check" })
+        app.typeKey(.space, modifierFlags: [])
+        let recognized = element("review.submitted-answer")
+        XCTAssertTrue(recognized.waitForExistence(timeout: 3))
+        XCTAssertEqual(elementText(recognized), "Recognized: Der Hund")
     }
 
     func testReviewModesAcceptAnswersAndCycleWithCommandBrackets() {
@@ -710,10 +747,77 @@ final class Lang4SelfUITests: XCTestCase {
         assertCorrectReviewAnswer()
 
         app.typeKey("]", modifierFlags: .command)
-        XCTAssertTrue(app.buttons["review.reveal"].waitForExistence(timeout: 3))
+        XCTAssertTrue(element("sentences.test-card").waitForExistence(timeout: 3))
         app.typeKey("[", modifierFlags: .command)
         XCTAssertTrue(app.textFields["review.answer"].waitForExistence(timeout: 3))
-        XCTAssertEqual(elementText(element("review.mode-title")), "PLURAL")
+        XCTAssertEqual(elementText(element("review.mode-title")), "Plural")
+    }
+
+    func testListeningWordsHideTheWordAndPlayEachPromptAutomatically() {
+        openRoute("2", route: "review")
+        element("review.mode").click()
+        app.menuItems["Listening words"].click()
+
+        XCTAssertTrue(element("review.listening-prompt").waitForExistence(timeout: 3))
+        XCTAssertFalse(element("review.prompt").exists)
+        XCTAssertTrue(waitUntil {
+            self.elementText(self.element("speech.last-spoken")) == "Last pronounced German: Haus"
+        })
+        XCTAssertEqual(
+            elementText(element("speech.target")),
+            "Pronunciation target: Haus"
+        )
+
+        let answer = app.textFields["review.answer"]
+        answer.typeText("Haus")
+        app.typeKey(.return, modifierFlags: [])
+        assertCorrectReviewAnswer()
+        app.typeKey("3", modifierFlags: [])
+
+        XCTAssertTrue(element("review.listening-prompt").waitForExistence(timeout: 3))
+        XCTAssertTrue(waitUntil {
+            self.elementText(self.element("speech.last-spoken")) == "Last pronounced German: lernen"
+        })
+        simulateDoubleShift()
+        XCTAssertTrue(waitUntil {
+            self.elementText(self.element("speech.last-spoken")) == "Last pronounced German: lernen"
+        })
+    }
+
+    func testListeningSentencesGenerateHiddenPromptsAndPlayEachOneAutomatically() {
+        openRoute("2", route: "review")
+        element("review.mode").click()
+        app.menuItems["Listening sentences"].click()
+
+        XCTAssertTrue(element("sentences.listening-prompt").waitForExistence(timeout: 3))
+        element("review.sentence-abort").click()
+        XCTAssertTrue(element("sentences.listening-description").waitForExistence(timeout: 3))
+        element("sentences.generate").click()
+        XCTAssertTrue(element("sentences.listening-prompt").waitForExistence(timeout: 5))
+        XCTAssertFalse(element("sentences.translation").exists)
+        XCTAssertFalse(element("sentences.masked-sentence").exists)
+        XCTAssertTrue(waitUntil(timeout: 5) {
+            self.elementText(self.element("speech.last-spoken"))
+                == "Last pronounced German: Das Kind liest ein Buch."
+        })
+
+        let answer = app.textFields["sentences.answer"]
+        answer.typeText("Das Kind liest ein Buch.")
+        app.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(element("sentences.revealed").waitForExistence(timeout: 3))
+        let next = element("sentences.next")
+        XCTAssertTrue(waitUntil { next.isEnabled })
+        next.click()
+
+        XCTAssertTrue(app.textFields["sentences.answer"].waitForExistence(timeout: 3))
+        XCTAssertTrue(waitUntil(timeout: 5) {
+            self.elementText(self.element("speech.last-spoken"))
+                == "Last pronounced German: Das Haus hat ein rotes Dach."
+        })
+        XCTAssertEqual(
+            elementText(element("speech.target")),
+            "Pronunciation target: Das Haus hat ein rotes Dach."
+        )
     }
 
     func testReviewCyclesTranslationsAndLanguagesWithArrowKeys() {
@@ -803,7 +907,9 @@ final class Lang4SelfUITests: XCTestCase {
 
         app.typeKey(.space, modifierFlags: [])
         app.typeKey("4", modifierFlags: [])
-        XCTAssertTrue(app.buttons["review.restart"].waitForExistence(timeout: 3))
+        let restartButton = app.buttons["review.restart"]
+        XCTAssertTrue(restartButton.waitForExistence(timeout: 3))
+        XCTAssertEqual(restartButton.label, "Press Space to review all again")
 
         app.typeKey(.space, modifierFlags: [])
         XCTAssertTrue(app.buttons["review.reveal"].waitForExistence(timeout: 3))
@@ -975,7 +1081,7 @@ final class Lang4SelfUITests: XCTestCase {
     }
 
     func testSentenceAnswerRevealAndTokenFocus() {
-        openRoute("4", route: "sentences")
+        openSentenceReview()
         let answer = app.textFields["sentences.answer"]
         XCTAssertTrue(answer.waitForExistence(timeout: 3))
         assertFocused(answer)
@@ -991,7 +1097,9 @@ final class Lang4SelfUITests: XCTestCase {
     }
 
     func testSentenceGenerationListCountAndGenerateControls() {
-        openRoute("4", route: "sentences")
+        openSentenceReview()
+        element("review.sentence-abort").click()
+        XCTAssertTrue(element("sentences.generate").waitForExistence(timeout: 3))
 
         element("sentences.list-picker").click()
         app.menuItems["Travel"].click()
@@ -1027,10 +1135,15 @@ final class Lang4SelfUITests: XCTestCase {
         element("sentences.generate").click()
         XCTAssertTrue(app.staticTexts["· 6 ready after this"].waitForExistence(timeout: 3))
         assertFocused(app.textFields["sentences.answer"])
+        XCTAssertFalse(element("sentences.style").exists)
+        XCTAssertTrue(element("review.sentence-abort").exists)
+
+        element("review.sentence-abort").click()
+        XCTAssertTrue(element("sentences.generate").waitForExistence(timeout: 3))
     }
 
     func testDetachedSeparablePrefixShowsTheWholeVerbTranslation() {
-        openRoute("4", route: "sentences")
+        openSentenceReview()
 
         app.textFields["sentences.answer"].typeText("Haus")
         app.buttons["sentences.check"].click()
@@ -1127,8 +1240,28 @@ final class Lang4SelfUITests: XCTestCase {
         app.buttons["settings.refresh-models"].click()
     }
 
+    func testSettingsDownloadsNeuralSpeechModel() {
+        openRoute("4", route: "settings")
+        let settingsScroll = app.scrollViews["settings.scroll"]
+        let downloadButton = app.buttons["settings.download-speech-model"]
+        XCTAssertTrue(settingsScroll.exists)
+        scrollToHittable(downloadButton, in: settingsScroll)
+        XCTAssertEqual(
+            elementText(element("settings.speech-model-status")),
+            "Not downloaded"
+        )
+
+        downloadButton.click()
+
+        XCTAssertTrue(downloadButton.waitForNonExistence(timeout: 3))
+        XCTAssertEqual(
+            elementText(element("settings.speech-model-status")),
+            "Installed and ready"
+        )
+    }
+
     func testAccessibilityAuditOnEveryScreen() throws {
-        for (key, route) in [("1", "dictionary"), ("2", "review"), ("3", "library"), ("4", "sentences"), ("5", "settings")] {
+        for (key, route) in [("1", "dictionary"), ("2", "review"), ("3", "library"), ("4", "settings")] {
             openRoute(key, route: route)
             // Other macOS audit types currently flag system menus and standard SwiftUI layout controls.
             try app.performAccessibilityAudit(for: .elementDetection)
@@ -1141,10 +1274,23 @@ final class Lang4SelfUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Haus"].waitForExistence(timeout: 3))
         attachWindowScreenshot(named: "dictionary")
 
-        openLibrary()
+        element("sidebar.library").click()
+        XCTAssertTrue(element("library.cards").waitForExistence(timeout: 5))
+        app.otherElements["Haus"].click()
+        XCTAssertTrue(app.buttons["library.edit-card"].waitForExistence(timeout: 3))
         attachWindowScreenshot(named: "my-words")
 
-        openRoute("4", route: "sentences")
+        element("sidebar.review").click()
+        let modePicker = element("review.mode")
+        XCTAssertTrue(modePicker.waitForExistence(timeout: 3))
+        if !element("sentences.test-card").exists && !element("sentences.generate").exists {
+            modePicker.click()
+            app.menuItems["Sentences"].click()
+        }
+        XCTAssertTrue(
+            element("sentences.test-card").waitForExistence(timeout: 3)
+                || element("sentences.generate").waitForExistence(timeout: 3)
+        )
         attachWindowScreenshot(named: "sentences")
     }
 
@@ -1152,6 +1298,23 @@ final class Lang4SelfUITests: XCTestCase {
         openRoute("3", route: "library")
         XCTAssertTrue(element("library.cards").waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["Haus"].waitForExistence(timeout: 3))
+    }
+
+    private func openSentenceReview() {
+        app.typeKey("2", modifierFlags: .command)
+        let modePicker = element("review.mode")
+        XCTAssertTrue(modePicker.waitForExistence(timeout: 3))
+        assertFocused(element("sidebar.routes"))
+        app.typeKey(.return, modifierFlags: [])
+
+        if !element("sentences.test-card").exists && !element("sentences.generate").exists {
+            modePicker.click()
+            app.menuItems["Sentences"].click()
+        }
+        XCTAssertTrue(
+            element("sentences.test-card").waitForExistence(timeout: 3)
+                || element("sentences.generate").waitForExistence(timeout: 3)
+        )
     }
 
     private func assertCorrectReviewAnswer() {
@@ -1172,7 +1335,6 @@ final class Lang4SelfUITests: XCTestCase {
         case "dictionary": return app.textFields["dictionary.search"]
         case "review": return app.buttons["review.reveal"]
         case "library": return element("library.cards")
-        case "sentences": return element("sentences.test-card")
         case "settings": return app.buttons["settings.import-dictionary"]
         default: XCTFail("Unknown route \(route)"); return app.windows.firstMatch
         }
@@ -1228,10 +1390,40 @@ final class Lang4SelfUITests: XCTestCase {
 
     private func attachWindowScreenshot(named name: String) {
         waitForUIToSettle()
-        let attachment = XCTAttachment(screenshot: app.windows.firstMatch.screenshot())
+        let screenshot = app.windows.firstMatch.screenshot()
+        let attachment = XCTAttachment(image: roundedWindowImage(screenshot.image))
         attachment.name = name
         attachment.lifetime = .keepAlways
         add(attachment)
+    }
+
+    private func roundedWindowImage(_ image: NSImage) -> NSImage {
+        guard let source = image.cgImage(forProposedRect: nil, context: nil, hints: nil),
+              let context = CGContext(
+                data: nil,
+                width: source.width,
+                height: source.height,
+                bitsPerComponent: 8,
+                bytesPerRow: 0,
+                space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+              )
+        else { return image }
+
+        let bounds = CGRect(x: 0, y: 0, width: source.width, height: source.height)
+        let backingScale = CGFloat(source.width) / image.size.width
+        let cornerRadius = 26 * backingScale
+        context.addPath(CGPath(
+            roundedRect: bounds,
+            cornerWidth: cornerRadius,
+            cornerHeight: cornerRadius,
+            transform: nil
+        ))
+        context.clip()
+        context.draw(source, in: bounds)
+
+        guard let rounded = context.makeImage() else { return image }
+        return NSImage(cgImage: rounded, size: image.size)
     }
 
     private func scrollToHittable(_ element: XCUIElement, in scrollView: XCUIElement) {
@@ -1279,6 +1471,7 @@ final class Lang4SelfUITests: XCTestCase {
             Mädchen {n}\tgirl
             Blatt {n}\tleaf
             ab|fallen\tto fall off\tverb\t
+            sich an|ziehen {vr}\tto get dressed\tverb\t
             ich\tI; me\tpron
             """.write(to: englishDictionaryURL, atomically: true, encoding: .utf8)
         try """

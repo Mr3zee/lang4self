@@ -180,8 +180,17 @@ public actor LocalStore {
         var lookupTerms = GermanMorphology.lookupTerms(for: query)
         guard !lookupTerms.isEmpty, limit > 0 else { return [] }
         let inflectionLinks = try dictionaryInflectionSearchLinks(for: query)
-        for link in inflectionLinks where !lookupTerms.contains(link.searchTerm) {
-            lookupTerms.append(link.searchTerm)
+        let reflexiveQuery = lookupTerms[0]
+            .split(whereSeparator: { $0.isWhitespace })
+            .contains { GermanMorphology.isReflexivePronoun(String($0)) }
+        for link in inflectionLinks {
+            if !lookupTerms.contains(link.searchTerm) {
+                lookupTerms.append(link.searchTerm)
+            }
+            let reflexiveTerm = "sich " + link.searchTerm
+            if reflexiveQuery, !lookupTerms.contains(reflexiveTerm) {
+                lookupTerms.append(reflexiveTerm)
+            }
         }
         var hitsByGroup: [DictionaryGroupKey: DictionarySearchHit] = [:]
         var ordinal = 0
@@ -250,7 +259,7 @@ public actor LocalStore {
             DictCCParser.cleanedTerm(query).replacingOccurrences(of: "|", with: "")
         )
         guard !queryForm.isEmpty else { return [] }
-        var forms = [queryForm]
+        var forms = dictionaryInflectionQueryForms(queryForm)
         let words = queryForm.split(whereSeparator: { $0.isWhitespace }).map(String.init)
         if words.count == 2, words[0] == "am" {
             forms.append(words[1])
@@ -336,9 +345,15 @@ public actor LocalStore {
            storedKind != .other || hasDirectKindEvidence {
             return -2
         }
-        if inflectionLinks.contains(where: {
-            $0.lemmaKey == groupingTerm && $0.kind == entry.kind
-        }) {
+        let reflexiveQuery = literalTerm
+            .split(whereSeparator: { $0.isWhitespace })
+            .contains { GermanMorphology.isReflexivePronoun(String($0)) }
+        if reflexiveQuery,
+           groupingTerm.hasPrefix("sich "),
+           inflectionLinks.contains(where: { $0.matches(groupingTerm, kind: entry.kind) }) {
+            return -2
+        }
+        if inflectionLinks.contains(where: { $0.matches(groupingTerm, kind: entry.kind) }) {
             return -1
         }
         guard let exactIndex = lookupTerms.firstIndex(of: german) else { return 10 }
@@ -366,7 +381,7 @@ public actor LocalStore {
         if storedKind == .other,
            groupingTerm == literalGroupingTerm,
            inflectionLinks.contains(where: {
-               $0.lemmaKey != literalGroupingTerm && $0.kind == entry.kind
+               !$0.matches(literalGroupingTerm, kind: entry.kind) && $0.kind == entry.kind
            }) {
             return false
         }
@@ -2453,6 +2468,13 @@ private struct DictionaryInflectionSearchLink: Equatable {
     var isDegree: Bool {
         tags.contains("comparative") || tags.contains("superlative")
     }
+
+    func matches(_ groupingTerm: String, kind entryKind: WordKind) -> Bool {
+        guard kind == entryKind else { return false }
+        return lemmaKey == dictionaryGroupingTerm(
+            GermanMorphology.inflectionLemma(for: groupingTerm)
+        )
+    }
 }
 
 private struct DictionaryFormat {
@@ -2508,6 +2530,32 @@ private let dictionaryValencyPrefixes = [
 
 private func dictionaryGroupingSpellings(for groupingTerm: String) -> [String] {
     [groupingTerm] + dictionaryValencyPrefixes.map { $0 + groupingTerm }
+}
+
+private func dictionaryInflectionQueryForms(_ query: String) -> [String] {
+    var result = [query]
+    var words = query.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+    let containsReflexivePronoun = words.contains {
+        GermanMorphology.isReflexivePronoun($0)
+    }
+    guard containsReflexivePronoun else { return result }
+
+    let subjectPronouns: Set<String> = ["ich", "du", "er", "sie", "es", "wir", "ihr"]
+    if words.count > 1, subjectPronouns.contains(words[0]) {
+        words.removeFirst()
+    }
+    words.removeAll { GermanMorphology.isReflexivePronoun($0) }
+    let lexicalForm = words.joined(separator: " ")
+    if !lexicalForm.isEmpty, !result.contains(lexicalForm) {
+        result.append(lexicalForm)
+    }
+    if words.count == 2 {
+        let joinedSeparableForm = words[1] + words[0]
+        if !result.contains(joinedSeparableForm) {
+            result.append(joinedSeparableForm)
+        }
+    }
+    return result
 }
 
 private func dictionaryCanonicalEntrySortsBefore(

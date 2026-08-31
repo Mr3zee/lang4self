@@ -330,7 +330,6 @@ extension SpeechRecognizer: VoiceSearchShortcutRecording {}
 @MainActor
 protocol VoiceSearchShortcutContext: AnyObject {
     var hasActiveDialog: Bool { get }
-    var hasEditableTextInputFocus: Bool { get }
 }
 
 @MainActor
@@ -347,10 +346,6 @@ final class AppKitVoiceSearchShortcutContext: VoiceSearchShortcutContext {
             || application.mainWindow?.attachedSheet != nil
     }
 
-    var hasEditableTextInputFocus: Bool {
-        guard let editor = application.keyWindow?.firstResponder as? NSTextView else { return false }
-        return editor.isEditable
-    }
 }
 
 @MainActor
@@ -360,43 +355,17 @@ final class VoiceSearchShortcutController: ObservableObject {
     private let router: any VoiceSearchShortcutRouting
     private let speech: any VoiceSearchShortcutRecording
     private let context: any VoiceSearchShortcutContext
-    private let holdDelay: TimeInterval
-    private let onForwardedSpaceEvent: () -> Void
-    private var eventMonitor: Any?
     private var isSpaceDown = false
-    private var pendingHold: UUID?
     private var isDictionaryTextSearchFocused = false
 
     init(
         router: any VoiceSearchShortcutRouting,
         speech: any VoiceSearchShortcutRecording,
-        context: any VoiceSearchShortcutContext,
-        holdDelay: TimeInterval,
-        onForwardedSpaceEvent: @escaping () -> Void
+        context: any VoiceSearchShortcutContext
     ) {
         self.router = router
         self.speech = speech
         self.context = context
-        self.holdDelay = holdDelay
-        self.onForwardedSpaceEvent = onForwardedSpaceEvent
-    }
-
-    func startMonitoring() {
-        guard eventMonitor == nil else { return }
-        eventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) { [weak self] event in
-            guard let self else { return event }
-            let forwardedEvent = self.handle(event)
-            if event.keyCode == 49, forwardedEvent != nil {
-                self.onForwardedSpaceEvent()
-            }
-            return forwardedEvent
-        }
-    }
-
-    func stopMonitoring() {
-        if let eventMonitor { NSEvent.removeMonitor(eventMonitor) }
-        eventMonitor = nil
-        cancelSpaceHold()
     }
 
     func releaseSpaceHold() {
@@ -422,101 +391,24 @@ final class VoiceSearchShortcutController: ObservableObject {
 
     private func endSpaceHold() {
         isSpaceDown = false
-        pendingHold = nil
         guard isSpaceHeld else { return }
         isSpaceHeld = false
         speech.stop()
     }
 
-    func handle(_ event: NSEvent) -> NSEvent? {
-        if let alternativeOffset = voiceAlternativeOffset(for: event) {
-            DispatchQueue.main.async { [speech] in
-                speech.selectAlternative(by: alternativeOffset)
-            }
-            return nil
-        }
-
-        guard event.keyCode == 49 else { return event }
-
-        // Finish or consume a gesture that already began even if a sheet appeared
-        // or modifiers changed while Space was down. Otherwise repeats escape to
-        // the new responder and macOS emits its invalid-action beep.
-        if isSpaceDown {
-            if event.type == .keyDown { return nil }
-            pendingHold = nil
-            if isSpaceHeld {
-                releaseSpaceHold()
-                return nil
-            }
-            isSpaceDown = false
-            return event
-        }
-
-        guard event.type == .keyDown,
-              event.modifierFlags.intersection([.command, .control, .option]).isEmpty,
-              !context.hasActiveDialog
-        else { return event }
-
-        // An editable text field always owns Space, including a long press and
-        // its repeat events. Voice search remains available from the button.
-        guard !textInputOwnsSpace else { return event }
-        guard !event.isARepeat else { return nil }
-        isSpaceDown = true
-
-        if router.route != .review {
-            beginSpaceHold()
-            return nil
-        }
-
-        scheduleSpaceHold()
-        return event
-    }
-
-    private func voiceAlternativeOffset(for event: NSEvent) -> Int? {
-        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        guard event.type == .keyDown,
-              !event.isARepeat,
-              modifiers.contains(.command),
-              modifiers.intersection([.control, .shift]).isEmpty,
-              router.route == .dictionary,
+    func cycleVoiceAlternative(by offset: Int) -> Bool {
+        guard router.route == .dictionary,
               speech.phase == .guess,
               speech.hasMultipleAlternatives,
               !context.hasActiveDialog
-        else {
-            return nil
-        }
-        let characters = [event.characters, event.charactersIgnoringModifiers].compactMap { $0 }
-        if characters.contains("[") { return -1 }
-        if characters.contains("]") { return 1 }
-        if event.keyCode == 33 { return -1 }
-        if event.keyCode == 30 { return 1 }
-        return nil
-    }
-
-    private var textInputOwnsSpace: Bool {
-        if router.route == .dictionary {
-            return isDictionaryTextSearchFocused
-        }
-        return context.hasEditableTextInputFocus
-    }
-
-    private func scheduleSpaceHold() {
-        let pending = UUID()
-        pendingHold = pending
-        DispatchQueue.main.asyncAfter(deadline: .now() + holdDelay) { [weak self] in
-            guard let self,
-                  self.pendingHold == pending,
-                  self.isSpaceDown
-            else { return }
-            self.beginSpaceHold()
-        }
+        else { return false }
+        speech.selectAlternative(by: offset)
+        return true
     }
 
     private func beginSpaceHold() {
-        pendingHold = nil
         guard isSpaceDown, !isSpaceHeld else { return }
         isSpaceHeld = true
-        router.route = .dictionary
 
         if !speech.hasRecordingPermission {
             // Space only opens Dictionary's permission information. The

@@ -105,6 +105,22 @@ final class AppShortcutKeyHandlerTests: XCTestCase {
         XCTAssertIdentical(handler.handle(event), event)
     }
 
+    func testCommandBracketsCycleDictionaryVoiceAlternatives() {
+        var offsets: [Int] = []
+        let handler = AppShortcutKeyHandler(
+            openSettings: {},
+            showKeyboardShortcuts: {},
+            cycleDictionaryVoiceAlternative: {
+                offsets.append($0)
+                return true
+            }
+        )
+
+        XCTAssertNil(handler.handle(keyEvent(characters: "[", modifiers: .command)))
+        XCTAssertNil(handler.handle(keyEvent(characters: "]", modifiers: .command)))
+        XCTAssertEqual(offsets, [-1, 1])
+    }
+
     private func keyEvent(characters: String, modifiers: NSEvent.ModifierFlags) -> NSEvent {
         NSEvent.keyEvent(
             with: .keyDown,
