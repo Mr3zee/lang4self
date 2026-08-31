@@ -67,11 +67,11 @@ final class SpeechRecognizer: NSObject, ObservableObject {
         guard hasRecordingPermission else { return }
         guard phase != .requestingPermission, phase != .listening else { return }
         if isUITesting {
-            setAlternatives(Array([
-                .init(transcription: "Der Hund", confidence: 0.96),
+            setAlternatives([
                 .init(transcription: "Die Hunde", confidence: 0.78),
+                .init(transcription: "Der Hund", confidence: 0.96),
                 .init(transcription: "Ein Hund", confidence: 0.61)
-            ].prefix(uiTestingAlternativeCount)))
+            ], limit: uiTestingAlternativeCount)
             phase = .listening
             return
         }
@@ -252,9 +252,19 @@ final class SpeechRecognizer: NSObject, ObservableObject {
         task = nil
     }
 
-    private func setAlternatives(_ newAlternatives: [Alternative]) {
+    private func setAlternatives(_ newAlternatives: [Alternative], limit: Int = 5) {
         let previousTranscription = transcription
-        alternatives = Array(newAlternatives.prefix(5))
+        alternatives = Array(
+            newAlternatives.enumerated()
+                .sorted { left, right in
+                    if left.element.confidence == right.element.confidence {
+                        return left.offset < right.offset
+                    }
+                    return left.element.confidence > right.element.confidence
+                }
+                .prefix(limit)
+                .map(\.element)
+        )
         selectedAlternativeIndex = alternatives.firstIndex {
             $0.transcription.compare(previousTranscription, options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame
         } ?? 0

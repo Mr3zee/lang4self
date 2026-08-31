@@ -226,11 +226,21 @@ struct DictionaryView: View {
         } else if state.isSearchingDictionary {
             VStack(spacing: 12) {
                 ProgressView()
-                Text("Searching…")
+                Text(searchActivityTitle)
                     .foregroundStyle(.secondary)
+                if state.dictionaryTranslationPhase == .downloadingLanguages {
+                    Text("Search will continue automatically when Apple’s language files are ready.")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                        .multilineTextAlignment(.center)
+                }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .accessibilityIdentifier("dictionary.searching")
+            .accessibilityIdentifier(
+                state.dictionaryTranslationPhase == .downloadingLanguages
+                    ? "dictionary.translation-download"
+                    : "dictionary.searching"
+            )
         } else if let entry = state.selectedEntry, !state.searchResults.isEmpty {
             HSplitView {
                 List(state.searchResults, selection: $state.selectedEntry) { result in
@@ -254,8 +264,7 @@ struct DictionaryView: View {
                 }
                 .onKeyPress(.rightArrow) {
                     guard isVoiceResult,
-                          let addedListID = state.addedListID(for: entry),
-                          state.wordLists.contains(where: { $0.id != addedListID })
+                          state.addedListID(for: entry) != nil
                     else {
                         return .ignored
                     }
@@ -272,6 +281,15 @@ struct DictionaryView: View {
                 detail: "Try another spelling or import the complete dict.cc file in Settings."
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    private var searchActivityTitle: String {
+        switch state.dictionaryTranslationPhase {
+        case .idle: "Searching…"
+        case .checkingAvailability: "Checking Apple Translation…"
+        case .downloadingLanguages: "Downloading German–English translation…"
+        case .translating: "Translating on this Mac…"
         }
     }
 
@@ -330,6 +348,7 @@ struct DictionaryView: View {
                 addedListID: state.addedListID(for: entry),
                 isShowingListSelection: $isShowingAddedListSelection,
                 switchAddedListAction: { await state.switchListForAddedEntry(entry, to: $0) },
+                createAndSwitchAddedListAction: { await state.createListForAddedEntry(entry, named: $0) },
                 didFinishListSelection: focusResults,
                 addAction: { state.addToPersonalDictionary(entry) }
             )
@@ -340,6 +359,7 @@ struct DictionaryView: View {
                 wordLists: state.wordLists,
                 addedListID: state.addedListID(for: entry),
                 switchAddedListAction: { await state.switchListForAddedEntry(entry, to: $0) },
+                createAndSwitchAddedListAction: { await state.createListForAddedEntry(entry, named: $0) },
                 addAction: { state.addToPersonalDictionary(entry) }
             )
         }

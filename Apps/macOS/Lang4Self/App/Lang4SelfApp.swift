@@ -25,6 +25,7 @@ struct Lang4SelfApp: App {
                     .environmentObject(state)
                     .environmentObject(dependencies.speech)
                     .environmentObject(voiceSearchShortcut)
+                    .hostsDictionaryTranslation(using: dependencies.dictionaryTranslator)
             } else {
                 StartupFailureView(message: dependencies.startupFailure ?? "The application could not start.")
             }
@@ -47,6 +48,7 @@ private final class Lang4SelfDependencies: ObservableObject {
     let isUITesting: Bool
     let state: AppState?
     let speech: SpeechRecognizer
+    let dictionaryTranslator: any DictionaryTranslating
     let voiceSearchShortcut: VoiceSearchShortcutController?
     let startupFailure: String?
 
@@ -60,6 +62,15 @@ private final class Lang4SelfDependencies: ObservableObject {
                 ? 0
                 : processInfo.arguments.contains("--ui-testing-single-voice-alternative") ? 1 : 3
         )
+        if isUITesting && processInfo.arguments.contains("--ui-testing-translation-fallback") {
+            dictionaryTranslator = UITestingDictionaryTranslator()
+        } else if isUITesting {
+            dictionaryTranslator = UnavailableDictionaryTranslator()
+        } else if #available(macOS 15.0, *) {
+            dictionaryTranslator = AppleLocalTranslator()
+        } else {
+            dictionaryTranslator = UnavailableDictionaryTranslator()
+        }
         do {
             let databaseURL = processInfo.environment["LANG4SELF_UI_TEST_DATABASE"]
                 .map(URL.init(fileURLWithPath:))
@@ -77,6 +88,10 @@ private final class Lang4SelfDependencies: ObservableObject {
             udpipeConfiguration.waitsForConnectivity = false
             let state = AppState(
                 store: store,
+                dictionarySearch: DictionarySearchService(
+                    index: store,
+                    translator: dictionaryTranslator
+                ),
                 sentenceGenerator: LMStudioService(),
                 sentenceAnalyzer: UDPipeSentenceAnalyzer(
                     session: URLSession(configuration: udpipeConfiguration)
@@ -338,7 +353,10 @@ private struct Lang4SelfCommands: Commands {
 
         CommandMenu("Navigate") {
             ForEach(Array(AppRoute.allCases.enumerated()), id: \.element.id) { index, route in
-                Button(route.title) { state.route = route }
+                Button(route.title) {
+                    NotificationCenter.default.post(name: .focusSidebar, object: nil)
+                    state.route = route
+                }
                     .keyboardShortcut(KeyEquivalent(Character(String(index + 1))), modifiers: .command)
             }
         }

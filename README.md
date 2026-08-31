@@ -112,7 +112,7 @@ lang4self import-explanations ~/Downloads/dictionary-de.db
 
 | Keys | Action |
 |---|---|
-| ⌘1 … ⌘5 | Open Dictionary, Review, My words, Sentences, or Settings |
+| ⌘1 … ⌘5 | Select and focus Dictionary, Review, My words, Sentences, or Settings in the sidebar |
 | ⌘F | Focus Dictionary or My words search |
 | ⌘? | Show all shortcuts |
 | ↑ / ↓ | Navigate results, saved cards, and sentences |

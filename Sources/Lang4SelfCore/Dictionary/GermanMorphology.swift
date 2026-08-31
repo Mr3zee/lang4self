@@ -46,12 +46,55 @@ public enum GermanMorphology {
         "jung": ("jünger", "am jüngsten")
     ]
 
-    private static let separablePrefixes = [
+    /// Closed-class verb particles, conventional directional compounds, and
+    /// lexicalized particles commonly written as the first part of a German
+    /// separable verb. German also productively makes separable verbs from
+    /// nouns and adjectives, so lookup must not use this finite catalog as a
+    /// gate; `lookupTerms(for:)` also tries the dictionary-backed joined form.
+    static let separablePrefixCatalog: Set<String> = [
+        "ab", "an", "anheim", "auf", "aus", "auseinander",
+        "bei", "beieinander", "beisammen", "beiseite",
+        "da", "dabei", "dafür", "dagegen", "daher", "dahin", "daneben", "dar", "daran", "darauf",
+        "daraus", "darein", "davon", "dazu", "dazwischen", "dran", "drauf", "drauflos",
+        "durch", "durcheinander",
+        "ein", "einher", "empor", "entgegen", "entlang", "entzwei",
+        "fehl", "fern", "fest", "fort", "frei",
+        "gegen", "gegenüber", "gleich",
+        "heim", "her", "herab", "heran", "herauf", "heraus", "herbei", "herein", "herüber",
+        "herum", "herunter", "hervor", "herzu",
+        "hin", "hinab", "hinan", "hinauf", "hinaus", "hindurch", "hinein", "hintan",
+        "hinter", "hinterher", "hinüber", "hinunter", "hinweg", "hinzu", "hoch",
+        "inne", "kennen", "los", "mit", "nach", "nebenher", "nieder", "preis", "quer",
+        "ran", "raus", "rein", "rüber", "rum", "runter", "statt", "teil",
+        "über", "überein", "um", "umher", "unter",
+        "vor", "voran", "voraus", "vorbei", "vorher", "vorüber", "vorweg",
+        "weg", "weiter", "wider", "wieder",
+        "zu", "zurecht", "zurück", "zusammen", "zuvor", "zwischen"
+    ]
+
+    // Inferring separability from an unmarked spelling is inherently narrower:
+    // particles such as "da", "durch", "um", and "über" are ambiguous and
+    // would otherwise misclassify ordinary verbs such as "danken". Explicit
+    // dict.cc `|` markers are handled before this fallback.
+    private static let inferredSeparablePrefixCatalog: Set<String> = [
         "auseinander", "zusammen", "zurück", "weiter", "wieder", "vorbei", "herunter", "hinunter",
         "herauf", "hinauf", "kennen", "statt", "teil", "preis", "fest", "frei", "heim", "hoch",
         "ab", "an", "auf", "aus", "bei", "dar", "ein", "empor", "entgegen", "fort", "her", "hin",
         "los", "mit", "nach", "nieder", "vor", "weg", "zu"
     ]
+
+    private static let separablePrefixes = inferredSeparablePrefixCatalog.sorted {
+        $0.count == $1.count ? $0 < $1 : $0.count > $1.count
+    }
+    private static let normalizedSeparablePrefixes = Set(
+        separablePrefixCatalog.map(DictCCParser.normalized)
+    )
+    private static let normalizedInferredSeparablePrefixesByLength: [String] = {
+        let prefixes = inferredSeparablePrefixCatalog.map { DictCCParser.normalized($0) }
+        return prefixes.sorted {
+            $0.count == $1.count ? $0 < $1 : $0.count > $1.count
+        }
+    }()
 
     public static func info(for entry: DictionaryEntry) -> WordInfo {
         let term = canonicalGerman(entry.german)
@@ -129,9 +172,17 @@ public enum GermanMorphology {
 
         var result = [normalized]
         let words = normalized.split(whereSeparator: { $0.isWhitespace }).map(String.init)
-        let lexicalWords = words.drop(while: { leadingDeterminers.contains($0) })
+        let lexicalWords = Array(words.drop(while: { leadingDeterminers.contains($0) }))
         let lexicalTerm = lexicalWords.joined(separator: " ")
         if !lexicalTerm.isEmpty { appendUnique(lexicalTerm, to: &result) }
+
+        // Speech recognition often inserts spaces inside a word ("zu machen"
+        // for "zumachen"). Trying the collapsed spelling is safe because the
+        // dictionary still decides whether that spelling exists. It also covers
+        // productive noun/adjective particles that no finite prefix list can.
+        if (2...4).contains(lexicalWords.count) {
+            appendUnique(lexicalWords.joined(), to: &result)
+        }
 
         if lexicalWords.count == 1, let word = lexicalWords.first {
             for candidate in baseFormCandidates(for: word) {
@@ -140,7 +191,7 @@ public enum GermanMorphology {
         } else if lexicalWords.count == 2,
                   let inflected = lexicalWords.first,
                   let prefix = lexicalWords.last,
-                  separablePrefixes.contains(prefix) {
+                  normalizedSeparablePrefixes.contains(prefix) {
             for infinitive in verbBaseCandidates(for: inflected) {
                 appendUnique(prefix + infinitive, to: &result)
             }
@@ -389,7 +440,7 @@ public enum GermanMorphology {
             appendUnique(infinitive(from: stem), to: &result)
         }
         if includeSeparableForms {
-            for prefix in separablePrefixes where word.hasPrefix(prefix) {
+            for prefix in normalizedInferredSeparablePrefixesByLength where word.hasPrefix(prefix) {
                 let separatedForm = String(word.dropFirst(prefix.count))
                 guard separatedForm.count > 3 else { continue }
                 for base in verbBaseCandidates(for: separatedForm, includeSeparableForms: false) {

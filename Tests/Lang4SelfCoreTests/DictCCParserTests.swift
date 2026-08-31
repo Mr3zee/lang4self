@@ -109,6 +109,12 @@ final class DictCCParserTests: XCTestCase {
         XCTAssertEqual(entry.english, "his")
     }
 
+    func testDoesNotTreatEnglishPrepositionalPhraseAsAnInfinitive() throws {
+        let entry = try XCTUnwrap(DictCCParser.parse(line: "treffend\tto the point"))
+
+        XCTAssertEqual(entry.kind, .other)
+    }
+
     func testNounInfoSeparatesPluralFormsFromUsageNotes() throws {
         let dog = try XCTUnwrap(DictCCParser.parse(line: "Hund {m} [Hunde]\tdog"))
         let mother = try XCTUnwrap(DictCCParser.parse(line: "Mutter {f} [Mütter]\tmother"))
@@ -127,10 +133,33 @@ final class DictCCParserTests: XCTestCase {
 
     func testLookupTermsIncludeArticlesInflectionsAndSeparatedPrefixes() {
         XCTAssertTrue(GermanMorphology.lookupTerms(for: "Der Hund").contains("hund"))
+        XCTAssertFalse(GermanMorphology.lookupTerms(for: "Der Hund").contains("derhund"))
         XCTAssertTrue(GermanMorphology.lookupTerms(for: "Hunde").contains("hund"))
         XCTAssertTrue(GermanMorphology.lookupTerms(for: "lernt").contains("lernen"))
         XCTAssertTrue(GermanMorphology.lookupTerms(for: "fällt").contains("fallen"))
         XCTAssertTrue(GermanMorphology.lookupTerms(for: "fällt ab").contains("abfallen"))
         XCTAssertTrue(GermanMorphology.lookupTerms(for: "abgefallen").contains("abfallen"))
+    }
+
+    func testLookupTermsJoinWordsSplitBySpeechRecognition() {
+        XCTAssertEqual(
+            GermanMorphology.lookupTerms(for: "zu machen"),
+            ["zu machen", "zumachen"]
+        )
+        XCTAssertTrue(GermanMorphology.lookupTerms(for: "herunter laden").contains("herunterladen"))
+        XCTAssertTrue(GermanMorphology.lookupTerms(for: "kennen zu lernen").contains("kennenzulernen"))
+        XCTAssertTrue(GermanMorphology.lookupTerms(for: "Rad fahren").contains("radfahren"))
+    }
+
+    func testSeparablePrefixCatalogCoversPrefixFamiliesAndVariants() {
+        let representativePrefixes: Set<String> = [
+            "ab", "anheim", "auseinander", "dazwischen", "durch", "entgegen", "entlang",
+            "gegenüber", "herunter", "hinüber", "inne", "nebenher", "statt", "über",
+            "um", "unter", "vorbei", "wider", "wieder", "zurecht", "zwischen"
+        ]
+
+        XCTAssertTrue(representativePrefixes.isSubset(of: GermanMorphology.separablePrefixCatalog))
+        XCTAssertEqual(GermanMorphology.separablePrefix(in: "herunterladen"), "herunter")
+        XCTAssertNil(GermanMorphology.separablePrefix(in: "danken"))
     }
 }

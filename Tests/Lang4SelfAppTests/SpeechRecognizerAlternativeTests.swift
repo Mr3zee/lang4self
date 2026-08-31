@@ -27,6 +27,8 @@ final class SpeechRecognizerAlternativeTests: XCTestCase {
         recognizer.start()
 
         XCTAssertEqual(recognizer.alternatives.count, 3)
+        XCTAssertEqual(recognizer.alternatives.map(\.transcription), ["Der Hund", "Die Hunde", "Ein Hund"])
+        XCTAssertEqual(recognizer.alternatives.map(\.confidence), [0.96, 0.78, 0.61])
         XCTAssertEqual(recognizer.transcription, "Der Hund")
         XCTAssertEqual(recognizer.alternativePosition, "1 of 3")
         XCTAssertEqual(recognizer.confidence, 0.96, accuracy: 0.001)

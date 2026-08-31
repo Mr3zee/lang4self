@@ -49,6 +49,7 @@ final class Lang4SelfUITests: XCTestCase {
         ] {
             app.typeKey(key, modifierFlags: .command)
             XCTAssertTrue(routeElement(route).waitForExistence(timeout: 3), "⌘\(key) did not open \(route)")
+            assertFocused(element("sidebar.routes"))
         }
 
         for route in ["dictionary", "review", "library", "sentences", "settings"] {
@@ -96,14 +97,15 @@ final class Lang4SelfUITests: XCTestCase {
 
     func testSidebarArrowNavigationWrapsWithoutLosingFocus() {
         app.typeKey("1", modifierFlags: .command)
-        element("sidebar.dictionary").click()
+        assertFocused(element("sidebar.routes"))
 
         app.typeKey(.upArrow, modifierFlags: [])
         XCTAssertTrue(routeElement("settings").waitForExistence(timeout: 3))
         app.typeKey(.upArrow, modifierFlags: [])
         XCTAssertTrue(routeElement("sentences").waitForExistence(timeout: 3))
 
-        element("sidebar.settings").click()
+        app.typeKey("5", modifierFlags: .command)
+        assertFocused(element("sidebar.routes"))
         app.typeKey(.downArrow, modifierFlags: [])
         XCTAssertTrue(routeElement("dictionary").waitForExistence(timeout: 3))
         app.typeKey(.downArrow, modifierFlags: [])
@@ -259,6 +261,39 @@ final class Lang4SelfUITests: XCTestCase {
         app.typeKey("f", modifierFlags: .command)
         app.buttons["dictionary.clear-search"].click()
         XCTAssertTrue(app.buttons["dictionary.clear-search"].waitForNonExistence(timeout: 3))
+    }
+
+    func testEmptyIndexFallsBackToLocalTranslationAndSavingCachesIt() {
+        let german = "Dieser Satz wird lokal übersetzt."
+        let english = "This sentence is translated locally."
+        app.terminate()
+        app.launchArguments.append("--ui-testing-translation-fallback")
+        app.launch()
+        XCTAssertTrue(app.textFields["dictionary.search"].waitForExistence(timeout: 8))
+
+        app.typeKey("f", modifierFlags: .command)
+        app.typeText(german)
+        XCTAssertTrue(element("dictionary.translation-download").waitForExistence(timeout: 3))
+        XCTAssertTrue(app.staticTexts["Downloading German–English translation…"].exists)
+        XCTAssertTrue(
+            app.staticTexts["Search will continue automatically when Apple’s language files are ready."].exists
+        )
+        XCTAssertTrue(element("entry.translation-result").waitForExistence(timeout: 3))
+        XCTAssertTrue(element("entry.detail").staticTexts[english].exists)
+        XCTAssertTrue(app.staticTexts["Source: Apple Translation"].exists)
+
+        app.buttons["dictionary.add-selected"].click()
+        XCTAssertTrue(app.buttons["banner.dismiss"].waitForExistence(timeout: 3))
+
+        app.terminate()
+        app.launchArguments.removeAll { $0 == "--ui-testing-translation-fallback" }
+        app.launch()
+        XCTAssertTrue(app.textFields["dictionary.search"].waitForExistence(timeout: 8))
+        app.typeKey("f", modifierFlags: .command)
+        app.typeText(german)
+
+        XCTAssertTrue(element("entry.translation-result").waitForExistence(timeout: 3))
+        XCTAssertTrue(element("entry.detail").staticTexts[english].exists)
     }
 
     func testUndoRedoShortcutsForAddedAndRemovedContent() {
@@ -613,6 +648,19 @@ final class Lang4SelfUITests: XCTestCase {
         XCTAssertEqual(text(of: nextTranslation), "chit")
         XCTAssertTrue(element("review.translation.language-next").waitForExistence(timeout: 3))
 
+        element("sidebar.review").click()
+        assertFocused(element("sidebar.routes"))
+        app.typeKey(.return, modifierFlags: [])
+
+        app.typeKey(.rightArrow, modifierFlags: [])
+        XCTAssertTrue(waitUntil { text(of: currentTranslation) == "chit" })
+
+        element("sidebar.review").click()
+        assertFocused(element("sidebar.routes"))
+        currentTranslation.click()
+
+        app.typeKey(.leftArrow, modifierFlags: [])
+        XCTAssertTrue(waitUntil { text(of: currentTranslation) == "chick" })
         app.typeKey(.rightArrow, modifierFlags: [])
         XCTAssertTrue(waitUntil {
             text(of: currentTranslation) == "chit"
@@ -718,6 +766,34 @@ final class Lang4SelfUITests: XCTestCase {
         app.menuItems["Delete List…"].click()
         app.sheets.firstMatch.buttons["Delete List"].click()
         XCTAssertTrue(app.staticTexts["Haus"].waitForExistence(timeout: 3))
+    }
+
+    func testCreatesNewTargetListWhileChangingAnAddedWordList() {
+        app.typeKey("f", modifierFlags: .command)
+        app.typeText("Mädchen")
+        let addButton = app.buttons["dictionary.add-selected"]
+        XCTAssertTrue(addButton.waitForExistence(timeout: 3))
+        addButton.click()
+
+        let addedListButton = app.buttons["dictionary.add-selected.list"]
+        XCTAssertTrue(addedListButton.waitForExistence(timeout: 3))
+        addedListButton.click()
+
+        let newListButton = app.buttons["entry.list-selection.new-list"]
+        XCTAssertTrue(newListButton.waitForExistence(timeout: 3))
+        newListButton.click()
+
+        let nameField = app.textFields["entry.list-selection.name"]
+        XCTAssertTrue(nameField.waitForExistence(timeout: 3))
+        assertFocused(nameField)
+        nameField.typeText("Favorites")
+        app.typeKey(.return, modifierFlags: [])
+
+        XCTAssertTrue(waitUntil { addedListButton.label == "Added to Favorites" })
+        openRoute("3", route: "library")
+        XCTAssertTrue(app.staticTexts["Mädchen"].waitForExistence(timeout: 3))
+        element("library.list-picker").click()
+        XCTAssertTrue(app.menuItems["Favorites"].exists)
     }
 
     func testCardEditorOnlyEditsNotesAndSupportsListMembershipActions() {
@@ -988,6 +1064,8 @@ final class Lang4SelfUITests: XCTestCase {
     private func openRoute(_ shortcut: String, route: String) {
         app.typeKey(shortcut, modifierFlags: .command)
         XCTAssertTrue(routeElement(route).waitForExistence(timeout: 3))
+        assertFocused(element("sidebar.routes"))
+        app.typeKey(.return, modifierFlags: [])
     }
 
     private func routeElement(_ route: String) -> XCUIElement {

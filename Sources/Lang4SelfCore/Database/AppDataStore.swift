@@ -25,6 +25,11 @@ public protocol WordLibraryStoring: Sendable {
     func cards(search: String, listID: Int64, limit: Int) async throws -> [PersonalCard]
     func wordLists() async throws -> [WordList]
     func createWordList(name: String) async throws -> WordList
+    func createWordList(
+        name: String,
+        movingCard cardID: PersonalCard.ID,
+        fromList sourceListID: WordList.ID
+    ) async throws -> WordList
     func renameWordList(id: Int64, name: String) async throws
     func deleteWordList(id: Int64) async throws
     func addCard(_ cardID: Int64, toList listID: Int64) async throws
@@ -51,6 +56,10 @@ public protocol StudyStoring: Sendable {
 /// additions and removals without losing IDs, timestamps, or study history.
 public protocol ReversibleMutationStoring: Sendable {
     func addCardRecordingChange(
+        from entry: DictionaryEntry,
+        listID: WordList.ID
+    ) async throws -> AddedCardMutation
+    func cacheTranslationAndAddCardRecordingChange(
         from entry: DictionaryEntry,
         listID: WordList.ID
     ) async throws -> AddedCardMutation

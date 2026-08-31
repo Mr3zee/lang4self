@@ -706,6 +706,134 @@ final class LocalStoreTests: XCTestCase {
         XCTAssertEqual(nounFromEnglishSearch.meanings.map(\.english), ["bank", "bench"])
     }
 
+    func testUsesTypedLanguageEvidenceToMergeGenericWordEntries() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let english = directory.appendingPathComponent("dict-en.txt")
+        let russian = directory.appendingPathComponent("dict-ru.txt")
+        try """
+        # DE-EN vocabulary database
+        fast\talmost
+        gemütlich\tcomfortable
+        gemütlich\tcosily
+        genauso\tin the same way
+        ruhig\tcalm
+        ruhig\tcalmly
+        schwierig\tdifficult
+        schwierig\tdifficultly
+        überhaupt\tat all
+        """.write(to: english, atomically: true, encoding: .utf8)
+        try """
+        # DE-RU vocabulary database
+        fast\tпочти\tadv\t
+        gemütlich\tуютный\tadj\t
+        genauso\tточно так же\tadv\t
+        ruhig\tспокойный\tadj\t
+        ruhig\tспокойно\tadv\t
+        schwierig\tтрудный\tadj\t
+        schwierig\tсложно\tadv\t
+        überhaupt\tвообще\tadv\t
+        """.write(to: russian, atomically: true, encoding: .utf8)
+
+        let store = try LocalStore(url: directory.appendingPathComponent("test.sqlite3"))
+        // Import in the opposite order to prove presentation does not depend on row IDs.
+        _ = try await store.importDictionary(from: russian)
+        _ = try await store.importDictionary(from: english)
+
+        for (word, expectedKind) in [
+            ("fast", WordKind.adverb),
+            ("gemütlich", .adjective),
+            ("genauso", .adverb),
+            ("ruhig", .adjective),
+            ("schwierig", .adjective),
+            ("überhaupt", .adverb)
+        ] {
+            let matches = try await store.searchDictionary(word).filter {
+                $0.german.lowercased() == word
+            }
+            let entry = try XCTUnwrap(matches.first, word)
+            XCTAssertEqual(matches.count, 1, word)
+            XCTAssertEqual(entry.kind, expectedKind, word)
+            XCTAssertEqual(entry.meanings.first?.language, .english, word)
+            XCTAssertEqual(entry.meanings.last?.language, .russian, word)
+        }
+    }
+
+    func testKeepsNounGendersSeparateAndRanksTheCommonSenseFirst() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let english = directory.appendingPathComponent("dict-en.txt")
+        let russian = directory.appendingPathComponent("dict-ru.txt")
+        let lector = directory.appendingPathComponent("dictionary-de.db")
+        try """
+        # DE-EN vocabulary database
+        Auge {f}\tAuge
+        Auge {n}\teye
+        Auge {n} [Sturm]\teye of a storm
+        Augen {pl}\teyes
+        """.write(to: english, atomically: true, encoding: .utf8)
+        try """
+        # DE-RU vocabulary database
+        Auge {f}\tАвга\tnoun\t
+        Auge {n}\tглаз\tnoun\t
+        Augen {pl}\tглаза\tnoun\t
+        """.write(to: russian, atomically: true, encoding: .utf8)
+        try createAugeLectorFixture(at: lector)
+
+        let store = try LocalStore(url: directory.appendingPathComponent("test.sqlite3"))
+        _ = try await store.importDictionary(from: english)
+        _ = try await store.importDictionary(from: russian)
+        _ = try await store.importExplanations(from: lector)
+
+        let eyes = try await store.searchDictionary("Auge").filter { $0.german == "Auge" }
+        let pluralResults = try await store.searchDictionary("Augen")
+
+        XCTAssertEqual(eyes.map(\.gender), [.neuter, .feminine])
+        XCTAssertEqual(eyes[0].pluralForms, ["Augen"])
+        XCTAssertEqual(
+            eyes[0].meanings.map(\.translation),
+            ["eye", "eye of a storm", "глаз", "eyes", "глаза"]
+        )
+        XCTAssertEqual(eyes[1].meanings.map(\.translation), ["Auge", "Авга"])
+        XCTAssertEqual(pluralResults.first?.german, "Auge")
+        XCTAssertEqual(pluralResults.first?.gender, .neuter)
+    }
+
+    func testGroupsDictCCValencyFormsUnderTheBaseVerb() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let dictionary = directory.appendingPathComponent("dict-en.txt")
+        try """
+        # DE-EN vocabulary database
+        jdn. treffen\tto meet sb.\tverb\t
+        treffen\tto hit\tverb\t
+        (etw.) zumachen\tto close (sth.)\tverb\t
+        etw. zumachen\tto shut sth.\tverb\t
+        zumachen\tto hustle\tverb\t
+        """.write(to: dictionary, atomically: true, encoding: .utf8)
+
+        let store = try LocalStore(url: directory.appendingPathComponent("test.sqlite3"))
+        _ = try await store.importDictionary(from: dictionary)
+
+        let meetingResults = try await store.searchDictionary("treffen")
+        let closingResults = try await store.searchDictionary("zumachen")
+        let splitSpeechResults = try await store.searchDictionary("zu machen")
+        let meeting = try XCTUnwrap(meetingResults.first {
+            $0.german == "treffen" && $0.kind == .verb
+        })
+        let closing = try XCTUnwrap(closingResults.first {
+            $0.german == "zumachen" && $0.kind == .verb
+        })
+
+        XCTAssertEqual(meeting.meanings.map(\.translation), ["to meet sb.", "to hit"])
+        XCTAssertEqual(closing.meanings.map(\.translation), ["to close (sth.)", "to shut sth.", "to hustle"])
+        XCTAssertEqual(splitSpeechResults.first?.german, "zumachen")
+        XCTAssertEqual(splitSpeechResults.first?.kind, .verb)
+    }
+
     func testLoadsAGroupedMultilingualDictionaryEntryByID() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -820,6 +948,118 @@ final class LocalStoreTests: XCTestCase {
         XCTAssertEqual(reloaded.resolvedMeanings.first?.grammar, "noun common")
         XCTAssertEqual(reloaded.resolvedMeanings.first?.subject, "architecture")
         XCTAssertEqual(reloaded.notes, "remember this")
+    }
+
+    func testSavedCardRefreshesDictionaryFieldsFromCurrentIndex() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let databaseURL = directory.appendingPathComponent("test.sqlite3")
+
+        let store = try LocalStore(url: databaseURL)
+        try await store.seedStarterDictionaryIfNeeded()
+        let searchResults = try await store.searchDictionary("Haus")
+        let indexedEntry = try XCTUnwrap(searchResults.first)
+        let saved = try await store.addCard(from: indexedEntry)
+        var personalized = saved
+        personalized.notes = "keep this note"
+        personalized.tags = "favorite"
+        personalized.isStarred = true
+        try await store.updateCard(personalized)
+
+        try executeSQLite(at: databaseURL, sql: """
+            UPDATE personal_cards
+            SET german = 'stale', english = 'stale', raw_german = 'stale',
+                kind = 'other', gender = 'unknown', meanings_json = NULL
+            WHERE id = \(saved.id)
+            """)
+
+        let reopened = try LocalStore(url: databaseURL)
+        let reloadedCard = try await reopened.personalCard(id: saved.id)
+        let refreshed = try XCTUnwrap(reloadedCard)
+
+        XCTAssertEqual(refreshed.german, indexedEntry.german)
+        XCTAssertEqual(refreshed.english, indexedEntry.english)
+        XCTAssertEqual(refreshed.rawGerman, indexedEntry.rawGerman)
+        XCTAssertEqual(refreshed.kind, indexedEntry.kind)
+        XCTAssertEqual(refreshed.gender, indexedEntry.gender)
+        XCTAssertEqual(refreshed.resolvedMeanings, indexedEntry.meanings)
+        XCTAssertEqual(refreshed.notes, "keep this note")
+        XCTAssertEqual(refreshed.tags, "favorite")
+        XCTAssertTrue(refreshed.isStarred)
+    }
+
+    func testSavingAppleTranslationCachesItInTheSearchIndexAndLinksTheCard() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try LocalStore(url: directory.appendingPathComponent("test.sqlite3"))
+        let translation = DictionaryEntry(
+            german: "Dieser Satz wird lokal übersetzt.",
+            english: "This sentence is translated locally.",
+            kind: .phrase,
+            source: DictionaryEntry.appleTranslationSource
+        )
+
+        let resultsBeforeSaving = try await store.searchDictionary(translation.german)
+        XCTAssertTrue(resultsBeforeSaving.isEmpty)
+
+        let addition = try await store.cacheTranslationAndAddCardRecordingChange(
+            from: translation,
+            listID: WordList.defaultID
+        )
+        let cachedResults = try await store.searchDictionary(translation.german)
+        let cached = try XCTUnwrap(cachedResults.first)
+
+        XCTAssertTrue(cached.isAppleTranslation)
+        XCTAssertEqual(cached.english, translation.english)
+        XCTAssertEqual(addition.card.dictionaryEntryID, cached.id)
+
+        let duplicate = try await store.cacheTranslationAndAddCardRecordingChange(
+            from: translation,
+            listID: WordList.defaultID
+        )
+        XCTAssertFalse(duplicate.didAddToList)
+        let dictionaryCount = try await store.dictionaryCount()
+        XCTAssertEqual(dictionaryCount, 1)
+    }
+
+    func testSavingAppleTranslationRollsBackTheCacheWhenCardInsertionFails() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let databaseURL = directory.appendingPathComponent("test.sqlite3")
+        let store = try LocalStore(url: databaseURL)
+        try executeSQLite(at: databaseURL, sql: """
+            CREATE TRIGGER reject_translated_card
+            BEFORE INSERT ON personal_cards
+            BEGIN
+              SELECT RAISE(ABORT, 'forced translated card failure');
+            END;
+            """)
+        let translation = DictionaryEntry(
+            german: "Dieser Satz wird nicht gespeichert.",
+            english: "This sentence is not saved.",
+            kind: .phrase,
+            source: DictionaryEntry.appleTranslationSource
+        )
+
+        do {
+            _ = try await store.cacheTranslationAndAddCardRecordingChange(
+                from: translation,
+                listID: WordList.defaultID
+            )
+            XCTFail("Expected translated card insertion to fail")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("forced translated card failure"))
+        }
+
+        let dictionaryCount = try await store.dictionaryCount()
+        let cachedResults = try await store.searchDictionary(translation.german)
+        let cards = try await store.cards()
+        XCTAssertEqual(dictionaryCount, 0)
+        XCTAssertTrue(cachedResults.isEmpty)
+        XCTAssertTrue(cards.isEmpty)
     }
 
     func testImportsRichLectorDetailsAndBroadMorphologyWithoutAddingHeadwords() async throws {
@@ -1100,6 +1340,55 @@ final class LocalStoreTests: XCTestCase {
         let travelCardsAfterMove = try await store.cards(listID: travel.id)
         XCTAssertEqual(defaultCardsAfterMove, [])
         XCTAssertEqual(travelCardsAfterMove.map(\.id), [card.id])
+    }
+
+    func testCreatingListWhileMovingCardIsAtomic() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let databaseURL = directory.appendingPathComponent("test.sqlite3")
+
+        let store = try LocalStore(url: databaseURL)
+        try await store.seedStarterDictionaryIfNeeded()
+        let houseResults = try await store.searchDictionary("Haus")
+        let house = try XCTUnwrap(houseResults.first)
+        let card = try await store.addCard(from: house)
+        try executeSQLite(at: databaseURL, sql: """
+            CREATE TRIGGER reject_source_list_removal
+            BEFORE DELETE ON card_lists
+            WHEN OLD.card_id = \(card.id) AND OLD.list_id = \(WordList.defaultID)
+            BEGIN
+              SELECT RAISE(ABORT, 'forced source list removal failure');
+            END;
+            """)
+
+        do {
+            _ = try await store.createWordList(
+                name: "Rolled Back",
+                movingCard: card.id,
+                fromList: WordList.defaultID
+            )
+            XCTFail("The forced card move failure should fail list creation")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("forced source list removal failure"))
+        }
+
+        let listsAfterFailure = try await store.wordLists()
+        let defaultCardsAfterFailure = try await store.cards()
+        XCTAssertFalse(listsAfterFailure.contains { $0.name == "Rolled Back" })
+        XCTAssertEqual(defaultCardsAfterFailure.map(\.id), [card.id])
+
+        try executeSQLite(at: databaseURL, sql: "DROP TRIGGER reject_source_list_removal")
+        let created = try await store.createWordList(
+            name: "Favorites",
+            movingCard: card.id,
+            fromList: WordList.defaultID
+        )
+        XCTAssertEqual(created.name, "Favorites")
+        let defaultCardsAfterMove = try await store.cards()
+        let createdListCards = try await store.cards(listID: created.id)
+        XCTAssertTrue(defaultCardsAfterMove.isEmpty)
+        XCTAssertEqual(createdListCards.map(\.id), [card.id])
     }
 
     func testReviewCardsIncludesCardsThatAreNotDue() async throws {
@@ -1460,6 +1749,33 @@ private func createLectorFixture(at url: URL) throws {
         sqlite3_free(error)
         throw NSError(domain: "LocalStoreTests", code: 2, userInfo: [NSLocalizedDescriptionKey: message])
     }
+}
+
+private func createAugeLectorFixture(at url: URL) throws {
+    try executeSQLite(at: url, sql: """
+        CREATE TABLE entries (word TEXT PRIMARY KEY);
+        CREATE TABLE senses (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          word TEXT NOT NULL,
+          pos TEXT,
+          gloss TEXT NOT NULL,
+          sort_order INTEGER DEFAULT 0
+        );
+        CREATE TABLE inflections (
+          inflected_form TEXT NOT NULL,
+          lemma TEXT NOT NULL,
+          type TEXT,
+          PRIMARY KEY (inflected_form, lemma)
+        );
+        INSERT INTO entries (word) VALUES ('auge'), ('augen'), ('aug');
+        INSERT INTO senses (word, pos, gloss) VALUES
+          ('auge', 'noun', 'eye'),
+          ('augen', 'noun', 'eyes'),
+          ('aug', 'noun', 'eye');
+        INSERT INTO inflections (inflected_form, lemma, type) VALUES
+          ('augen', 'auge', 'noun,plural'),
+          ('augen', 'aug', 'noun,plural');
+        """)
 }
 
 private func createLectorPluralFixture(at url: URL) throws {

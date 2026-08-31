@@ -99,11 +99,27 @@ public enum DictCCParser {
         }
         if ["{vi}", "{vt}", "{vr}", "{verb}", "{v.i.}", "{v.t.}"].contains(where: lower.contains)
             || value.contains("|")
-            || lowerEnglish.hasPrefix("to ") { return .verb }
+            || looksLikeEnglishInfinitive(lowerEnglish) { return .verb }
         if lower.contains("{adj}") || lower.contains("{adj.}") { return .adjective }
         if lower.contains("{adv}") || lower.contains("{adv.}") { return .adverb }
         if cleanedTerm(value).contains(" ") { return .phrase }
         return .other
+    }
+
+    static func looksLikeEnglishInfinitive(_ value: String) -> Bool {
+        let lower = cleanedTerm(value).lowercased()
+        guard lower.hasPrefix("to ") else { return false }
+        let nonVerbPrefixes = [
+            "to a ", "to an ", "to the ", "to one's ", "to one’s ",
+            "to sb.", "to sth.", "to somebody", "to someone", "to something"
+        ]
+        return !nonVerbPrefixes.contains(where: lower.hasPrefix)
+    }
+
+    static func hasGermanVerbMarker(_ value: String) -> Bool {
+        let lower = value.lowercased()
+        return ["{vi}", "{vt}", "{vr}", "{verb}", "{v.i.}", "{v.t.}"].contains(where: lower.contains)
+            || value.contains("|")
     }
 
     private static func wordKind(for declaration: String) -> WordKind? {

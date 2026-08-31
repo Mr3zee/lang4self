@@ -176,6 +176,8 @@ public struct DictionaryRelatedForm: Identifiable, Hashable, Codable, Sendable {
 }
 
 public struct DictionaryEntry: Identifiable, Hashable, Codable, Sendable {
+    public static let appleTranslationSource = "Apple Translation"
+
     public let id: Int64
     public let german: String
     public let english: String
@@ -194,6 +196,7 @@ public struct DictionaryEntry: Identifiable, Hashable, Codable, Sendable {
     public let relatedForms: [DictionaryRelatedForm]
 
     public var translations: String { english }
+    public var isAppleTranslation: Bool { source == Self.appleTranslationSource }
     public var distinctExplanations: [DictionaryExplanation] {
         let meaningText = Set(meanings.flatMap { meaning in
             [meaning.translation, meaning.distinctExplanation].compactMap { $0 }.map(comparableDictionaryText)

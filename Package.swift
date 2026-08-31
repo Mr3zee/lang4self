@@ -30,7 +30,8 @@ let package = Package(
             linkerSettings: [
                 .linkedFramework("AppKit"),
                 .linkedFramework("AVFoundation"),
-                .linkedFramework("Speech")
+                .linkedFramework("Speech"),
+                .linkedFramework("Translation")
             ]
         ),
         .executableTarget(

@@ -131,6 +131,7 @@ final class AppState: ObservableObject {
     @Published var searchQuery = ""
     @Published private(set) var searchResults: [DictionaryEntry] = []
     @Published private(set) var isSearchingDictionary = false
+    @Published private(set) var dictionaryTranslationPhase: DictionaryTranslationPhase = .idle
     @Published var selectedEntry: DictionaryEntry?
     @Published private(set) var wordLists: [WordList] = []
     @Published private(set) var selectedListID: WordList.ID = WordList.defaultID
@@ -167,6 +168,7 @@ final class AppState: ObservableObject {
     let undoHistory = AppUndoHistory()
 
     private let store: any AppDataStore
+    private let dictionarySearch: any DictionarySearching
     private var searchTask: Task<Void, Never>?
     private var searchGeneration = UUID()
     private var libraryTask: Task<Void, Never>?
@@ -189,6 +191,7 @@ final class AppState: ObservableObject {
 
     init(
         store: any AppDataStore,
+        dictionarySearch: any DictionarySearching,
         sentenceGenerator: any SentenceGenerating,
         sentenceAnalyzer: any SentenceAnalyzing,
         dictionaryFilePreparer: any DictionaryFilePreparing,
@@ -199,6 +202,7 @@ final class AppState: ObservableObject {
         calendar: Calendar
     ) {
         self.store = store
+        self.dictionarySearch = dictionarySearch
         self.lmStudio = sentenceGenerator
         self.sentenceAnalyzer = sentenceAnalyzer
         self.dictionaryFilePreparer = dictionaryFilePreparer
@@ -210,6 +214,9 @@ final class AppState: ObservableObject {
         self.lmStudioSettings = isUITesting ? .defaults : settingsStore.load()
         lmStudio.progressDidChange = { [weak self] progress in
             self?.lmStudioProgress = progress
+        }
+        dictionarySearch.translationPhaseDidChange = { [weak self] phase in
+            self?.dictionaryTranslationPhase = phase
         }
     }
 
@@ -307,6 +314,7 @@ final class AppState: ObservableObject {
     func search(_ value: String, immediate: Bool = false, selectFirstResult: Bool = false) {
         searchQuery = value
         searchTask?.cancel()
+        dictionaryTranslationPhase = .idle
         let generation = UUID()
         searchGeneration = generation
         if selectFirstResult { selectedEntry = nil }
@@ -321,7 +329,7 @@ final class AppState: ObservableObject {
             if !immediate { try? await Task.sleep(nanoseconds: 160_000_000) }
             guard !Task.isCancelled else { return }
             do {
-                let results = try await store.searchDictionary(value)
+                let results = try await dictionarySearch.search(value, limit: 80)
                 guard !Task.isCancelled, searchGeneration == generation else { return }
                 searchResults = results
                 if selectFirstResult || selectedEntry == nil || !results.contains(where: { $0.id == selectedEntry?.id }) {
@@ -342,7 +350,14 @@ final class AppState: ObservableObject {
         let listName = wordLists.first { $0.id == listID }?.name ?? "My words"
         Task {
             do {
-                let addition = try await store.addCardRecordingChange(from: entry, listID: listID)
+                let addition = if entry.isAppleTranslation {
+                    try await store.cacheTranslationAndAddCardRecordingChange(
+                        from: entry,
+                        listID: listID
+                    )
+                } else {
+                    try await store.addCardRecordingChange(from: entry, listID: listID)
+                }
                 let card = addition.card
                 addedDictionaryEntryPlacements[entry.id] = .init(cardID: card.id, listID: listID)
                 await refreshStudyData()
@@ -404,6 +419,41 @@ final class AppState: ObservableObject {
                 selectWordList(destinationListID)
             }
             showBanner("Moved “\(entry.german)” to \(destination.name)")
+            return true
+        } catch {
+            show(error)
+            return false
+        }
+    }
+
+    func createListForAddedEntry(_ entry: DictionaryEntry, named name: String) async -> Bool {
+        guard !undoHistory.isPerforming else { return false }
+        guard let placement = addedDictionaryEntryPlacements[entry.id] else { return false }
+
+        do {
+            let destination = try await store.createWordList(
+                name: name,
+                movingCard: placement.cardID,
+                fromList: placement.listID
+            )
+            guard addedDictionaryEntryPlacements[entry.id]?.cardID == placement.cardID,
+                  addedDictionaryEntryPlacements[entry.id]?.listID == placement.listID
+            else { return false }
+
+            wordLists = try await store.wordLists()
+            addedDictionaryEntryPlacements[entry.id] = .init(
+                cardID: placement.cardID,
+                listID: destination.id
+            )
+            undoHistory.record(moveCardOperation(
+                cardID: placement.cardID,
+                fromListID: destination.id,
+                toListID: placement.listID,
+                actionName: "Move “\(entry.german)”",
+                dictionaryEntryID: entry.id
+            ))
+            selectWordList(destination.id)
+            showBanner("Created “\(destination.name)” and moved “\(entry.german)”")
             return true
         } catch {
             show(error)

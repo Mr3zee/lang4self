@@ -62,6 +62,7 @@ public actor LocalStore {
     static let latestSchemaVersion = LocalStoreSchema.latestSchemaVersion
 
     private var database: OpaquePointer?
+    private var dictionaryClassifications: [String: DictionaryClassification] = [:]
     public nonisolated let databaseURL: URL
     private let now: @Sendable () -> Date
     private static let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
@@ -185,16 +186,27 @@ public actor LocalStore {
         var hitsByGroup: [DictionaryGroupKey: DictionarySearchHit] = [:]
         var ordinal = 0
         for (termIndex, term) in lookupTerms.prefix(16).enumerated() {
-            for entry in try dictionaryMatches(for: term, limit: limit) {
+            for storedEntry in try dictionaryMatches(for: term, limit: limit) {
+                let entry = try resolvedDictionaryEntry(storedEntry)
+                guard shouldInclude(
+                    entry,
+                    storedKind: dictionaryEvidenceKind(for: storedEntry),
+                    literalTerm: lookupTerms[0],
+                    inflectionLinks: inflectionLinks
+                ) else { continue }
                 let key = DictionaryGroupKey(entry)
+                let classification = try dictionaryClassification(for: entry.german)
                 let hit = DictionarySearchHit(
                     entry: entry,
                     preference: searchPreference(
                         for: entry,
+                        storedKind: dictionaryEvidenceKind(for: storedEntry),
+                        hasDirectKindEvidence: classification.hasDirectKindEvidence,
                         literalTerm: lookupTerms[0],
                         lookupTerms: lookupTerms,
                         inflectionLinks: inflectionLinks
                     ),
+                    groupSize: classification.groupSize(for: entry),
                     termIndex: termIndex,
                     ordinal: ordinal
                 )
@@ -245,10 +257,10 @@ public actor LocalStore {
         }
 
         let statement = try prepare("""
-            SELECT DISTINCT lemma_key, kind
+            SELECT DISTINCT lemma_key, kind, tags
             FROM dictionary_inflections
             WHERE form = ? AND tags != 'auxiliary'
-            ORDER BY lemma_key, kind
+            ORDER BY lemma_key, kind, tags
             """)
         defer { sqlite3_finalize(statement) }
         var result: [DictionaryInflectionSearchLink] = []
@@ -265,7 +277,8 @@ public actor LocalStore {
                 let link = DictionaryInflectionSearchLink(
                     lemmaKey: lemmaKey,
                     searchTerm: DictCCParser.normalized(lemmaKey),
-                    kind: kind
+                    kind: kind,
+                    tags: lectorTags(text(statement, 2))
                 )
                 if !link.searchTerm.isEmpty, !result.contains(link) {
                     result.append(link)
@@ -309,12 +322,20 @@ public actor LocalStore {
 
     private func searchPreference(
         for entry: DictionaryEntry,
+        storedKind: WordKind,
+        hasDirectKindEvidence: Bool,
         literalTerm: String,
         lookupTerms: [String],
         inflectionLinks: [DictionaryInflectionSearchLink]
     ) -> Int {
         let german = DictCCParser.normalized(entry.german)
         let groupingTerm = dictionaryGroupingTerm(entry.german)
+        if german == literalTerm,
+           entry.gender != .plural,
+           !inflectionLinks.contains(where: \.isDegree),
+           storedKind != .other || hasDirectKindEvidence {
+            return -2
+        }
         if inflectionLinks.contains(where: {
             $0.lemmaKey == groupingTerm && $0.kind == entry.kind
         }) {
@@ -332,6 +353,116 @@ public actor LocalStore {
         if entry.kind == .verb || isSingularNoun { return 2 }
         if german == literalTerm { return 3 }
         return 4
+    }
+
+    private func shouldInclude(
+        _ entry: DictionaryEntry,
+        storedKind: WordKind,
+        literalTerm: String,
+        inflectionLinks: [DictionaryInflectionSearchLink]
+    ) -> Bool {
+        let groupingTerm = dictionaryGroupingTerm(entry.german)
+        let literalGroupingTerm = dictionaryGroupingTerm(literalTerm)
+        if storedKind == .other,
+           groupingTerm == literalGroupingTerm,
+           inflectionLinks.contains(where: {
+               $0.lemmaKey != literalGroupingTerm && $0.kind == entry.kind
+           }) {
+            return false
+        }
+        return true
+    }
+
+    private func resolvedDictionaryEntry(_ entry: DictionaryEntry) throws -> DictionaryEntry {
+        let classification = try dictionaryClassification(for: entry.german)
+        let evidenceKind = dictionaryEvidenceKind(for: entry)
+        let resolvedKind: WordKind
+        if evidenceKind == .other, let preferredKind = classification.preferredKind {
+            if preferredKind == .noun, classification.nounGender == nil {
+                resolvedKind = .other
+            } else {
+                resolvedKind = preferredKind
+            }
+        } else if evidenceKind == .adverb, classification.preferredKind == .adjective {
+            // German adjective forms are also used adverbially without changing
+            // spelling. They are one study lexeme, not duplicate cards.
+            resolvedKind = .adjective
+        } else {
+            resolvedKind = evidenceKind
+        }
+        let resolvedGender = resolvedKind == .noun && entry.gender == .unknown
+            ? classification.nounGender ?? .unknown
+            : entry.gender
+        guard resolvedKind != entry.kind || resolvedGender != entry.gender else { return entry }
+        return entry.reclassified(kind: resolvedKind, gender: resolvedGender)
+    }
+
+    private func dictionaryClassification(for german: String) throws -> DictionaryClassification {
+        let groupingTerm = dictionaryGroupingTerm(german)
+        if let cached = dictionaryClassifications[groupingTerm] { return cached }
+
+        let spellings = dictionaryGroupingSpellings(for: groupingTerm)
+        let placeholders = Array(repeating: "?", count: spellings.count).joined(separator: ", ")
+        let entryStatement = try prepare("""
+            SELECT german, kind, gender, raw_german, raw_english, grammar, translation_language
+            FROM dictionary_entries
+            WHERE normalized_german IN (\(placeholders))
+            """)
+        defer { sqlite3_finalize(entryStatement) }
+        for (offset, spelling) in spellings.enumerated() {
+            bind(DictCCParser.normalized(spelling), to: Int32(offset + 1), in: entryStatement)
+        }
+        var directKindCounts: [WordKind: Int] = [:]
+        var nounGenderCounts: [Gender: Int] = [:]
+        while true {
+            let step = sqlite3_step(entryStatement)
+            if step == SQLITE_DONE { break }
+            guard step == SQLITE_ROW else { throw sqliteError() }
+            guard dictionaryGroupingTerm(text(entryStatement, 0)) == groupingTerm,
+                  let storedKind = WordKind(rawValue: text(entryStatement, 1)) else { continue }
+            let kind = dictionaryEvidenceKind(
+                storedKind: storedKind,
+                rawGerman: text(entryStatement, 3),
+                rawEnglish: text(entryStatement, 4),
+                grammar: nullableText(entryStatement, 5),
+                language: TranslationLanguage(rawValue: text(entryStatement, 6)) ?? .english
+            )
+            guard kind != .other, kind != .phrase else { continue }
+            directKindCounts[kind, default: 0] += 1
+            if kind == .noun,
+               let gender = Gender(rawValue: text(entryStatement, 2)),
+               gender != .unknown, gender != .plural {
+                nounGenderCounts[gender, default: 0] += 1
+            }
+        }
+
+        let lectorStatement = try prepare("""
+            SELECT kind, COUNT(*)
+            FROM dictionary_explanations
+            WHERE german_key = ? AND kind != 'other'
+            GROUP BY kind
+            """)
+        defer { sqlite3_finalize(lectorStatement) }
+        bind(groupingTerm, to: 1, in: lectorStatement)
+        var lectorKindCounts: [WordKind: Int] = [:]
+        while true {
+            let step = sqlite3_step(lectorStatement)
+            if step == SQLITE_DONE { break }
+            guard step == SQLITE_ROW else { throw sqliteError() }
+            guard let kind = WordKind(rawValue: text(lectorStatement, 0)), kind != .phrase else { continue }
+            lectorKindCounts[kind] = Int(sqlite3_column_int64(lectorStatement, 1))
+        }
+
+        let classification = DictionaryClassification(
+            directKindCounts: directKindCounts,
+            lectorKindCounts: lectorKindCounts,
+            nounGenderCounts: nounGenderCounts
+        )
+        if dictionaryClassifications.count >= 20_000 {
+            dictionaryClassifications.removeAll(keepingCapacity: true)
+        }
+        dictionaryClassifications[groupingTerm] = classification
+        return classification
     }
 
     @discardableResult
@@ -399,6 +530,7 @@ public actor LocalStore {
             try LocalStoreSchema.rebuildDictionarySearchIndex(database)
             try LocalStoreSchema.createDictionaryTriggers(database)
             try Self.execute(database, "COMMIT")
+            dictionaryClassifications.removeAll(keepingCapacity: true)
             try Self.execute(database, "PRAGMA optimize")
             progress(.init(imported: imported, bytesRead: totalBytes, totalBytes: totalBytes))
             return imported
@@ -695,6 +827,7 @@ public actor LocalStore {
                 stored = try readScalarInt(storedStatement)
             }
             try Self.execute(database, "COMMIT")
+            dictionaryClassifications.removeAll(keepingCapacity: true)
             try Self.execute(database, "PRAGMA optimize")
             progress(.init(imported: imported, total: total))
             return stored
@@ -715,47 +848,93 @@ public actor LocalStore {
     ) throws -> AddedCardMutation {
         try Self.execute(database, "BEGIN IMMEDIATE")
         do {
-            let card: PersonalCard
-            if entry.id != 0, var existing = try self.card(forDictionaryEntryID: entry.id) {
-                if existing.meanings == nil {
-                    existing.english = entry.english
-                    existing.meanings = entry.meanings
-                    try updateCard(existing)
-                }
-                card = existing
-            } else {
-                let now = self.now().timeIntervalSince1970
-                let sql = """
-                    INSERT INTO personal_cards
-                      (dictionary_entry_id, german, english, raw_german, kind, gender, created_at, due_at, meanings_json)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """
-                let statement = try prepare(sql)
-                defer { sqlite3_finalize(statement) }
-                if entry.id == 0 { sqlite3_bind_null(statement, 1) }
-                else { sqlite3_bind_int64(statement, 1, entry.id) }
-                bind(entry.german, to: 2, in: statement)
-                bind(entry.english, to: 3, in: statement)
-                bind(entry.rawGerman, to: 4, in: statement)
-                bind(entry.kind.rawValue, to: 5, in: statement)
-                bind(entry.gender.rawValue, to: 6, in: statement)
-                sqlite3_bind_double(statement, 7, now)
-                sqlite3_bind_double(statement, 8, now)
-                bind(try meaningsJSON(entry.meanings), to: 9, in: statement)
-                try stepDone(statement)
-                let id = sqlite3_last_insert_rowid(database)
-                guard let inserted = try self.card(id: id) else {
-                    throw LocalStoreError.sqlite("Could not read the newly created card")
-                }
-                card = inserted
-            }
-            let didAddToList = try insertCard(card.id, toList: listID, addedAt: now())
+            let addition = try addCardRecordingChangeInsideTransaction(from: entry, listID: listID)
             try Self.execute(database, "COMMIT")
-            return AddedCardMutation(card: card, didAddToList: didAddToList)
+            return addition
         } catch {
             try? Self.execute(database, "ROLLBACK")
             throw error
         }
+    }
+
+    public func cacheTranslationAndAddCardRecordingChange(
+        from entry: DictionaryEntry,
+        listID: WordList.ID
+    ) throws -> AddedCardMutation {
+        guard entry.isAppleTranslation else {
+            throw LocalStoreError.sqlite("Only Apple Translation results can be cached as translations")
+        }
+        try Self.execute(database, "BEGIN IMMEDIATE")
+        do {
+            try insertDictionaryEntry(entry)
+            let statement = try prepare("""
+                SELECT id, german, english, raw_german, raw_english,
+                       kind, gender, usage, source, translation_language,
+                       explanation, grammar, subject
+                FROM dictionary_entries
+                WHERE raw_german = ? AND raw_english = ? AND translation_language = ?
+                LIMIT 1
+                """)
+            defer { sqlite3_finalize(statement) }
+            bind(entry.rawGerman, to: 1, in: statement)
+            bind(entry.rawEnglish, to: 2, in: statement)
+            bind(TranslationLanguage.english.rawValue, to: 3, in: statement)
+            guard let cachedEntry = try readEntries(statement).first else {
+                throw LocalStoreError.sqlite("Could not read the cached translation")
+            }
+            dictionaryClassifications.removeValue(forKey: dictionaryGroupingTerm(entry.german))
+            let addition = try addCardRecordingChangeInsideTransaction(
+                from: cachedEntry,
+                listID: listID
+            )
+            try Self.execute(database, "COMMIT")
+            return addition
+        } catch {
+            try? Self.execute(database, "ROLLBACK")
+            throw error
+        }
+    }
+
+    private func addCardRecordingChangeInsideTransaction(
+        from entry: DictionaryEntry,
+        listID: WordList.ID
+    ) throws -> AddedCardMutation {
+        let card: PersonalCard
+        if entry.id != 0, var existing = try self.card(forDictionaryEntryID: entry.id) {
+            if existing.meanings == nil {
+                existing.english = entry.english
+                existing.meanings = entry.meanings
+                try updateCard(existing)
+            }
+            card = existing
+        } else {
+            let timestamp = now().timeIntervalSince1970
+            let sql = """
+                INSERT INTO personal_cards
+                  (dictionary_entry_id, german, english, raw_german, kind, gender, created_at, due_at, meanings_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """
+            let statement = try prepare(sql)
+            defer { sqlite3_finalize(statement) }
+            if entry.id == 0 { sqlite3_bind_null(statement, 1) }
+            else { sqlite3_bind_int64(statement, 1, entry.id) }
+            bind(entry.german, to: 2, in: statement)
+            bind(entry.english, to: 3, in: statement)
+            bind(entry.rawGerman, to: 4, in: statement)
+            bind(entry.kind.rawValue, to: 5, in: statement)
+            bind(entry.gender.rawValue, to: 6, in: statement)
+            sqlite3_bind_double(statement, 7, timestamp)
+            sqlite3_bind_double(statement, 8, timestamp)
+            bind(try meaningsJSON(entry.meanings), to: 9, in: statement)
+            try stepDone(statement)
+            let id = sqlite3_last_insert_rowid(database)
+            guard let inserted = try self.card(id: id) else {
+                throw LocalStoreError.sqlite("Could not read the newly created card")
+            }
+            card = inserted
+        }
+        let didAddToList = try insertCard(card.id, toList: listID, addedAt: now())
+        return AddedCardMutation(card: card, didAddToList: didAddToList)
     }
 
     public func cards(search: String = "", listID: Int64 = WordList.defaultID, limit: Int = 500) throws -> [PersonalCard] {
@@ -842,6 +1021,31 @@ public actor LocalStore {
             throw sqliteError()
         }
         return .init(id: sqlite3_last_insert_rowid(database), name: name, createdAt: createdAt)
+    }
+
+    public func createWordList(
+        name: String,
+        movingCard cardID: PersonalCard.ID,
+        fromList sourceListID: WordList.ID
+    ) throws -> WordList {
+        try Self.execute(database, "BEGIN IMMEDIATE")
+        do {
+            let list = try createWordList(name: name)
+            _ = try insertCard(cardID, toList: list.id, addedAt: now())
+
+            let statement = try prepare("DELETE FROM card_lists WHERE card_id = ? AND list_id = ?")
+            sqlite3_bind_int64(statement, 1, cardID)
+            sqlite3_bind_int64(statement, 2, sourceListID)
+            let step = sqlite3_step(statement)
+            sqlite3_finalize(statement)
+            guard step == SQLITE_DONE else { throw sqliteError() }
+
+            try Self.execute(database, "COMMIT")
+            return list
+        } catch {
+            try? Self.execute(database, "ROLLBACK")
+            throw error
+        }
     }
 
     public func renameWordList(id: Int64, name: String) throws {
@@ -1588,29 +1792,47 @@ public actor LocalStore {
     }
 
     private func dictionaryGroups(representedBy representative: DictionaryEntry) throws -> [DictionaryEntry] {
+        let representative = try resolvedDictionaryEntry(representative)
         let singularEntries = try dictionarySingularEntries(for: representative)
         let representatives = singularEntries.isEmpty ? [representative] : singularEntries
         return try representatives.map(dictionaryGroup)
     }
 
     private func dictionaryGroup(representedBy representative: DictionaryEntry) throws -> DictionaryEntry {
+        let groupTerm = dictionaryGroupingTerm(representative.german)
+        let spellings = dictionaryGroupingSpellings(for: groupTerm)
+        let placeholders = Array(repeating: "?", count: spellings.count).joined(separator: ", ")
         let sql = """
             SELECT id, german, english, raw_german, raw_english,
                    kind, gender, usage, source, translation_language,
                    explanation, grammar, subject
             FROM dictionary_entries
-            WHERE normalized_german = ? AND kind = ?
-            ORDER BY id
+            WHERE normalized_german IN (\(placeholders))
+            ORDER BY CASE translation_language WHEN 'en' THEN 0 WHEN 'ru' THEN 1 ELSE 2 END, id
             """
         let statement = try prepare(sql)
         defer { sqlite3_finalize(statement) }
-        bind(DictCCParser.normalized(representative.german), to: 1, in: statement)
-        bind(representative.kind.rawValue, to: 2, in: statement)
-        let groupTerm = dictionaryGroupingTerm(representative.german)
-        let entries = try readEntries(statement).filter {
-            dictionaryGroupingTerm($0.german) == groupTerm
+        for (offset, spelling) in spellings.enumerated() {
+            bind(DictCCParser.normalized(spelling), to: Int32(offset + 1), in: statement)
         }
-        guard let canonical = entries.first(where: { $0.gender != .plural }) ?? entries.first else {
+        let groupEntries = try readEntries(statement)
+            .filter { dictionaryGroupingTerm($0.german) == groupTerm }
+            .map(resolvedDictionaryEntry)
+        let singularGenders = Set(groupEntries.compactMap { entry -> Gender? in
+            guard entry.kind == .noun,
+                  entry.gender != .unknown, entry.gender != .plural else { return nil }
+            return entry.gender
+        })
+        let entries = groupEntries.filter { entry in
+            guard entry.kind == representative.kind else { return false }
+            guard entry.kind == .noun else { return true }
+            if entry.gender == .plural { return true }
+            if representative.gender == .plural {
+                return singularGenders.count == 1
+            }
+            return entry.gender == representative.gender
+        }
+        guard let canonical = entries.sorted(by: dictionaryCanonicalEntrySortsBefore).first else {
             return representative
         }
         let singularEntries = entries.filter { $0.gender != .plural }
@@ -1698,58 +1920,38 @@ public actor LocalStore {
             guard step == SQLITE_ROW else { throw sqliteError() }
             singularKeys.append(text(relationStatement, 0))
         }
-        guard singularKeys.count == 1 else { return [] }
-
-        let entrySQL = """
-            SELECT id, german, english, raw_german, raw_english,
-                   kind, gender, usage, source, translation_language,
-                   explanation, grammar, subject
-            FROM dictionary_entries
-            WHERE kind = 'noun' AND gender != 'plural' AND normalized_german = ?
-            ORDER BY id
-            """
-        var result: [DictionaryEntry] = []
-        var seenGroups = Set<DictionaryGroupKey>()
-        for singularKey in singularKeys {
-            let statement = try prepare(entrySQL)
-            defer { sqlite3_finalize(statement) }
-            bind(DictCCParser.normalized(singularKey), to: 1, in: statement)
-            for singular in try readEntries(statement)
-            where dictionaryGroupingTerm(singular.german) == singularKey {
-                if seenGroups.insert(DictionaryGroupKey(singular)).inserted {
-                    result.append(singular)
-                }
-            }
+        let candidates = try singularKeys.compactMap { key -> (String, [DictionaryEntry])? in
+            let entries = try dictionaryNounSingularEntries(for: key)
+            return entries.isEmpty ? nil : (key, entries)
         }
-        return result
+        guard candidates.count == 1, let candidate = candidates.first else { return [] }
+        let classification = try dictionaryClassification(for: candidate.0)
+        return candidate.1.filter { classification.canOwnLinkedPlurals(gender: $0.gender) }
     }
 
     private func dictionaryPluralEntries(for entry: DictionaryEntry) throws -> [DictionaryEntry] {
         guard entry.kind == .noun, entry.gender != .plural else { return [] }
+        let classification = try dictionaryClassification(for: entry.german)
+        guard classification.canOwnLinkedPlurals(gender: entry.gender) else { return [] }
+        let lemmaKey = dictionaryGroupingTerm(entry.german)
         let relationStatement = try prepare("""
             SELECT DISTINCT candidate.form
             FROM dictionary_inflections AS candidate
             WHERE candidate.lemma_key = ?
               AND candidate.kind = 'noun'
               AND instr(',' || candidate.tags || ',', ',plural,') > 0
-              AND NOT EXISTS (
-                SELECT 1
-                FROM dictionary_inflections AS other
-                WHERE other.form = candidate.form
-                  AND other.lemma_key != candidate.lemma_key
-                  AND other.kind = 'noun'
-                  AND instr(',' || other.tags || ',', ',plural,') > 0
-              )
             ORDER BY candidate.form
             """)
         defer { sqlite3_finalize(relationStatement) }
-        bind(dictionaryGroupingTerm(entry.german), to: 1, in: relationStatement)
+        bind(lemmaKey, to: 1, in: relationStatement)
         var pluralKeys: [String] = []
         while true {
             let step = sqlite3_step(relationStatement)
             if step == SQLITE_DONE { break }
             guard step == SQLITE_ROW else { throw sqliteError() }
-            pluralKeys.append(text(relationStatement, 0))
+            let pluralKey = text(relationStatement, 0)
+            let activeLemmas = try dictionaryNounLemmaKeys(forPluralForm: pluralKey)
+            if activeLemmas == [lemmaKey] { pluralKeys.append(pluralKey) }
         }
 
         let entrySQL = """
@@ -1772,6 +1974,48 @@ public actor LocalStore {
             }
         }
         return result
+    }
+
+    private func dictionaryNounLemmaKeys(forPluralForm form: String) throws -> [String] {
+        let statement = try prepare("""
+            SELECT DISTINCT lemma_key
+            FROM dictionary_inflections
+            WHERE form = ?
+              AND kind = 'noun'
+              AND instr(',' || tags || ',', ',plural,') > 0
+            ORDER BY lemma_key
+            """)
+        defer { sqlite3_finalize(statement) }
+        bind(form, to: 1, in: statement)
+        var result: [String] = []
+        while true {
+            let step = sqlite3_step(statement)
+            if step == SQLITE_DONE { return result }
+            guard step == SQLITE_ROW else { throw sqliteError() }
+            let lemmaKey = text(statement, 0)
+            if try !dictionaryNounSingularEntries(for: lemmaKey).isEmpty {
+                result.append(lemmaKey)
+            }
+        }
+    }
+
+    private func dictionaryNounSingularEntries(for lemmaKey: String) throws -> [DictionaryEntry] {
+        let statement = try prepare("""
+            SELECT id, german, english, raw_german, raw_english,
+                   kind, gender, usage, source, translation_language,
+                   explanation, grammar, subject
+            FROM dictionary_entries
+            WHERE kind = 'noun' AND gender != 'plural' AND normalized_german = ?
+            ORDER BY CASE translation_language WHEN 'en' THEN 0 WHEN 'ru' THEN 1 ELSE 2 END, id
+            """)
+        defer { sqlite3_finalize(statement) }
+        bind(DictCCParser.normalized(lemmaKey), to: 1, in: statement)
+        var seenGroups = Set<DictionaryGroupKey>()
+        return try readEntries(statement).filter {
+            dictionaryGroupingTerm($0.german) == lemmaKey
+        }.filter {
+            seenGroups.insert(DictionaryGroupKey($0)).inserted
+        }
     }
 
     private func dictionaryExplanations(for entry: DictionaryEntry) throws -> [DictionaryExplanation] {
@@ -1874,19 +2118,20 @@ public actor LocalStore {
             guard step == SQLITE_ROW else { throw sqliteError() }
             let dictionaryID = sqlite3_column_type(statement, 1) == SQLITE_NULL ? nil : sqlite3_column_int64(statement, 1)
             let lastReviewed = sqlite3_column_type(statement, 11) == SQLITE_NULL ? nil : Date(timeIntervalSince1970: sqlite3_column_double(statement, 11))
-            let german = text(statement, 2)
-            let kind = WordKind(rawValue: text(statement, 5)) ?? .other
-            let meanings = nullableText(statement, 18).flatMap {
+            let indexedEntry = try dictionaryID.flatMap { try dictionaryEntry(id: $0) }
+            let storedGerman = text(statement, 2)
+            let storedKind = WordKind(rawValue: text(statement, 5)) ?? .other
+            let storedMeanings = nullableText(statement, 18).flatMap {
                 try? JSONDecoder().decode([DictionaryMeaning].self, from: Data($0.utf8))
             }
             result.append(.init(
                 id: sqlite3_column_int64(statement, 0),
                 dictionaryEntryID: dictionaryID,
-                german: german,
-                english: text(statement, 3),
-                kind: kind,
-                gender: Gender(rawValue: text(statement, 6)) ?? .unknown,
-                rawGerman: text(statement, 4),
+                german: indexedEntry?.german ?? storedGerman,
+                english: indexedEntry?.english ?? text(statement, 3),
+                kind: indexedEntry?.kind ?? storedKind,
+                gender: indexedEntry?.gender ?? Gender(rawValue: text(statement, 6)) ?? .unknown,
+                rawGerman: indexedEntry?.rawGerman ?? text(statement, 4),
                 notes: text(statement, 7),
                 tags: text(statement, 8),
                 createdAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 9)),
@@ -1898,8 +2143,8 @@ public actor LocalStore {
                 lapses: Int(sqlite3_column_int(statement, 15)),
                 isStarred: sqlite3_column_int(statement, 16) != 0,
                 isSuspended: sqlite3_column_int(statement, 17) != 0,
-                forms: try dictionaryForms(for: german, kind: kind),
-                meanings: meanings
+                forms: try indexedEntry?.forms ?? dictionaryForms(for: storedGerman, kind: storedKind),
+                meanings: indexedEntry?.meanings ?? storedMeanings
             ))
         }
     }
@@ -2093,23 +2338,107 @@ public actor LocalStore {
 private struct DictionaryGroupKey: Hashable {
     let german: String
     let kind: WordKind
+    let gender: Gender?
 
     init(_ entry: DictionaryEntry) {
         german = dictionaryGroupingTerm(entry.german)
         kind = entry.kind
+        gender = entry.kind == .noun ? entry.gender : nil
     }
 }
 
 private struct DictionarySearchHit {
     let entry: DictionaryEntry
     let preference: Int
+    let groupSize: Int
     let termIndex: Int
     let ordinal: Int
 
     func sortsBefore(_ other: DictionarySearchHit) -> Bool {
         if preference != other.preference { return preference < other.preference }
         if termIndex != other.termIndex { return termIndex < other.termIndex }
+        if entry.kind == .noun,
+           other.entry.kind == .noun,
+           dictionaryGroupingTerm(entry.german) == dictionaryGroupingTerm(other.entry.german),
+           groupSize != other.groupSize {
+            return groupSize > other.groupSize
+        }
         return ordinal < other.ordinal
+    }
+}
+
+private struct DictionaryClassification {
+    let preferredKind: WordKind?
+    let nounGender: Gender?
+    let hasDirectKindEvidence: Bool
+    private let directKindCounts: [WordKind: Int]
+    private let nounGenderCounts: [Gender: Int]
+    private let linkedPluralGender: Gender?
+
+    init(
+        directKindCounts: [WordKind: Int],
+        lectorKindCounts: [WordKind: Int],
+        nounGenderCounts: [Gender: Int]
+    ) {
+        self.directKindCounts = directKindCounts
+        self.nounGenderCounts = nounGenderCounts
+        hasDirectKindEvidence = !directKindCounts.isEmpty
+        preferredKind = Self.preferredKind(
+            direct: directKindCounts,
+            lector: lectorKindCounts
+        )
+        nounGender = nounGenderCounts.count == 1 ? nounGenderCounts.keys.first : nil
+        linkedPluralGender = Self.uniqueWinner(in: nounGenderCounts)
+    }
+
+    func groupSize(for entry: DictionaryEntry) -> Int {
+        if entry.kind == .noun {
+            return max(nounGenderCounts[entry.gender, default: 0], 1)
+        }
+        if entry.kind == .adjective {
+            return max(
+                directKindCounts[.adjective, default: 0] + directKindCounts[.adverb, default: 0],
+                1
+            )
+        }
+        return max(directKindCounts[entry.kind, default: 0], 1)
+    }
+
+    func canOwnLinkedPlurals(gender: Gender) -> Bool {
+        nounGenderCounts.isEmpty || linkedPluralGender == gender
+    }
+
+    private static func preferredKind(
+        direct: [WordKind: Int],
+        lector: [WordKind: Int]
+    ) -> WordKind? {
+        let direct = collapsingAdjectiveAndAdverb(direct)
+        let lector = collapsingAdjectiveAndAdverb(lector)
+        if let winner = uniqueWinner(in: direct) { return winner }
+        if !direct.isEmpty {
+            let maximum = direct.values.max()!
+            let tied = Set(direct.filter { $0.value == maximum }.map(\.key))
+            let overlap = tied.intersection(lector.keys)
+            if overlap.count == 1 { return overlap.first }
+            let lectorAmongTied = lector.filter { tied.contains($0.key) }
+            return uniqueWinner(in: lectorAmongTied)
+        }
+        return uniqueWinner(in: lector)
+    }
+
+    private static func collapsingAdjectiveAndAdverb(
+        _ counts: [WordKind: Int]
+    ) -> [WordKind: Int] {
+        guard counts[.adjective] != nil else { return counts }
+        var result = counts
+        result[.adjective, default: 0] += result.removeValue(forKey: .adverb) ?? 0
+        return result
+    }
+
+    private static func uniqueWinner<Key: Hashable>(in counts: [Key: Int]) -> Key? {
+        guard let maximum = counts.values.max() else { return nil }
+        let winners = counts.filter { $0.value == maximum }.map(\.key)
+        return winners.count == 1 ? winners[0] : nil
     }
 }
 
@@ -2117,6 +2446,11 @@ private struct DictionaryInflectionSearchLink: Equatable {
     let lemmaKey: String
     let searchTerm: String
     let kind: WordKind
+    let tags: Set<String>
+
+    var isDegree: Bool {
+        tags.contains("comparative") || tags.contains("superlative")
+    }
 }
 
 private struct DictionaryFormat {
@@ -2151,10 +2485,98 @@ private func wordKind(forLectorPartOfSpeech value: String) -> WordKind {
 }
 
 private func dictionaryGroupingTerm(_ value: String) -> String {
-    value
+    let term = value
         .precomposedStringWithCanonicalMapping
         .lowercased(with: Locale(identifier: "de_DE"))
         .trimmingCharacters(in: .whitespacesAndNewlines)
+    for prefix in dictionaryValencyPrefixes where term.hasPrefix(prefix) {
+        let remainder = String(term.dropFirst(prefix.count))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if !remainder.isEmpty, !remainder.contains(where: { $0.isWhitespace }) {
+            return remainder
+        }
+    }
+    return term
+}
+
+private let dictionaryValencyPrefixes = [
+    "jdn./etw. ", "jdm./etw. ", "(jdn./etw.) ",
+    "jdn. ", "jdm. ", "etw. ", "(jdn.) ", "(jdm.) ", "(etw.) "
+]
+
+private func dictionaryGroupingSpellings(for groupingTerm: String) -> [String] {
+    [groupingTerm] + dictionaryValencyPrefixes.map { $0 + groupingTerm }
+}
+
+private func dictionaryCanonicalEntrySortsBefore(
+    _ lhs: DictionaryEntry,
+    _ rhs: DictionaryEntry
+) -> Bool {
+    let lhsPlural = lhs.gender == .plural
+    let rhsPlural = rhs.gender == .plural
+    if lhsPlural != rhsPlural { return !lhsPlural }
+    let groupTerm = dictionaryGroupingTerm(lhs.german)
+    let lhsBare = lhs.german.precomposedStringWithCanonicalMapping
+        .lowercased(with: Locale(identifier: "de_DE")) == groupTerm
+    let rhsBare = rhs.german.precomposedStringWithCanonicalMapping
+        .lowercased(with: Locale(identifier: "de_DE")) == groupTerm
+    if lhsBare != rhsBare { return lhsBare }
+    let lhsLanguage = lhs.meanings.first?.language ?? .english
+    let rhsLanguage = rhs.meanings.first?.language ?? .english
+    if lhsLanguage != rhsLanguage { return lhsLanguage == .english }
+    return lhs.id < rhs.id
+}
+
+private func dictionaryEvidenceKind(for entry: DictionaryEntry) -> WordKind {
+    dictionaryEvidenceKind(
+        storedKind: entry.kind,
+        rawGerman: entry.rawGerman,
+        rawEnglish: entry.rawEnglish,
+        grammar: entry.meanings.first?.grammar,
+        language: entry.meanings.first?.language ?? .english
+    )
+}
+
+private func dictionaryEvidenceKind(
+    storedKind: WordKind,
+    rawGerman: String,
+    rawEnglish: String,
+    grammar: String?,
+    language: TranslationLanguage
+) -> WordKind {
+    guard storedKind == .verb,
+          language == .english,
+          (grammar ?? "").isEmpty,
+          !DictCCParser.hasGermanVerbMarker(rawGerman),
+          !DictCCParser.looksLikeEnglishInfinitive(rawEnglish) else {
+        return storedKind
+    }
+    return DictCCParser.cleanedTerm(rawGerman).contains(where: { $0.isWhitespace })
+        ? .phrase
+        : .other
+}
+
+private extension DictionaryEntry {
+    func reclassified(kind: WordKind, gender: Gender) -> DictionaryEntry {
+        DictionaryEntry(
+            id: id,
+            german: german,
+            english: english,
+            rawGerman: rawGerman,
+            rawEnglish: rawEnglish,
+            kind: kind,
+            gender: gender,
+            usage: usage,
+            source: source,
+            pluralForms: pluralForms,
+            meanings: meanings,
+            explanations: explanations,
+            forms: forms,
+            ipa: ipa,
+            etymology: etymology,
+            relatedForms: relatedForms
+        )
+    }
 }
 
 private func lectorTags(_ value: String) -> Set<String> {

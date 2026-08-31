@@ -110,6 +110,20 @@ struct PartOfSpeechBadge: View {
     }
 }
 
+struct TranslationResultBadge: View {
+    var body: some View {
+        Label("Translation", systemImage: "translate")
+            .labelStyle(.titleAndIcon)
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(.blue)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(.blue.opacity(0.12), in: Capsule())
+            .accessibilityLabel("Apple on-device translation")
+            .accessibilityIdentifier("entry.translation-result")
+    }
+}
+
 struct GermanWordView: View {
     let entry: DictionaryEntry
     var font: Font = .headline
@@ -187,6 +201,9 @@ struct EntryRow: View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 7) {
                 GermanWordView(entry: entry)
+                if entry.isAppleTranslation {
+                    TranslationResultBadge()
+                }
                 PartOfSpeechBadge(kind: entry.kind)
             }
 
@@ -268,6 +285,7 @@ struct EntryDetailView: View {
     var addedListID: WordList.ID?
     var isShowingListSelection: Binding<Bool>?
     var switchAddedListAction: (@MainActor (WordList.ID) async -> Bool)?
+    var createAndSwitchAddedListAction: (@MainActor (String) async -> Bool)?
     var didFinishListSelection: (() -> Void)?
     var addAction: (() -> Void)?
 
@@ -289,6 +307,9 @@ struct EntryDetailView: View {
                                 .lineLimit(1)
                                 .layoutPriority(1)
                                 .accessibilityIdentifier("entry.word")
+                            if entry.isAppleTranslation {
+                                TranslationResultBadge()
+                            }
                             PartOfSpeechBadge(kind: entry.kind)
                                 .fixedSize()
                         }
@@ -299,59 +320,48 @@ struct EntryDetailView: View {
                         if let addedListID,
                            let addedList = wordLists.first(where: { $0.id == addedListID }),
                            let switchAddedListAction {
-                            if hasAlternativeList(to: addedListID) {
-                                Button {
-                                    listSelectionBinding.wrappedValue = true
-                                } label: {
-                                    HStack(spacing: 8) {
-                                        Label(addedList.name, systemImage: "checkmark.circle.fill")
-                                        if isShowingListSelection != nil {
-                                            KeyboardShortcutHint(.init(chords: [.init(.right)]))
-                                                .accessibilityHidden(true)
-                                        } else {
-                                            Image(systemName: "chevron.down")
-                                                .accessibilityHidden(true)
-                                        }
+                            Button {
+                                listSelectionBinding.wrappedValue = true
+                            } label: {
+                                HStack(spacing: 8) {
+                                    Label(addedList.name, systemImage: "checkmark.circle.fill")
+                                    if isShowingListSelection != nil {
+                                        KeyboardShortcutHint(.init(chords: [.init(.right)]))
+                                            .accessibilityHidden(true)
+                                    } else {
+                                        Image(systemName: "chevron.down")
+                                            .accessibilityHidden(true)
                                     }
-                                    .lineLimit(1)
                                 }
-                                .buttonStyle(.bordered)
-                                .accessibilityLabel("Added to \(addedList.name)")
-                                .accessibilityIdentifier("\(addAccessibilityIdentifier).list")
-                                .accessibilityHint(
-                                    isShowingListSelection == nil
-                                        ? "Choose another list"
-                                        : "Press Right Arrow from the recorded words to choose another list"
+                                .lineLimit(1)
+                            }
+                            .buttonStyle(.bordered)
+                            .accessibilityLabel("Added to \(addedList.name)")
+                            .accessibilityIdentifier("\(addAccessibilityIdentifier).list")
+                            .accessibilityHint(
+                                isShowingListSelection == nil
+                                    ? "Choose or create another list"
+                                    : "Press Right Arrow from the recorded words to choose or create another list"
+                            )
+                            .fixedSize()
+                            .popover(isPresented: listSelectionBinding, arrowEdge: .trailing) {
+                                AddedWordListSelection(
+                                    wordLists: wordLists,
+                                    initialListID: addedListID,
+                                    confirm: { destinationListID in
+                                        guard destinationListID != addedListID else { return true }
+                                        return await switchAddedListAction(destinationListID)
+                                    },
+                                    createAndConfirm: createAndSwitchAddedListAction,
+                                    finish: {
+                                        listSelectionBinding.wrappedValue = false
+                                        didFinishListSelection?()
+                                    },
+                                    cancel: {
+                                        listSelectionBinding.wrappedValue = false
+                                        didFinishListSelection?()
+                                    }
                                 )
-                                .fixedSize()
-                                .popover(isPresented: listSelectionBinding, arrowEdge: .trailing) {
-                                    AddedWordListSelection(
-                                        wordLists: wordLists,
-                                        initialListID: addedListID,
-                                        confirm: { destinationListID in
-                                            guard destinationListID != addedListID else { return true }
-                                            return await switchAddedListAction(destinationListID)
-                                        },
-                                        finish: {
-                                            listSelectionBinding.wrappedValue = false
-                                            didFinishListSelection?()
-                                        },
-                                        cancel: {
-                                            listSelectionBinding.wrappedValue = false
-                                            didFinishListSelection?()
-                                        }
-                                    )
-                                }
-                            } else {
-                                Label(addedList.name, systemImage: "checkmark.circle.fill")
-                                    .lineLimit(1)
-                                    .padding(.horizontal, 12)
-                                    .padding(.vertical, 7)
-                                    .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
-                                    .accessibilityLabel("Added to \(addedList.name)")
-                                    .accessibilityIdentifier("\(addAccessibilityIdentifier).list")
-                                    .accessibilityHint("This is the only list")
-                                    .fixedSize()
                             }
                         } else if let addAction {
                             Button(action: addAction) {
@@ -436,10 +446,6 @@ struct EntryDetailView: View {
         default:
             "Forms generated using regular grammar rules."
         }
-    }
-
-    private func hasAlternativeList(to listID: WordList.ID) -> Bool {
-        wordLists.contains(where: { $0.id != listID })
     }
 
     private var meanings: some View {
@@ -710,24 +716,34 @@ struct EntryDetailView: View {
 }
 
 private struct AddedWordListSelection: View {
+    private enum FocusedControl: Hashable {
+        case list
+        case newListName
+    }
+
     let wordLists: [WordList]
     let confirm: @MainActor (WordList.ID) async -> Bool
+    let createAndConfirm: (@MainActor (String) async -> Bool)?
     let finish: () -> Void
     let cancel: () -> Void
 
     @State private var selectedListID: WordList.ID
+    @State private var isCreatingList = false
+    @State private var newListName = ""
     @State private var confirmationTask: Task<Void, Never>?
-    @FocusState private var listFocused: Bool
+    @FocusState private var focusedControl: FocusedControl?
 
     init(
         wordLists: [WordList],
         initialListID: WordList.ID,
         confirm: @escaping @MainActor (WordList.ID) async -> Bool,
+        createAndConfirm: (@MainActor (String) async -> Bool)?,
         finish: @escaping () -> Void,
         cancel: @escaping () -> Void
     ) {
         self.wordLists = wordLists
         self.confirm = confirm
+        self.createAndConfirm = createAndConfirm
         self.finish = finish
         self.cancel = cancel
         _selectedListID = State(initialValue: initialListID)
@@ -744,32 +760,81 @@ private struct AddedWordListSelection: View {
                         .controlSize(.small)
                 }
             }
-            List(wordLists, selection: $selectedListID) { list in
-                Text(list.name)
-                    .tag(list.id)
-            }
-            .disabled(confirmationTask != nil)
-            .focused($listFocused)
-            .onMoveCommand(perform: moveSelection)
-            .onKeyPress(.return) {
-                beginConfirmation()
-                return .handled
-            }
-            .onExitCommand {
-                guard confirmationTask == nil else { return }
-                cancel()
+            if isCreatingList {
+                TextField("List name", text: $newListName)
+                    .textFieldStyle(.roundedBorder)
+                    .disabled(confirmationTask != nil)
+                    .focused($focusedControl, equals: .newListName)
+                    .onSubmit(beginCreation)
+                    .onExitCommand(perform: cancelCreation)
+                    .accessibilityIdentifier("entry.list-selection.name")
+
+                HStack {
+                    Button("Cancel", action: cancelCreation)
+                        .keyboardShortcut(.cancelAction)
+                    Spacer()
+                    Button("Create and Move", action: beginCreation)
+                        .buttonStyle(.borderedProminent)
+                        .keyboardShortcut(.defaultAction)
+                        .disabled(trimmedNewListName.isEmpty || confirmationTask != nil)
+                        .accessibilityIdentifier("entry.list-selection.create")
+                }
+            } else {
+                List(wordLists, selection: $selectedListID) { list in
+                    Text(list.name)
+                        .tag(list.id)
+                }
+                .disabled(confirmationTask != nil)
+                .focused($focusedControl, equals: .list)
+                .onMoveCommand(perform: moveSelection)
+                .onKeyPress(.return) {
+                    beginConfirmation()
+                    return .handled
+                }
+                .onExitCommand {
+                    guard confirmationTask == nil else { return }
+                    cancel()
+                }
+
+                if createAndConfirm != nil {
+                    Button(action: beginCreatingList) {
+                        Label("New list", systemImage: "plus")
+                    }
+                    .disabled(confirmationTask != nil)
+                    .accessibilityIdentifier("entry.list-selection.new-list")
+                }
             }
         }
         .padding(12)
-        .frame(width: 240, height: min(CGFloat(wordLists.count) * 28 + 66, 260))
+        .frame(
+            width: 260,
+            height: isCreatingList ? 130 : min(CGFloat(wordLists.count) * 28 + 108, 300)
+        )
         .accessibilityIdentifier("entry.list-selection")
         .onAppear {
-            DispatchQueue.main.async { listFocused = true }
+            DispatchQueue.main.async { focusedControl = .list }
         }
         .onDisappear {
             confirmationTask?.cancel()
             confirmationTask = nil
         }
+    }
+
+    private var trimmedNewListName: String {
+        newListName.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func beginCreatingList() {
+        guard confirmationTask == nil, createAndConfirm != nil else { return }
+        isCreatingList = true
+        DispatchQueue.main.async { focusedControl = .newListName }
+    }
+
+    private func cancelCreation() {
+        guard confirmationTask == nil else { return }
+        newListName = ""
+        isCreatingList = false
+        DispatchQueue.main.async { focusedControl = .list }
     }
 
     private func moveSelection(_ direction: MoveCommandDirection) {
@@ -790,6 +855,20 @@ private struct AddedWordListSelection: View {
         let destinationListID = selectedListID
         confirmationTask = Task { @MainActor in
             let didConfirm = await confirm(destinationListID)
+            guard !Task.isCancelled else { return }
+            confirmationTask = nil
+            if didConfirm { finish() }
+        }
+    }
+
+    private func beginCreation() {
+        guard confirmationTask == nil,
+              !trimmedNewListName.isEmpty,
+              let createAndConfirm
+        else { return }
+        let name = trimmedNewListName
+        confirmationTask = Task { @MainActor in
+            let didConfirm = await createAndConfirm(name)
             guard !Task.isCancelled else { return }
             confirmationTask = nil
             if didConfirm { finish() }
@@ -987,7 +1066,7 @@ struct AppShortcut: Identifiable {
     let action: String
 
     static let all: [AppShortcut] = [
-        .init(id: "global.routes", group: .global, shortcut: .init(chords: [.init(.command, .digit(1)), .init(.command, .digit(5))], separator: .range), action: "Open Dictionary, Review, My Words, Sentences, or Settings"),
+        .init(id: "global.routes", group: .global, shortcut: .init(chords: [.init(.command, .digit(1)), .init(.command, .digit(5))], separator: .range), action: "Select and focus Dictionary, Review, My Words, Sentences, or Settings in the sidebar"),
         .init(id: "global.settings", group: .global, shortcut: .init(chords: [.init(.command, .comma)]), action: "Open Settings"),
         .init(id: "global.find", group: .global, shortcut: .commandF, action: "Focus search in Dictionary or My Words; open Dictionary elsewhere"),
         .init(id: "global.help", group: .global, shortcut: .init(chords: [.init(.command, .slash), .init(.command, .questionMark)], separator: .alternatives), action: "Show this keyboard shortcut reference"),

@@ -10,6 +10,7 @@ struct ReviewView: View {
     let automaticallyFocusContent: Bool
 
     private enum FocusedAction: Hashable {
+        case carousel
         case reveal
         case rating(Int)
         case restart
@@ -135,6 +136,14 @@ struct ReviewView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
+        .background {
+            Color.clear
+                .frame(width: 1, height: 1)
+                .focusable()
+                .focused($focusedAction, equals: .carousel)
+                .focusEffectDisabled()
+                .accessibilityHidden(true)
+        }
         .navigationTitle("Review")
         .onAppear {
             Task { await state.refreshStudyData() }
@@ -142,6 +151,9 @@ struct ReviewView: View {
             if automaticallyFocusContent { focusPrimaryAction() }
         }
         .onDisappear { state.stopPreparingReviewTranslations() }
+        .onReceive(NotificationCenter.default.publisher(for: .focusReviewContent)) { _ in
+            focusCarousel()
+        }
         .onChange(of: current?.id) { _, _ in
             revealed = false
             resetTranslations(for: current)
@@ -222,6 +234,8 @@ struct ReviewView: View {
         .frame(height: 250)
         .clipped()
         .textSelection(.enabled)
+        .contentShape(Rectangle())
+        .simultaneousGesture(TapGesture().onEnded(focusCarousel))
     }
 
     private var carouselWords: [CarouselWord] {
@@ -470,10 +484,33 @@ struct ReviewView: View {
     }
 
     private func focusPrimaryAction() {
+        let action: FocusedAction
+        if current == nil {
+            action = .restart
+        } else if revealed {
+            action = .rating(ReviewRating.allCases.first?.rawValue ?? 1)
+        } else {
+            action = .reveal
+        }
+
+        focusedAction = nil
         DispatchQueue.main.async {
-            focusedAction = current == nil ? .restart : .reveal
+            focusedAction = action
         }
     }
+
+    private func focusCarousel() {
+        guard current != nil else {
+            focusPrimaryAction()
+            return
+        }
+        focusedAction = nil
+        DispatchQueue.main.async { focusedAction = .carousel }
+    }
+}
+
+extension Notification.Name {
+    static let focusReviewContent = Notification.Name("focusReviewContent")
 }
 
 struct ReviewTranslationCarousel: Equatable {

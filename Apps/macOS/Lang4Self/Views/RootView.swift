@@ -89,6 +89,13 @@ struct RootView: View {
         .onReceive(NotificationCenter.default.publisher(for: .showKeyboardShortcuts)) { _ in
             state.isShowingKeyboardShortcuts = true
         }
+        .onReceive(NotificationCenter.default.publisher(for: .focusSidebar)) { _ in
+            sidebarFocused = true
+            DispatchQueue.main.async {
+                sidebarFocused = false
+                DispatchQueue.main.async { sidebarFocused = true }
+            }
+        }
         .overlay(alignment: .topLeading) {
             if state.isUITestSession, state.isBootstrapComplete {
                 Color.clear
@@ -129,7 +136,9 @@ struct RootView: View {
             notification = .focusLibraryContent
         case .sentences:
             notification = .focusSentenceContent
-        case .review, .settings:
+        case .review:
+            notification = .focusReviewContent
+        case .settings:
             notification = nil
         }
 
@@ -143,4 +152,5 @@ struct RootView: View {
 
 extension Notification.Name {
     static let showKeyboardShortcuts = Notification.Name("showKeyboardShortcuts")
+    static let focusSidebar = Notification.Name("focusSidebar")
 }
