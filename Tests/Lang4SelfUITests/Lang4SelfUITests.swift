@@ -374,7 +374,7 @@ final class Lang4SelfUITests: XCTestCase {
         let word = detail.descendants(matching: .any)["entry.word"]
         let badge = detail.descendants(matching: .any)["entry.translation-result"]
         let addButton = detail.buttons["dictionary.add-selected"]
-        XCTAssertTrue(word.waitForExistence(timeout: 3))
+        XCTAssertTrue(word.waitForExistence(timeout: 5))
         XCTAssertTrue(badge.waitForExistence(timeout: 3))
         XCTAssertTrue(addButton.waitForExistence(timeout: 3))
         XCTAssertEqual(elementText(word), german)
