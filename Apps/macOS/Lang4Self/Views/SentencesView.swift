@@ -670,8 +670,7 @@ private struct SentenceInspector: View {
                         let isSelected = selectedTokenIndices.contains(token.index)
                         Button {
                             selectedTokenIndex = offset
-                            focusedTokenIndex = nil
-                            DispatchQueue.main.async { focusedTokenIndex = offset }
+                            focusedTokenIndex = offset
                         } label: {
                             Text(token.surface)
                                 .font(.title2)

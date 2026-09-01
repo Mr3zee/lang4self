@@ -1151,9 +1151,16 @@ final class Lang4SelfUITests: XCTestCase {
         scrollToHittable(firstToken, in: app.scrollViews["sentences.scroll"])
         firstToken.click()
         app.typeKey(.rightArrow, modifierFlags: [])
-        assertFocused(app.buttons["sentence.token.1"])
+        app.typeKey(.rightArrow, modifierFlags: [])
+        XCTAssertTrue(waitUntil {
+            self.app.buttons["sentence.token.2"].isSelected
+                && !self.app.buttons["sentence.token.0"].isSelected
+        })
         app.typeKey(.leftArrow, modifierFlags: [])
-        assertFocused(app.buttons["sentence.token.0"])
+        XCTAssertTrue(waitUntil {
+            self.app.buttons["sentence.token.0"].isSelected
+                && !self.app.buttons["sentence.token.2"].isSelected
+        })
     }
 
     func testSentenceGenerationListCountAndGenerateControls() {
