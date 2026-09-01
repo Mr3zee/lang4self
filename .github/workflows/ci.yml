@@ -22,6 +22,15 @@ jobs:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
+      - name: Identify Xcode toolchain
+        id: toolchain
+        run: echo "cache-key=$(xcodebuild -version | shasum -a 256 | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+      - name: Restore SwiftPM build cache
+        uses: actions/cache@v4
+        continue-on-error: true
+        with:
+          path: .build
+          key: swiftpm-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.cache-key }}-${{ hashFiles('Package.resolved') }}
       - name: Check for private dictionary data
         run: ./scripts/check-public-data.sh
       - name: Run Swift tests
@@ -48,6 +57,16 @@ jobs:
       UI_TEST_SHARD_INDEX: ${{ matrix.shard_index }}
     steps:
       - uses: actions/checkout@v5
+      - name: Identify Xcode toolchain
+        id: toolchain
+        run: echo "cache-key=$(xcodebuild -version | shasum -a 256 | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+      - name: Restore Xcode build cache
+        id: xcode-cache
+        uses: actions/cache/restore@v4
+        continue-on-error: true
+        with:
+          path: ~/Library/Developer/Xcode/DerivedData/Lang4Self-*
+          key: xcode-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.cache-key }}-${{ hashFiles('Lang4Self.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}
       - name: Run UI tests
         run: |
           test_arguments=()
@@ -67,6 +86,13 @@ jobs:
             -resultBundlePath "TestResults-${{ matrix.shard_name }}.xcresult" \
             "${test_arguments[@]}" \
             test
+      - name: Save Xcode build cache
+        if: ${{ success() && steps.xcode-cache.outputs.cache-hit != 'true' && matrix.shard_index == 0 }}
+        uses: actions/cache/save@v4
+        continue-on-error: true
+        with:
+          path: ~/Library/Developer/Xcode/DerivedData/Lang4Self-*
+          key: xcode-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.cache-key }}-${{ hashFiles('Lang4Self.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}
       - name: Upload test results
         if: failure()
         uses: actions/upload-artifact@v6
