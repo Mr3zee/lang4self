@@ -55,7 +55,11 @@ struct ReviewView: View {
     @State private var answerWasCorrect: Bool?
     @State private var translations = ReviewTranslationCarousel()
     @State private var carouselWordIDs = CarouselWordIDs()
+    @State private var sentenceFocusRequest = 0
+    @State private var sentenceSelectionRequest = 0
+    @State private var sentenceSelectionOffset = 0
     @FocusState private var focusedAction: FocusedAction?
+    @FocusState private var sentenceInspectorFocused: Bool
     let automaticallyFocusContent: Bool
 
     private enum FocusedAction: Hashable {
@@ -153,8 +157,19 @@ struct ReviewView: View {
                 if mode.isSentenceMode {
                     SentenceReviewView(
                         automaticallyFocusContent: automaticallyFocusContent,
-                        forcedTestMode: mode == .listeningSentences ? .listening : nil
+                        forcedTestMode: mode == .listeningSentences ? .listening : nil,
+                        focusRequest: sentenceFocusRequest,
+                        selectionRequest: sentenceSelectionRequest,
+                        selectionOffset: sentenceSelectionOffset,
+                        inspectorFocused: $sentenceInspectorFocused
                     )
+                    Color.clear
+                        .frame(width: 1, height: 1)
+                        .focusable()
+                        .focused($sentenceInspectorFocused)
+                        .focusEffectDisabled()
+                        .accessibilityHidden(true)
+                        .onMoveCommand(perform: moveSentenceSelection)
                 } else if let card = current {
                     VStack(spacing: 0) {
                         VStack(spacing: 24) {
@@ -238,7 +253,15 @@ struct ReviewView: View {
             mode = mode.advanced(by: 1)
         }
         .onReceive(NotificationCenter.default.publisher(for: .focusReviewContent)) { _ in
-            if !mode.isSentenceMode { focusCarousel() }
+            if mode.isSentenceMode {
+                if state.sentencePractice.result == nil {
+                    sentenceFocusRequest += 1
+                } else {
+                    focusSentenceInspector()
+                }
+            } else {
+                focusCarousel()
+            }
         }
         .onChange(of: current?.id) { _, _ in
             resetResponse()
@@ -250,7 +273,12 @@ struct ReviewView: View {
             resetResponse()
             resetTranslations(for: current)
             updateGermanSpeechTarget()
-            focusPrimaryAction()
+            if mode.isSentenceMode {
+                focusedAction = nil
+                sentenceInspectorFocused = false
+            } else {
+                focusPrimaryAction()
+            }
         }
         .onChange(of: state.reviewDictionaryMeanings) { _, meanings in
             guard let card = current,
@@ -950,6 +978,24 @@ struct ReviewView: View {
         }
         focusedAction = nil
         DispatchQueue.main.async { focusedAction = .carousel }
+    }
+
+    private func focusSentenceInspector() {
+        focusedAction = nil
+        sentenceInspectorFocused = false
+        DispatchQueue.main.async { sentenceInspectorFocused = true }
+    }
+
+    private func moveSentenceSelection(_ direction: MoveCommandDirection) {
+        switch direction {
+        case .left, .up:
+            sentenceSelectionOffset = -1
+        case .right, .down:
+            sentenceSelectionOffset = 1
+        @unknown default:
+            return
+        }
+        sentenceSelectionRequest += 1
     }
 
     private var primaryFocusedAction: FocusedAction {

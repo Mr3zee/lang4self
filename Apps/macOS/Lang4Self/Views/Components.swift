@@ -1104,7 +1104,6 @@ private struct AddedWordListSelection: View {
             width: 260,
             height: isCreatingList ? 130 : min(CGFloat(wordLists.count) * 28 + 108, 300)
         )
-        .accessibilityIdentifier("entry.list-selection")
         .onAppear {
             DispatchQueue.main.async { focusedControl = .list }
         }

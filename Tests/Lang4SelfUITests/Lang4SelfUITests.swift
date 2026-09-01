@@ -42,9 +42,10 @@ final class Lang4SelfUITests: XCTestCase {
 
     func testDefaultWindowSizeMatchesCurrentAppWindow() {
         let frame = app.windows.firstMatch.frame
+        let visibleFrame = NSScreen.main?.visibleFrame ?? frame
 
-        XCTAssertEqual(frame.width, 1_121, accuracy: 1)
-        XCTAssertEqual(frame.height, 939, accuracy: 1)
+        XCTAssertEqual(frame.width, min(1_121, visibleFrame.width), accuracy: 1)
+        XCTAssertEqual(frame.height, min(939, visibleFrame.height), accuracy: 1)
     }
 
     func testGlobalNavigationFindSettingsAndShortcutReference() {
@@ -139,7 +140,7 @@ final class Lang4SelfUITests: XCTestCase {
         assertFocused(element("library.cards"))
         XCTAssertTrue(waitUntil { self.app.buttons["library.edit-card"].label == "Edit notes for Haus" })
 
-        app.staticTexts["lernen"].click()
+        labeledElement("lernen", in: element("library.cards")).click()
         XCTAssertTrue(waitUntil { self.app.buttons["library.edit-card"].label == "Edit notes for lernen" })
         element("sidebar.library").click()
         app.typeKey(.return, modifierFlags: [])
@@ -161,10 +162,16 @@ final class Lang4SelfUITests: XCTestCase {
         app.typeText("Haus")
         app.typeKey(.return, modifierFlags: [])
         XCTAssertTrue(element("sentences.revealed").waitForExistence(timeout: 3))
+        scrollToHittable(app.buttons["sentence.token.0"], in: app.scrollViews["sentences.scroll"])
 
         element("sidebar.review").click()
         app.typeKey(.return, modifierFlags: [])
-        assertFocused(app.buttons["sentence.token.0"])
+        app.typeKey(.rightArrow, modifierFlags: [])
+        app.typeKey(.rightArrow, modifierFlags: [])
+        XCTAssertTrue(waitUntil {
+            self.app.buttons["sentence.token.2"].isSelected
+                && !self.app.buttons["sentence.token.0"].isSelected
+        })
 
         element("sidebar.settings").click()
         assertFocused(sidebar)
@@ -221,7 +228,7 @@ final class Lang4SelfUITests: XCTestCase {
         assertFocused(app.textFields["dictionary.search"])
 
         app.typeText("lernen")
-        XCTAssertTrue(app.staticTexts["lernen"].waitForExistence(timeout: 3))
+        XCTAssertTrue(labeledElement("lernen").waitForExistence(timeout: 3))
         app.typeKey(.downArrow, modifierFlags: [])
         XCTAssertTrue(app.buttons["dictionary.add-selected"].waitForExistence(timeout: 3))
 
@@ -254,8 +261,8 @@ final class Lang4SelfUITests: XCTestCase {
                 == "Pronunciation target: \(displayedSentence)"
         }, "Unexpected target: \(elementText(element("speech.target")))")
 
-        let sentenceToken = element("sentence.token.1")
-        XCTAssertTrue(sentenceToken.waitForExistence(timeout: 3))
+        let sentenceToken = app.buttons["sentence.token.1"]
+        scrollToHittable(sentenceToken, in: app.scrollViews["sentences.scroll"])
         sentenceToken.click()
         XCTAssertEqual(
             elementText(element("speech.target")),
@@ -389,20 +396,21 @@ final class Lang4SelfUITests: XCTestCase {
         XCTAssertTrue(app.buttons["banner.dismiss"].waitForExistence(timeout: 3))
 
         openLibrary()
-        XCTAssertTrue(app.staticTexts["Mädchen"].waitForExistence(timeout: 3))
+        let addedCard = labeledElement("Mädchen", in: element("library.cards"))
+        XCTAssertTrue(addedCard.waitForExistence(timeout: 3))
 
         app.typeKey("z", modifierFlags: .command)
-        XCTAssertTrue(app.staticTexts["Mädchen"].waitForNonExistence(timeout: 3))
+        XCTAssertTrue(addedCard.waitForNonExistence(timeout: 3))
 
         app.typeKey("z", modifierFlags: [.command, .shift])
-        XCTAssertTrue(app.staticTexts["Mädchen"].waitForExistence(timeout: 3))
+        XCTAssertTrue(addedCard.waitForExistence(timeout: 3))
 
-        element("library.cards").staticTexts["Mädchen"].click()
+        addedCard.click()
         app.typeKey(.delete, modifierFlags: [])
-        XCTAssertTrue(app.staticTexts["Mädchen"].waitForNonExistence(timeout: 3))
+        XCTAssertTrue(addedCard.waitForNonExistence(timeout: 3))
 
         app.typeKey("z", modifierFlags: .command)
-        XCTAssertTrue(app.staticTexts["Mädchen"].waitForExistence(timeout: 3))
+        XCTAssertTrue(addedCard.waitForExistence(timeout: 3))
 
         openSentenceReview()
         XCTAssertTrue(element("sentences.retry-count").waitForExistence(timeout: 3))
@@ -414,7 +422,7 @@ final class Lang4SelfUITests: XCTestCase {
         assertFocused(search)
         search.typeText("to learn")
         XCTAssertEqual(search.value as? String, "to learn")
-        XCTAssertTrue(app.staticTexts["lernen"].waitForExistence(timeout: 3))
+        XCTAssertTrue(labeledElement("lernen").waitForExistence(timeout: 3))
 
         app.typeKey(.space, modifierFlags: [])
         XCTAssertEqual(search.value as? String, "to learn ")
@@ -434,7 +442,7 @@ final class Lang4SelfUITests: XCTestCase {
         XCTAssertTrue(results.waitForExistence(timeout: 3))
         assertFocused(results)
         XCTAssertTrue(app.staticTexts["Hund"].waitForExistence(timeout: 3))
-        XCTAssertTrue(app.staticTexts["Hunde"].waitForExistence(timeout: 3))
+        XCTAssertTrue(labeledElement("Hunde").waitForExistence(timeout: 3))
         XCTAssertTrue(app.buttons["dictionary.add-selected"].waitForExistence(timeout: 3))
     }
 
@@ -548,7 +556,7 @@ final class Lang4SelfUITests: XCTestCase {
 
         let detail = element("entry.detail")
         XCTAssertTrue(detail.waitForExistence(timeout: 3))
-        XCTAssertTrue(detail.staticTexts["ich"].exists)
+        XCTAssertEqual(elementText(element("entry.word")), "ich")
         XCTAssertTrue(detail.staticTexts["I"].exists)
         XCTAssertTrue(detail.staticTexts["me"].exists)
         XCTAssertFalse(detail.staticTexts["I; me"].exists)
@@ -1026,7 +1034,7 @@ final class Lang4SelfUITests: XCTestCase {
         element("library.list-actions").click()
         app.menuItems["Delete List…"].click()
         app.sheets.firstMatch.buttons["Delete List"].click()
-        XCTAssertTrue(app.staticTexts["Haus"].waitForExistence(timeout: 3))
+        XCTAssertTrue(labeledElement("Haus", in: element("library.cards")).waitForExistence(timeout: 3))
     }
 
     func testCreatesNewTargetListWhileChangingAnAddedWordList() {
@@ -1052,7 +1060,7 @@ final class Lang4SelfUITests: XCTestCase {
 
         XCTAssertTrue(waitUntil { addedListButton.label == "Added to Favorites" })
         openRoute("3", route: "library")
-        XCTAssertTrue(app.staticTexts["Mädchen"].waitForExistence(timeout: 3))
+        XCTAssertTrue(labeledElement("Mädchen", in: element("library.cards")).waitForExistence(timeout: 3))
         element("library.list-picker").click()
         XCTAssertTrue(app.menuItems["Favorites"].exists)
     }
@@ -1080,7 +1088,7 @@ final class Lang4SelfUITests: XCTestCase {
         assertFocused(element("library.cards"))
         waitForUIToSettle()
 
-        app.staticTexts["lernen"].click()
+        labeledElement("lernen", in: element("library.cards")).click()
         XCTAssertTrue(
             waitUntil { self.app.buttons["library.edit-card"].label == "Edit notes for lernen" },
             "Selecting lernen did not update the detail"
@@ -1093,15 +1101,16 @@ final class Lang4SelfUITests: XCTestCase {
 
         element("library.list-picker").click()
         app.menuItems["Travel"].click()
-        XCTAssertTrue(app.staticTexts["lernen"].waitForExistence(timeout: 3))
-        element("library.cards").staticTexts["lernen"].click()
+        let lernenCard = labeledElement("lernen", in: element("library.cards"))
+        XCTAssertTrue(lernenCard.waitForExistence(timeout: 3))
+        lernenCard.click()
         element("library.more-actions").click()
         app.menuItems["Remove from List"].click()
-        XCTAssertTrue(app.staticTexts["lernen"].waitForNonExistence(timeout: 3))
+        XCTAssertTrue(lernenCard.waitForNonExistence(timeout: 3))
 
         element("library.list-picker").click()
         element("library.list-picker").menuItems["My words"].click()
-        XCTAssertTrue(app.staticTexts["lernen"].waitForExistence(timeout: 3))
+        XCTAssertTrue(lernenCard.waitForExistence(timeout: 3))
     }
 
     func testAllVisibleCardActionsAndKeyboardDelete() {
@@ -1127,8 +1136,8 @@ final class Lang4SelfUITests: XCTestCase {
         app.typeKey(.escape, modifierFlags: [])
 
         app.typeKey(.delete, modifierFlags: [])
-        XCTAssertTrue(app.staticTexts["Haus"].waitForNonExistence(timeout: 3))
-        XCTAssertTrue(app.staticTexts["lernen"].exists)
+        XCTAssertTrue(labeledElement("Haus", in: element("library.cards")).waitForNonExistence(timeout: 3))
+        XCTAssertTrue(labeledElement("lernen", in: element("library.cards")).exists)
     }
 
     func testSentenceAnswerRevealAndTokenFocus() {
@@ -1138,13 +1147,13 @@ final class Lang4SelfUITests: XCTestCase {
         assertFocused(answer)
         answer.typeText("Haus")
         app.typeKey(.return, modifierFlags: [])
-        let firstToken = element("sentence.token.0")
-        scrollToHittable(firstToken, in: element("sentences.scroll"))
+        let firstToken = app.buttons["sentence.token.0"]
+        scrollToHittable(firstToken, in: app.scrollViews["sentences.scroll"])
         firstToken.click()
         app.typeKey(.rightArrow, modifierFlags: [])
-        assertFocused(element("sentence.token.1"))
+        assertFocused(app.buttons["sentence.token.1"])
         app.typeKey(.leftArrow, modifierFlags: [])
-        assertFocused(element("sentence.token.0"))
+        assertFocused(app.buttons["sentence.token.0"])
     }
 
     func testSentenceGenerationListCountAndGenerateControls() {
@@ -1205,19 +1214,19 @@ final class Lang4SelfUITests: XCTestCase {
         app.textFields["sentences.answer"].typeText("Das Blatt fällt ab.")
         app.buttons["sentences.check"].click()
 
-        scrollToHittable(element("sentence.token.0"), in: element("sentences.scroll"))
+        scrollToHittable(app.buttons["sentence.token.0"], in: app.scrollViews["sentences.scroll"])
 
         let initialTokenCenters = (0...3).map { index in
-            let frame = element("sentence.token.\(index)").frame
+            let frame = app.buttons["sentence.token.\(index)"].frame
             return CGPoint(x: frame.midX, y: frame.midY)
         }
-        element("sentence.token.3").click()
+        app.buttons["sentence.token.3"].click()
 
-        XCTAssertTrue(element("sentence.token.2").isSelected)
-        XCTAssertTrue(element("sentence.token.3").isSelected)
+        XCTAssertTrue(app.buttons["sentence.token.2"].isSelected)
+        XCTAssertTrue(app.buttons["sentence.token.3"].isSelected)
         XCTAssertTrue(app.staticTexts["to fall off"].waitForExistence(timeout: 3))
         for index in 0...3 {
-            let frame = element("sentence.token.\(index)").frame
+            let frame = app.buttons["sentence.token.\(index)"].frame
             XCTAssertEqual(
                 frame.midX,
                 initialTokenCenters[index].x,
@@ -1232,10 +1241,10 @@ final class Lang4SelfUITests: XCTestCase {
             )
         }
 
-        element("sentence.token.0").click()
+        app.buttons["sentence.token.0"].click()
         XCTAssertTrue(waitUntil {
-            self.element("sentence.token.0").isSelected
-                && self.element("sentence.token.1").isSelected
+            self.app.buttons["sentence.token.0"].isSelected
+                && self.app.buttons["sentence.token.1"].isSelected
         })
         XCTAssertTrue(app.staticTexts["leaf"].waitForExistence(timeout: 3))
     }
@@ -1395,6 +1404,13 @@ final class Lang4SelfUITests: XCTestCase {
         app.descendants(matching: .any).matching(identifier: identifier).firstMatch
     }
 
+    private func labeledElement(_ label: String, in root: XCUIElement? = nil) -> XCUIElement {
+        (root ?? app)
+            .descendants(matching: .any)
+            .matching(NSPredicate(format: "label == %@", label))
+            .firstMatch
+    }
+
     private func elementText(_ element: XCUIElement) -> String {
         if let value = element.value as? String, !value.isEmpty { return value }
         return element.label
@@ -1478,7 +1494,8 @@ final class Lang4SelfUITests: XCTestCase {
     }
 
     private func scrollToHittable(_ element: XCUIElement, in scrollView: XCUIElement) {
-        for _ in 0..<4 where !element.isHittable {
+        XCTAssertTrue(element.waitForExistence(timeout: 3), "Could not find \(element)")
+        for _ in 0..<8 where !element.isHittable {
             scrollView.swipeUp()
             waitForUIToSettle()
         }

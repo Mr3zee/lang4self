@@ -14,15 +14,27 @@ struct SentenceReviewView: View {
     @FocusState private var focusedControl: FocusControl?
     let automaticallyFocusContent: Bool
     let forcedTestMode: SentenceTestMode?
+    let focusRequest: Int
+    let selectionRequest: Int
+    let selectionOffset: Int
+    let inspectorFocused: FocusState<Bool>.Binding
 
     private enum FocusControl: Hashable { case style, answer }
 
     init(
         automaticallyFocusContent: Bool,
-        forcedTestMode: SentenceTestMode? = nil
+        forcedTestMode: SentenceTestMode? = nil,
+        focusRequest: Int = 0,
+        selectionRequest: Int = 0,
+        selectionOffset: Int = 0,
+        inspectorFocused: FocusState<Bool>.Binding
     ) {
         self.automaticallyFocusContent = automaticallyFocusContent
         self.forcedTestMode = forcedTestMode
+        self.focusRequest = focusRequest
+        self.selectionRequest = selectionRequest
+        self.selectionOffset = selectionOffset
+        self.inspectorFocused = inspectorFocused
     }
 
     var body: some View {
@@ -59,6 +71,7 @@ struct SentenceReviewView: View {
             }
         }
         .onChange(of: state.sentencePractice.result) { _, _ in
+            inspectorFocused.wrappedValue = false
             updateGermanSpeechTarget()
         }
         .onChange(of: state.sentencePractice.hasStarted) { _, _ in
@@ -72,9 +85,6 @@ struct SentenceReviewView: View {
         .onChange(of: forcedTestMode) { _, _ in
             applyForcedTestMode()
         }
-        .onReceive(NotificationCenter.default.publisher(for: .focusReviewContent)) { _ in
-            focusPrimaryContent()
-        }
         .task(id: automaticListeningItemID) {
             guard isListeningPractice,
                   state.sentencePractice.result == nil,
@@ -83,6 +93,12 @@ struct SentenceReviewView: View {
             await Task.yield()
             guard !Task.isCancelled else { return }
             germanSpeech.speak(item.draft.german)
+        }
+        .task(id: focusRequest) {
+            guard focusRequest > 0 else { return }
+            await Task.yield()
+            guard !Task.isCancelled else { return }
+            focusPrimaryContent()
         }
     }
 
@@ -392,10 +408,20 @@ struct SentenceReviewView: View {
             }
             .font(.headline)
 
-            SentenceInspector(sentence: SentencePresentation(item: item))
+            SentenceInspector(
+                sentence: SentencePresentation(item: item),
+                selectionRequest: selectionRequest,
+                selectionOffset: selectionOffset
+            )
                 .id(item.id)
                 .frame(minHeight: 520)
-                .accessibilityIdentifier("sentences.revealed")
+                .overlay(alignment: .topLeading) {
+                    Color.clear
+                        .frame(width: 1, height: 1)
+                        .accessibilityElement(children: .ignore)
+                        .accessibilityLabel("Answer revealed")
+                        .accessibilityIdentifier("sentences.revealed")
+                }
         }
     }
 
@@ -421,10 +447,13 @@ struct SentenceReviewView: View {
     private func focusPrimaryContent() {
         if state.sentencePractice.result != nil {
             focusedControl = nil
-            NotificationCenter.default.post(name: .focusSentenceInspector, object: nil)
+            inspectorFocused.wrappedValue = false
+            DispatchQueue.main.async { inspectorFocused.wrappedValue = true }
         } else if state.sentencePractice.currentItem != nil {
+            inspectorFocused.wrappedValue = false
             focusedControl = .answer
         } else {
+            inspectorFocused.wrappedValue = false
             focusedControl = .style
         }
     }
@@ -585,6 +614,8 @@ private struct SentenceLookupContext: Hashable {
 private struct SentenceInspector: View {
     @EnvironmentObject private var state: AppState
     let sentence: SentencePresentation
+    let selectionRequest: Int
+    let selectionOffset: Int
 
     @State private var selectedTokenIndex = 0
     @State private var entries: [DictionaryEntry] = []
@@ -639,10 +670,11 @@ private struct SentenceInspector: View {
                         let isSelected = selectedTokenIndices.contains(token.index)
                         Button {
                             selectedTokenIndex = offset
-                            focusedTokenIndex = offset
+                            focusedTokenIndex = nil
+                            DispatchQueue.main.async { focusedTokenIndex = offset }
                         } label: {
                             Text(token.surface)
-                                .font(.title2.weight(isSelected ? .semibold : .regular))
+                                .font(.title2)
                                 .foregroundStyle(tokenGenders[token.index]?.color ?? .primary)
                                 .fixedSize(horizontal: true, vertical: true)
                                 .padding(.horizontal, 7)
@@ -655,8 +687,15 @@ private struct SentenceInspector: View {
                         .buttonStyle(.plain)
                         .focusable()
                         .focused($focusedTokenIndex, equals: offset)
-                        .onMoveCommand(perform: moveSelection)
-                        .accessibilityElement(children: .ignore)
+                        .onKeyPress(.leftArrow) {
+                            moveFocusedToken(.left)
+                            return .handled
+                        }
+                        .onKeyPress(.rightArrow) {
+                            moveFocusedToken(.right)
+                            return .handled
+                        }
+                        .onMoveCommand(perform: moveFocusedToken)
                         .accessibilityLabel("Word \(offset + 1) of \(sentence.tokens.count): \(token.surface)")
                         .accessibilityAddTraits(isSelected ? .isSelected : [])
                         .accessibilityIdentifier("sentence.token.\(offset)")
@@ -732,13 +771,16 @@ private struct SentenceInspector: View {
         .onChange(of: focusedTokenIndex) { _, index in
             if let index { selectedTokenIndex = index }
         }
-        .onReceive(NotificationCenter.default.publisher(for: .focusSentenceInspector)) { _ in
-            selectedTokenIndex = 0
-            focusedTokenIndex = 0
+        .onChange(of: selectionRequest) { _, request in
+            guard request > 0, !sentence.tokens.isEmpty else { return }
+            selectedTokenIndex = min(
+                max(0, selectedTokenIndex + selectionOffset),
+                sentence.tokens.count - 1
+            )
         }
     }
 
-    private func moveSelection(_ direction: MoveCommandDirection) {
+    private func moveFocusedToken(_ direction: MoveCommandDirection) {
         guard !sentence.tokens.isEmpty else { return }
         switch direction {
         case .left, .up:
@@ -750,10 +792,7 @@ private struct SentenceInspector: View {
         }
         focusedTokenIndex = selectedTokenIndex
     }
-}
 
-extension Notification.Name {
-    static let focusSentenceInspector = Notification.Name("focusSentenceInspector")
 }
 
 private struct TokenFlowLayout: Layout {

@@ -162,6 +162,7 @@ struct RootView: View {
         }
 
         if let notification {
+            sidebarFocused = false
             DispatchQueue.main.async {
                 NotificationCenter.default.post(name: notification, object: nil)
             }
