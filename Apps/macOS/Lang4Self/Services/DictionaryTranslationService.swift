@@ -87,7 +87,7 @@ final class UITestingDictionaryTranslator: DictionaryTranslating {
         }
         defer { phaseDidChange?(.idle) }
         phaseDidChange?(.downloadingLanguages)
-        try await Task.sleep(for: .seconds(1))
+        try await Task.sleep(for: .seconds(3))
         phaseDidChange?(.translating)
         return translation
     }

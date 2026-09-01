@@ -341,9 +341,7 @@ final class Lang4SelfUITests: XCTestCase {
         app.typeText(german)
         XCTAssertTrue(element("dictionary.translation-download").waitForExistence(timeout: 3))
         XCTAssertTrue(app.staticTexts["Downloading German–English translation…"].exists)
-        XCTAssertTrue(
-            app.staticTexts["Search will continue automatically when Apple’s language files are ready."].exists
-        )
+        XCTAssertTrue(element("dictionary.translation-download.detail").exists)
         XCTAssertTrue(element("entry.translation-result").waitForExistence(timeout: 3))
         XCTAssertTrue(element("entry.detail").staticTexts[english].exists)
         XCTAssertTrue(app.staticTexts["Source: Apple Translation"].exists)

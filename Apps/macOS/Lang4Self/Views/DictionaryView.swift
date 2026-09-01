@@ -243,6 +243,11 @@ struct DictionaryView: View {
         } else if state.isSearchingDictionary {
             VStack(spacing: 12) {
                 ProgressView()
+                    .accessibilityIdentifier(
+                        state.dictionaryTranslationPhase == .downloadingLanguages
+                            ? "dictionary.translation-download"
+                            : "dictionary.searching"
+                    )
                 Text(searchActivityTitle)
                     .foregroundStyle(.secondary)
                 if state.dictionaryTranslationPhase == .downloadingLanguages {
@@ -250,14 +255,10 @@ struct DictionaryView: View {
                         .font(.caption)
                         .foregroundStyle(.tertiary)
                         .multilineTextAlignment(.center)
+                        .accessibilityIdentifier("dictionary.translation-download.detail")
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .accessibilityIdentifier(
-                state.dictionaryTranslationPhase == .downloadingLanguages
-                    ? "dictionary.translation-download"
-                    : "dictionary.searching"
-            )
         } else if let entry = state.selectedEntry, !state.searchResults.isEmpty {
             HSplitView {
                 List(state.searchResults, selection: $state.selectedEntry) { result in
