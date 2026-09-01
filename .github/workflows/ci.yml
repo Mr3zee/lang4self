@@ -25,28 +25,52 @@ jobs:
       - name: Check for private dictionary data
         run: ./scripts/check-public-data.sh
       - name: Run Swift tests
-        run: swift test
+        run: swift test --parallel
 
   ui-tests:
-    name: macOS UI tests
+    name: macOS UI tests (${{ matrix.shard_name }})
     runs-on: macos-26
-    timeout-minutes: 30
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard_index: 0
+            shard_name: 1-of-4
+          - shard_index: 1
+            shard_name: 2-of-4
+          - shard_index: 2
+            shard_name: 3-of-4
+          - shard_index: 3
+            shard_name: 4-of-4
+    env:
+      UI_TEST_SHARD_COUNT: 4
+      UI_TEST_SHARD_INDEX: ${{ matrix.shard_index }}
     steps:
       - uses: actions/checkout@v5
       - name: Run UI tests
         run: |
+          test_arguments=()
+          test_index=0
+          while IFS= read -r test_name; do
+            if ((test_index % UI_TEST_SHARD_COUNT == UI_TEST_SHARD_INDEX)); then
+              test_arguments+=("-only-testing:Lang4SelfUITests/Lang4SelfUITests/${test_name}")
+            fi
+            ((test_index += 1))
+          done < <(sed -nE 's/^[[:space:]]+func (test[^ (]+)\(.*/\1/p' Tests/Lang4SelfUITests/Lang4SelfUITests.swift)
+
           xcodebuild -quiet \
             -project Lang4Self.xcodeproj \
             -scheme Lang4Self \
-            -destination 'platform=macOS' \
+            -destination 'platform=macOS,arch=arm64' \
             -skipPackagePluginValidation \
-            -resultBundlePath TestResults.xcresult \
-            -only-testing:Lang4SelfUITests \
+            -resultBundlePath "TestResults-${{ matrix.shard_name }}.xcresult" \
+            "${test_arguments[@]}" \
             test
       - name: Upload test results
         if: failure()
         uses: actions/upload-artifact@v6
         with:
-          name: macOS-ui-test-results
-          path: TestResults.xcresult
+          name: macOS-ui-test-results-${{ matrix.shard_name }}
+          path: TestResults-${{ matrix.shard_name }}.xcresult
           retention-days: 7
